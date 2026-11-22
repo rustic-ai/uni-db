@@ -808,7 +808,7 @@ MATCH (n:Person) WHERE created_at(n) > datetime("2026-05-01") RETURN n
 MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 ```
 
-The bulk loader can supply explicit per-row values; otherwise the engine assigns timestamps at insertion time.
+The bulk loader can supply explicit per-row values; otherwise the engine assigns timestamps at insertion time. Both are kept on declared and schemaless labels and edge types, before and after a flush, and `updated_at` is never earlier than `created_at`.
 
 ### Type Conversion Functions
 
@@ -2055,6 +2055,8 @@ CREATE LABEL Author (
 )
 ```
 
+A `DEFAULT` is stored when an insert does not name the property: Cypher `CREATE` and `MERGE`, bulk loads and `COPY FROM` alike, on labels and edge types. It is evaluated once, when the DDL runs, and must be a constant expression: literals, lists, maps, operators and functions of constants (`DEFAULT date('2020-01-01')`, `DEFAULT 3 + 4`). Variables, parameters, property reads, aggregates and functions without a fixed result (`rand()`, `timestamp()`, `datetime()`) are refused, as is a value the declared type cannot hold. An explicit `NULL` in a write is kept as NULL (a `NOT NULL` property then refuses it). Rows that exist before the default is declared are not backfilled: `ALTER LABEL ... ADD PROPERTY p T DEFAULT v` fills `p` for new rows only.
+
 #### Parameterized container types
 
 Property types can be parameterized, including nested forms:
@@ -2106,9 +2108,11 @@ ALTER LABEL Paper RENAME PROPERTY old_name TO new_name
 // Drop a label (must have no vertices)
 DROP LABEL TempLabel
 
-// Drop an edge type
+// Drop an edge type (must have no edges)
 DROP EDGE TYPE OLD_RELATIONSHIP
 ```
+
+A drop is refused while data carries the label or edge type, counting unflushed writes and the current transaction's own. The error names it and the count, for example `Cannot drop label 'TempLabel': 3 vertices still carry it; remove the label from them or delete them first`. `uni.schema.dropLabel` and `uni.schema.dropEdgeType` refuse the same way.
 
 ---
 

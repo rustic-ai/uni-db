@@ -437,9 +437,15 @@ ALTER LABEL Person RENAME PROPERTY name TO full_name
 // Add edge property
 ALTER EDGE TYPE KNOWS ADD PROPERTY since DATE
 
-// Drop label / edge type (soft-delete)
+// Drop label / edge type (soft-delete). Refused while data carries it:
+// "Cannot drop label 'TempData': 3 vertices still carry it; ..."
 DROP LABEL IF EXISTS TempData
 DROP EDGE TYPE IF EXISTS OLD_RELATION
+
+// Property defaults: a constant, applied to new rows that omit the property
+// (CREATE, MERGE, bulk). An explicit NULL stays NULL; no backfill.
+CREATE LABEL Item (name STRING, qty INT DEFAULT 1, born DATE DEFAULT date('2020-01-01'))
+ALTER LABEL Item ADD PROPERTY color STRING DEFAULT 'red'
 
 // Add / drop indexes
 CREATE INDEX idx_name FOR (p:Person) ON (p.name)

@@ -696,7 +696,7 @@ impl BulkWriter {
         label: &str,
         vertices: impl IntoArrow,
     ) -> Result<Vec<Vid>> {
-        let vertices = vertices.into_property_maps()?;
+        let mut vertices = vertices.into_property_maps()?;
         let schema = self.backend.schema.schema();
         // Validate label exists in schema
         schema
@@ -705,6 +705,13 @@ impl BulkWriter {
             .ok_or_else(|| UniError::LabelNotFound {
                 label: label.to_string(),
             })?;
+        // DDL `DEFAULT`s for properties a row does not name, before the
+        // NOT NULL check, as on every other insert path.
+        if schema.has_property_defaults([label]) {
+            for props in vertices.iter_mut() {
+                schema.apply_property_defaults([label], props);
+            }
+        }
 
         // An empty insert is a no-op, and must not mark the label touched.
         // `flush_vertices_buffer` never creates `vertices_<label>` for an empty
@@ -1253,9 +1260,14 @@ impl BulkWriter {
     pub async fn insert_edges(
         &mut self,
         edge_type: &str,
-        edges: Vec<EdgeData>,
+        mut edges: Vec<EdgeData>,
     ) -> Result<Vec<Eid>> {
         let schema = self.backend.schema.schema();
+        if schema.has_property_defaults([edge_type]) {
+            for edge in edges.iter_mut() {
+                schema.apply_property_defaults([edge_type], &mut edge.properties);
+            }
+        }
         // Validate the edge type exists, but its id is no longer needed:
         // `allocate_eids` does not partition by type.
         let meta = schema

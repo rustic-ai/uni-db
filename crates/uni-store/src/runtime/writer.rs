@@ -4204,6 +4204,14 @@ impl Writer {
         // taken before this write stay isolated from it.
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await;
 
+        // A created row gets the DDL `DEFAULT` of each property it does not
+        // name, before the NOT NULL check and the embedding of its sources.
+        if create {
+            self.schema_manager
+                .schema()
+                .apply_property_defaults(labels.iter().map(String::as_str), &mut properties);
+        }
+
         if !self.try_defer_embedding(labels, &properties, vid, tx_l0) {
             self.process_embeddings_for_labels(labels, &mut properties)
                 .await?;
@@ -4442,6 +4450,16 @@ impl Writer {
             // freeze the pinned generation aside before merging so snapshot
             // readers stay isolated. No-op when unpinned or transactional.
             self.freeze_for_non_tx_write_if_pinned(tx_l0).await;
+
+            // DDL `DEFAULT`s for properties a row does not name.
+            {
+                let schema = self.schema_manager.schema();
+                if schema.has_property_defaults(labels.iter().map(String::as_str)) {
+                    for props in properties_batch.iter_mut() {
+                        schema.apply_property_defaults(labels.iter().map(String::as_str), props);
+                    }
+                }
+            }
 
             // Batch embedding generation (1 API call per config)
             self.process_embeddings_for_batch(&labels, &mut properties_batch)
@@ -5186,6 +5204,12 @@ impl Writer {
         self.check_write_pressure(tx_l0).await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
+        // A created edge gets its type's DDL `DEFAULT`s for absent properties.
+        if create && let Some(type_name) = edge_type_name.as_deref() {
+            self.schema_manager
+                .schema()
+                .apply_property_defaults([type_name], &mut properties);
+        }
         self.prepare_edge_upsert(eid, &mut properties, tx_l0)
             .await?;
 
@@ -7568,14 +7592,18 @@ impl Writer {
                     for (vid, _labels, props, deleted, _version) in &vertices {
                         if *deleted {
                             removed.insert(*vid);
-                        } else if let Some(uni_common::Value::SparseVector { indices, values }) =
-                            props.get(&cfg.property)
+                        } else if let Some((indices, values)) =
+                            props.get(&cfg.property).and_then(Value::sparse_parts)
                         {
-                            let pairs: Vec<(u32, f32)> = indices
-                                .iter()
-                                .copied()
-                                .zip(values.iter().copied())
-                                .collect();
+                            // The native value or its `{indices, values}` map form,
+                            // canonicalized (sorted, duplicates summed) as at write.
+                            let pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
+                            let pairs = match sparse_pairs_to_value(&pairs) {
+                                Value::SparseVector { indices, values } => {
+                                    indices.into_iter().zip(values).collect()
+                                }
+                                _ => pairs,
+                            };
                             added.insert(*vid, pairs);
                             // An in-place SET re-flushes an already-indexed vid. The
                             // sparse postings are a `Vec` with no per-vid dedup, so unless

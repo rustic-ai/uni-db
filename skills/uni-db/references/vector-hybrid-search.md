@@ -112,7 +112,7 @@ Sparse vectors (SPLADE / learned-sparse, BM25-style term weights) are stored as 
 |---|---|---|
 | `DataType::SparseVector { dimensions }` | `sparse_vector(N)` | `dimensions` = term-space cardinality (max term id + 1) |
 
-Write values as a native sparse vector parameter: Python `uni_db.SparseVector(indices, values)`, e.g. `tx.execute("CREATE (:Document {sparse_embedding: $sv})", {"sv": uni_db.SparseVector([3, 17], [0.5, 0.5])})`.
+Write values as a `{indices: [...], values: [...]}` map literal (`CREATE (:Document {sparse_embedding: {indices: [3, 17], values: [0.5, 0.5]}})`) or a native sparse vector parameter: Python `uni_db.SparseVector(indices, values)`, e.g. `tx.execute("CREATE (:Document {sparse_embedding: $sv})", {"sv": uni_db.SparseVector([3, 17], [0.5, 0.5])})`. Both are stored as the same canonical sparse vector (ids sorted, repeated ids summed); a map of any other shape is a `TypeError`.
 
 ### Sparse Index DDL
 

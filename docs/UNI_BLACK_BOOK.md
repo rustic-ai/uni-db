@@ -1147,6 +1147,10 @@ DROP LABEL IF EXISTS TempData
 DROP EDGE TYPE IF EXISTS OLD_RELATION
 ```
 
+`DROP LABEL` / `DROP EDGE TYPE` (and `uni.schema.dropLabel` / `uni.schema.dropEdgeType`) are refused while data carries the label or edge type: `Executor::refuse_drop_while_populated` counts it with a `MATCH ... RETURN count(...)` in the statement's own view, so unflushed writes and the current transaction's count. The error names it and the count (`Cannot drop label 'TempData': 3 vertices still carry it; remove the label from them or delete them first`).
+
+A property's `DEFAULT` (`CREATE LABEL Item (qty INT DEFAULT 1)`, edge types and `ALTER ... ADD PROPERTY` alike) is evaluated once at DDL time and must be a constant expression; it is coerced to the declared type and stored on `PropertyMeta::default` (persisted through the value codec, base64, so typed values round-trip). `Schema::apply_property_defaults` fills it into every created row that does not name the property — the Cypher CREATE/MERGE pattern, `Writer::write_vertex_row` / `write_edge_row` on create, `insert_vertices_batch` and the bulk writer — before the NOT NULL check. An explicit `NULL` is kept; existing rows are not backfilled.
+
 ### Python API
 
 ```python
@@ -3605,6 +3609,8 @@ through the projection as a passthrough column. Pinned by
 - `created_at` is set when the row is first inserted and never changes afterward.
 - `updated_at` is set at creation and bumped on every subsequent write that touches the row — including label changes, property updates, and same-value `SET`s. Idempotent `MERGE ... ON MATCH SET` will keep advancing it.
 - Both columns are visible inside the writing transaction (uncommitted writes see their own timestamps).
+- A row keeps its transaction's `created_at` at commit: `L0Buffer::merge_validated` takes the earliest `created_at` and never lets `updated_at` fall below it.
+- Declared and schemaless entities alike: the schemaless vertex scan reads the main table's `_created_at` / `_updated_at` columns with the L0 overlay, and both traversals read flushed edge stamps from the main edges table (`MainEdgeDataset::find_timestamps_by_eids_counted`: earliest `created_at` over the edge's rows, the newest row's `updated_at`) overlaid by L0.
 - Read-only: there is no Cypher syntax to overwrite these values. The bulk loader can supply explicit per-row values via its API.
 
 ```cypher
@@ -5106,10 +5112,15 @@ db.schema()
 A sparse-vector value is a `{indices, values}` map: `indices` is the list of non-zero term ids, `values` the parallel list of their weights. The two lists must be the same length; `indices` are term ids in `[0, N)`.
 
 ```cypher
-// Write a 3-term sparse vector passed as a SparseVector parameter
+// Write a 3-term sparse vector as a map literal
+CREATE (:Doc {emb: {indices: [12, 884, 9001], values: [0.71, 0.33, 1.20]}})
+
+// ... or passed as a SparseVector parameter
 // (Python: uni_db.SparseVector([12, 884, 9001], [0.71, 0.33, 1.20]))
 CREATE (:Doc {emb: $emb})
 ```
+
+A map written to a declared sparse-vector property is converted at write (`Executor::coerce_to_declared_type`) to a native `Value::SparseVector` and canonicalized like a parameter: term ids sorted, the weights of a repeated id summed, the term space and finiteness checked. A map of any other shape is a `TypeError`. The sparse index's posting collector at flush and the exact L0 re-score in `sparse_rerank` read both forms through `Value::sparse_parts`, for a map that reached storage before the conversion existed.
 
 The same `{indices, values}` shape is accepted as the query value for `uni.sparse.query` (a native sparse vector is also accepted directly).
 

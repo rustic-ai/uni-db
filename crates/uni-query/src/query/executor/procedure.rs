@@ -958,9 +958,19 @@ impl Executor {
                     .await?;
                 let success = match name {
                     "uni.schema.dropLabel" => {
+                        self.refuse_drop_while_populated(
+                            &target,
+                            uni_store::storage::declared_values::DeclaredEntity::Label,
+                        )
+                        .await?;
                         super::ddl_procedures::drop_label(&self.storage, &target).await?
                     }
                     "uni.schema.dropEdgeType" => {
+                        self.refuse_drop_while_populated(
+                            &target,
+                            uni_store::storage::declared_values::DeclaredEntity::EdgeType,
+                        )
+                        .await?;
                         super::ddl_procedures::drop_edge_type(&self.storage, &target).await?
                     }
                     "uni.schema.dropIndex" => {

@@ -840,6 +840,52 @@ pub struct PropertyMeta {
     pub generation_expression: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The value an insert stores when it does not name the property (DDL
+    /// `DEFAULT`), already in the property's declared form. Evaluated once,
+    /// when declared; rows written before it are not backfilled. An explicit
+    /// `NULL` in a write is kept as NULL.
+    ///
+    /// Persisted through the value codec (base64), since untagged serde
+    /// would not round-trip temporal or vector values.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "property_default_serde"
+    )]
+    pub default: Option<crate::value::Value>,
+}
+
+/// Serde for [`PropertyMeta::default`]: the value-codec encoding, as base64.
+mod property_default_serde {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<crate::value::Value>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(v) => serializer.serialize_some(
+                &base64::engine::general_purpose::STANDARD
+                    .encode(crate::cypher_value_codec::encode(v)),
+            ),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<crate::value::Value>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(D::Error::custom)?;
+        crate::cypher_value_codec::decode(&bytes)
+            .map(Some)
+            .map_err(D::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1153,6 +1199,45 @@ impl Default for Schema {
 }
 
 impl Schema {
+    /// Fill `props` with the DDL `DEFAULT` of every active property one of
+    /// `entities` (labels or edge types) declares and `props` does not name.
+    ///
+    /// Only an absent key is filled: an explicit `Value::Null` is kept, so a
+    /// write can still store NULL in a defaulted property. Defaults are
+    /// stored in their declared form, so the filled values need no further
+    /// coercion. Returns whether anything was filled.
+    pub fn apply_property_defaults<'a>(
+        &self,
+        entities: impl IntoIterator<Item = &'a str>,
+        props: &mut HashMap<String, crate::value::Value>,
+    ) -> bool {
+        let mut filled = false;
+        for entity in entities {
+            let Some(declared) = self.properties.get(entity) else {
+                continue;
+            };
+            for (name, meta) in declared {
+                if let Some(default) = &meta.default
+                    && matches!(meta.state, SchemaElementState::Active)
+                    && !props.contains_key(name)
+                {
+                    props.insert(name.clone(), default.clone());
+                    filled = true;
+                }
+            }
+        }
+        filled
+    }
+
+    /// Whether any property of `entities` declares a DDL `DEFAULT`.
+    pub fn has_property_defaults<'a>(&self, entities: impl IntoIterator<Item = &'a str>) -> bool {
+        entities.into_iter().any(|entity| {
+            self.properties
+                .get(entity)
+                .is_some_and(|props| props.values().any(|m| m.default.is_some()))
+        })
+    }
+
     /// Bumps `schema_version` to invalidate cached query plans.
     ///
     /// Called at the end of every DDL mutation that changes the schema's
@@ -1908,6 +1993,7 @@ impl SchemaManager {
                         state: SchemaElementState::Active,
                         generation_expression: None,
                         description: None,
+                        default: None,
                     },
                 );
             }
@@ -2316,6 +2402,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description,
+                default: None,
             },
         );
         // Bump after stamping `added_in` with the pre-bump `version`.
@@ -2383,6 +2470,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description,
+                default: None,
             },
         );
         // Bump after stamping `added_in` with the pre-bump `version`.
@@ -2436,6 +2524,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description: None,
+                default: None,
             },
         );
         schema.bump_version();
@@ -2473,6 +2562,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: Some(expr),
                 description: None,
+                default: None,
             },
         );
         // Bump after stamping `added_in` with the pre-bump `version`.
@@ -2518,6 +2608,28 @@ impl SchemaManager {
             .get_mut(prop_name)
             .ok_or_else(|| anyhow!("Property '{}' does not exist on '{}'", prop_name, entity))?;
         meta.description = description;
+        Ok(())
+    }
+
+    /// Set (or clear) the DDL `DEFAULT` of a declared property. `default`
+    /// must already be in the property's declared form.
+    pub fn set_property_default(
+        &self,
+        entity: &str,
+        prop_name: &str,
+        default: Option<crate::value::Value>,
+    ) -> Result<()> {
+        let mut guard = acquire_write(&self.schema, "schema")?;
+        let schema = Arc::make_mut(&mut *guard);
+        let props = schema
+            .properties
+            .get_mut(entity)
+            .ok_or_else(|| anyhow!("Entity '{}' does not exist", entity))?;
+        let meta = props
+            .get_mut(prop_name)
+            .ok_or_else(|| anyhow!("Property '{}' does not exist on '{}'", prop_name, entity))?;
+        meta.default = default;
+        schema.bump_version();
         Ok(())
     }
 
@@ -2976,6 +3088,78 @@ mod tests {
         );
     }
 
+    /// A property default round-trips through the catalog JSON exactly,
+    /// typed values included, and a catalog written before defaults existed
+    /// still loads (with none).
+    #[test]
+    fn property_default_round_trips_and_is_optional() {
+        use crate::value::{TemporalValue, Value};
+        for default in [
+            Value::Int(7),
+            Value::Float(2.0),
+            Value::String("x".into()),
+            Value::Temporal(TemporalValue::Date {
+                days_since_epoch: 18_263,
+            }),
+            Value::List(vec![Value::String("a".into())]),
+        ] {
+            let meta = PropertyMeta {
+                r#type: DataType::String,
+                nullable: true,
+                added_in: 1,
+                state: SchemaElementState::Active,
+                generation_expression: None,
+                description: None,
+                default: Some(default.clone()),
+            };
+            let json = serde_json::to_string(&meta).unwrap();
+            let back: PropertyMeta = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.default, Some(default));
+        }
+        // A catalog written before defaults: the same JSON without the key.
+        let mut old: serde_json::Value = serde_json::to_value(PropertyMeta {
+            r#type: DataType::String,
+            nullable: true,
+            added_in: 1,
+            state: SchemaElementState::Active,
+            generation_expression: None,
+            description: None,
+            default: None,
+        })
+        .unwrap();
+        assert!(old.get("default").is_none());
+        old.as_object_mut().unwrap().remove("default");
+        let meta: PropertyMeta = serde_json::from_value(old).unwrap();
+        assert_eq!(meta.default, None);
+    }
+
+    /// `apply_property_defaults` fills only absent keys: an explicit NULL stays.
+    #[test]
+    fn apply_property_defaults_keeps_explicit_null() {
+        use crate::value::Value;
+        let mut schema = Schema::default();
+        let mut props = HashMap::new();
+        props.insert(
+            "q".to_string(),
+            PropertyMeta {
+                r#type: DataType::Int64,
+                nullable: true,
+                added_in: 1,
+                state: SchemaElementState::Active,
+                generation_expression: None,
+                description: None,
+                default: Some(Value::Int(1)),
+            },
+        );
+        schema.properties.insert("L".to_string(), props);
+        let mut absent = HashMap::new();
+        assert!(schema.apply_property_defaults(["L"], &mut absent));
+        assert_eq!(absent.get("q"), Some(&Value::Int(1)));
+        let mut null = HashMap::from([("q".to_string(), Value::Null)]);
+        assert!(!schema.apply_property_defaults(["L"], &mut null));
+        assert_eq!(null.get("q"), Some(&Value::Null));
+    }
+
     /// A declaration types a property only on the labels in scope. `F` and
     /// `G` declare `v` as `Float64`, `H` as `Int64`; `S` declares nothing.
     #[test]
@@ -2987,6 +3171,7 @@ mod tests {
             state: SchemaElementState::Active,
             generation_expression: None,
             description: None,
+            default: None,
         };
         let mut schema = Schema::default();
         for (label, t) in [

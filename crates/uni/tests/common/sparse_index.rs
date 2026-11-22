@@ -1222,3 +1222,83 @@ async fn idf_reaches_the_exact_rescore() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A sparse vector written as a `{indices, values}` map literal is stored as a
+/// native `SparseVector` (canonicalized), and `uni.sparse.query` and the
+/// sparse arm of `uni.search` find it, unflushed and flushed alike. Unsorted
+/// term ids in the literal are sorted, as a parameter's are.
+async fn map_literal_sparse_is_found(flush: bool) -> anyhow::Result<()> {
+    let db = Uni::temporary().build().await?;
+    define_schema(&db).await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Doc {title: 'lit', emb: {indices: [9, 1, 5], values: [3.0, 1.0, 2]}})")
+        .await?;
+    tx.execute("CREATE (:Doc {title: 'other', emb: {indices: [500], values: [1.0]}})")
+        .await?;
+    tx.commit().await?;
+    if flush {
+        db.flush().await?;
+    }
+
+    let rows = db
+        .session()
+        .query("MATCH (d:Doc {title: 'lit'}) RETURN d.emb AS emb")
+        .await?;
+    match rows.rows()[0].value("emb") {
+        Some(Value::SparseVector { indices, values }) => {
+            assert_eq!(indices, &vec![1u32, 5, 9]);
+            assert_eq!(values, &vec![1.0f32, 2.0, 3.0]);
+        }
+        other => panic!("expected a SparseVector, got {other:?}"),
+    }
+
+    let results = query_results(&db, 10).await?;
+    assert_eq!(
+        results.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+        vec!["lit"],
+        "a map-literal sparse vector must be found by uni.sparse.query (flush={flush})"
+    );
+    // query_vec = {1:1, 5:2, 9:3, ...} → 1*1 + 2*2 + 3*3.
+    assert!((results[0].1 - 14.0).abs() < 1e-3, "{results:?}");
+
+    let literal_query = db
+        .session()
+        .query(
+            "CALL uni.sparse.query('Doc', 'emb', {indices: [9], values: [1.0]}, 5, null, null, {}) \
+             YIELD node RETURN node.title AS title",
+        )
+        .await?;
+    assert_eq!(literal_query.len(), 1);
+    assert_eq!(literal_query.rows()[0].get::<String>("title")?, "lit");
+    Ok(())
+}
+
+#[tokio::test]
+async fn sparse_map_literal_is_found_unflushed() -> anyhow::Result<()> {
+    map_literal_sparse_is_found(false).await
+}
+
+#[tokio::test]
+async fn sparse_map_literal_is_found_flushed() -> anyhow::Result<()> {
+    map_literal_sparse_is_found(true).await
+}
+
+/// A map literal that is not a valid sparse vector is a type error at write,
+/// as a malformed `SparseVector` parameter is.
+#[tokio::test]
+async fn sparse_malformed_map_literal_is_rejected() -> anyhow::Result<()> {
+    let db = Uni::temporary().build().await?;
+    define_schema(&db).await?;
+    for bad in [
+        "{indices: [1, 2], values: [1.0]}",
+        "{indices: [1], weights: [1.0]}",
+        "{indices: ['a'], values: [1.0]}",
+    ] {
+        let tx = db.session().tx().await?;
+        let res = tx
+            .execute(&format!("CREATE (:Doc {{title: 'bad', emb: {bad}}})"))
+            .await;
+        assert!(res.is_err(), "{bad} must be rejected");
+    }
+    Ok(())
+}

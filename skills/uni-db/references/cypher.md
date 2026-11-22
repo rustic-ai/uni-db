@@ -489,6 +489,8 @@ ALTER LABEL Person RENAME PROPERTY name TO full_name
 DROP LABEL IF EXISTS Person
 ```
 
+A property may carry a constant `DEFAULT` (`CREATE LABEL Item (qty INT DEFAULT 1)`), stored when an insert omits the property; an explicit `NULL` stays NULL and existing rows are not backfilled. `DROP LABEL` / `DROP EDGE TYPE` are refused while data carries them; the error names the count.
+
 ### Edge Types
 
 ```cypher

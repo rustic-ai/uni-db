@@ -103,7 +103,7 @@ fn check_format(format: &str, direction: &str) -> Result<()> {
 }
 
 /// Backtick-quote a name for embedding in a Cypher statement.
-fn quote_identifier(name: &str) -> String {
+pub(super) fn quote_identifier(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 

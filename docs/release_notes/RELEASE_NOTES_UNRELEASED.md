@@ -16,6 +16,10 @@ Add new changes here.
 - **Schema:** `SHOW INDEXES` and `uni.schema.indexes()` name inverted, JSON full-text and sparse indexes; `uni.schema.constraints()` fills `target`; `DROP INDEX IF EXISTS` on a missing index succeeds.
 - **Schema:** `uni.schema.createLabel` requires `VECTOR(N)` with N > 0, and a vector index over a property without a dimension is refused. An existing vector index stored with dimension 0 fails to rebuild until its property is declared with a dimension.
 - **Algorithms:** the id outputs of `bridges`, `articulationPoints`, `mst`, `maxMatching` and `dijkstra` are declared INTEGER, which is what they return.
+- **Schema:** DDL `DEFAULT` applies to new rows (CREATE, MERGE, bulk, COPY, edges, `ALTER ... ADD PROPERTY`). It must be a constant and is stored in the declared type. An explicit `NULL` is kept, and existing rows are not backfilled.
+- **Schema:** `DROP LABEL` / `DROP EDGE TYPE` and `uni.schema.dropLabel` / `dropEdgeType` are refused while data still carries the label or type; the error gives the count.
+- **Sparse vectors:** a `{indices, values}` map literal is stored canonically (ids sorted, repeated ids summed) and found by `uni.sparse.query` and `uni.search`; a malformed map is a TypeError.
+- **Timestamps:** `updated_at()` is no longer earlier than `created_at()` on insert, and both work on schemaless labels and on edges after a flush.
 - **OGM:** a `Vector[N] | None` field is a nullable vector column, so saving a node without a vector no longer fails with "cannot be null".
 - **OGM:** `SparseVector[N]` fields are saved as `uni_db.SparseVector`; a `TypeMappingError` is raised if the bindings lack that class.
 - **OGM:** `tx.create_edge` accepts nodes added to the same transaction (sync and async). A failed commit clears the vid, session and identity-map entry of the nodes it had created.

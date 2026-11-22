@@ -1852,20 +1852,28 @@ impl L0Buffer {
 
         // Edge types are now merged inside insert_edge, so no separate loop needed
 
-        // Merge timestamps - preserve semantics of or_insert (keep oldest created_at)
-        // and insert (use latest updated_at)
+        // Merge timestamps. The re-inserts above stamped every merged row with
+        // the commit's own clock, which for a row new to `self` made
+        // `created_at` the commit time and later than the transaction's
+        // `updated_at`. Keep the earliest `created_at` (the row's, or the
+        // transaction's write), take the transaction's `updated_at`, and never
+        // let `updated_at` fall below `created_at`.
         for (vid, ts) in &other.vertex_created_at {
-            self.vertex_created_at.entry(*vid).or_insert(*ts); // keep oldest
+            let created = self.vertex_created_at.entry(*vid).or_insert(*ts);
+            *created = (*created).min(*ts);
         }
         for (vid, ts) in &other.vertex_updated_at {
-            self.vertex_updated_at.insert(*vid, *ts); // use latest (tx wins)
+            let created = self.vertex_created_at.get(vid).copied().unwrap_or(*ts);
+            self.vertex_updated_at.insert(*vid, (*ts).max(created));
         }
 
         for (eid, ts) in &other.edge_created_at {
-            self.edge_created_at.entry(*eid).or_insert(*ts); // keep oldest
+            let created = self.edge_created_at.entry(*eid).or_insert(*ts);
+            *created = (*created).min(*ts);
         }
         for (eid, ts) in &other.edge_updated_at {
-            self.edge_updated_at.insert(*eid, *ts); // use latest (tx wins)
+            let created = self.edge_created_at.get(eid).copied().unwrap_or(*ts);
+            self.edge_updated_at.insert(*eid, (*ts).max(created));
         }
 
         // Conservatively add other's estimated size (may overcount due to

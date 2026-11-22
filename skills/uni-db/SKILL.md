@@ -417,7 +417,7 @@ RETURN n, updated_at(n) AS last_modified
 
 MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 ```
-`updated_at` bumps on any write that touches the row — including idempotent MERGE / same-value SET.
+`updated_at` bumps on any write that touches the row — including idempotent MERGE / same-value SET. Both work on schemaless labels and edge types, before and after a flush; `updated_at >= created_at` always.
 
 ---
 

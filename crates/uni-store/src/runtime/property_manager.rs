@@ -816,6 +816,28 @@ impl PropertyManager {
         Ok(served)
     }
 
+    /// The flushed `(created_at, updated_at)` of each edge in `eids`, in
+    /// nanoseconds since the epoch, under `ctx`'s visibility. L0 is not read:
+    /// the caller overlays it. See
+    /// [`MainEdgeDataset::find_timestamps_by_eids_counted`](crate::storage::main_edge::MainEdgeDataset::find_timestamps_by_eids_counted).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage scan fails.
+    pub async fn get_batch_edge_stored_timestamps(
+        &self,
+        eids: &[uni_common::core::id::Eid],
+        ctx: Option<&QueryContext>,
+    ) -> Result<HashMap<uni_common::core::id::Eid, (Option<i64>, Option<i64>)>> {
+        crate::storage::main_edge::MainEdgeDataset::find_timestamps_by_eids_counted(
+            self.storage.backend(),
+            eids,
+            self.l1_visibility(ctx),
+            counters_of(ctx),
+        )
+        .await
+    }
+
     /// Load properties as Arrow columns for vectorized processing
     /// Batch load properties for multiple edges
     /// Batch-load edge properties.

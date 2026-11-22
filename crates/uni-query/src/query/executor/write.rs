@@ -857,12 +857,88 @@ impl Executor {
             .collect()
     }
 
+    /// Each property's DDL `DEFAULT`, evaluated once as a constant and
+    /// coerced to the declared type, so it is stored in the declared form.
+    /// `None` for a property without one (or with `DEFAULT NULL`).
+    ///
+    /// # Errors
+    /// Refuses a DEFAULT that is not a constant expression (variables,
+    /// parameters, property reads, subqueries, aggregates, or a function
+    /// whose result is not fixed, such as `rand()` or `datetime()`), one
+    /// that fails to evaluate, and one the declared type cannot hold.
+    pub(crate) async fn evaluate_property_defaults(
+        &self,
+        entity: &str,
+        properties: &[uni_cypher::ast::PropertyDefinition],
+        types: &[DataType],
+    ) -> Result<Vec<Option<Value>>> {
+        let mut defaults = Vec::with_capacity(properties.len());
+        for (prop, dt) in properties.iter().zip(types) {
+            let Some(expr) = &prop.default else {
+                defaults.push(None);
+                continue;
+            };
+            defaults.push(
+                self.evaluate_property_default(entity, &prop.name, expr, dt)
+                    .await?,
+            );
+        }
+        Ok(defaults)
+    }
+
+    /// One property's DDL `DEFAULT`; see [`Self::evaluate_property_defaults`].
+    async fn evaluate_property_default(
+        &self,
+        entity: &str,
+        prop_name: &str,
+        expr: &Expr,
+        dt: &DataType,
+    ) -> Result<Option<Value>> {
+        if !is_constant_default(expr) {
+            return Err(anyhow!(
+                "DEFAULT for property '{}.{}' must be a constant expression (literals, \
+                 operators and deterministic functions of constants), got: {}",
+                entity,
+                prop_name,
+                expr.to_string_repr()
+            ));
+        }
+        let prop_manager =
+            PropertyManager::new(self.storage.clone(), self.storage.schema_manager_arc(), 0);
+        let value = self
+            .evaluate_expr(expr, &HashMap::new(), &prop_manager, &HashMap::new(), None)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "DEFAULT for property '{}.{}' could not be evaluated: {}",
+                    entity,
+                    prop_name,
+                    e
+                )
+            })?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let value = Self::coerce_to_declared_type(prop_name, dt, value).map_err(|e| {
+            anyhow!(
+                "DEFAULT for property '{}.{}' does not fit its type: {}",
+                entity,
+                prop_name,
+                e
+            )
+        })?;
+        Ok(Some(value))
+    }
+
     pub(crate) async fn execute_create_label(&self, clause: CreateLabel) -> Result<()> {
         let sm = self.storage.schema_manager_arc();
         if clause.if_not_exists && sm.schema().labels.contains_key(&clause.name) {
             return Ok(());
         }
         let types = Self::prevalidate_property_definitions(&clause.properties)?;
+        let defaults = self
+            .evaluate_property_defaults(&clause.name, &clause.properties, &types)
+            .await?;
         let is_new = !sm.schema().labels.contains_key(&clause.name);
         // Existing schemaless values must fit the declared types, or the
         // backfill would store them as NULL; refused before anything changes.
@@ -903,8 +979,17 @@ impl Executor {
             );
         }
         sm.add_label_with_desc(&clause.name, clause.description)?;
-        for ((prop, dt), nullable) in clause.properties.into_iter().zip(types).zip(nullability) {
+        for (((prop, dt), nullable), default) in clause
+            .properties
+            .into_iter()
+            .zip(types)
+            .zip(nullability)
+            .zip(defaults)
+        {
             sm.add_property_with_desc(&clause.name, &prop.name, dt, nullable, prop.description)?;
+            if default.is_some() {
+                sm.set_property_default(&clause.name, &prop.name, default)?;
+            }
             if prop.unique {
                 let constraint = Constraint {
                     name: format!("{}_{}_unique", clause.name, prop.name),
@@ -1036,6 +1121,9 @@ impl Executor {
             return Ok(());
         }
         let types = Self::prevalidate_property_definitions(&clause.properties)?;
+        let defaults = self
+            .evaluate_property_defaults(&clause.name, &clause.properties, &types)
+            .await?;
         // Relationships written under the type schemaless keep their values,
         // which must fit the declared types; see `prepare_declaration`.
         let declared: Vec<(String, DataType)> = clause
@@ -1056,7 +1144,7 @@ impl Executor {
             clause.dst_labels,
             clause.description,
         )?;
-        for (prop, dt) in clause.properties.into_iter().zip(types) {
+        for ((prop, dt), default) in clause.properties.into_iter().zip(types).zip(defaults) {
             sm.add_property_with_desc(
                 &clause.name,
                 &prop.name,
@@ -1064,6 +1152,9 @@ impl Executor {
                 prop.nullable,
                 prop.description,
             )?;
+            if default.is_some() {
+                sm.set_property_default(&clause.name, &prop.name, default)?;
+            }
         }
         drop(declaration_lock);
         sm.save().await?;
@@ -1079,6 +1170,7 @@ impl Executor {
         l0: &uni_store::runtime::l0_visibility::L0Context,
         entity_name: &str,
         action: AlterAction,
+        default: Option<Value>,
     ) -> Result<()> {
         let sm = storage.schema_manager_arc();
         let sm = &sm;
@@ -1132,6 +1224,10 @@ impl Executor {
                     effective_nullable,
                     prop.description,
                 )?;
+                // New writes only: rows already stored are not backfilled.
+                if default.is_some() {
+                    sm.set_property_default(entity_name, &prop.name, default)?;
+                }
             }
             AlterAction::DropProperty(prop_name) => {
                 sm.drop_property(entity_name, &prop_name)?;
@@ -1177,23 +1273,48 @@ impl Executor {
         Ok(None)
     }
 
+    /// The evaluated `DEFAULT` of an `ADD PROPERTY` action, if it has one.
+    async fn alter_property_default(
+        &self,
+        entity: &str,
+        action: &AlterAction,
+    ) -> Result<Option<Value>> {
+        let AlterAction::AddProperty(prop) = action else {
+            return Ok(None);
+        };
+        let Some(expr) = &prop.default else {
+            return Ok(None);
+        };
+        let dt = Self::parse_data_type(&prop.data_type)?;
+        self.evaluate_property_default(entity, &prop.name, expr, &dt)
+            .await
+    }
+
     pub(crate) async fn execute_alter_label(&self, clause: AlterLabel) -> Result<()> {
         let _held = self
             .lock_for_add_property(&clause.name, &clause.action)
             .await?;
+        let default = self
+            .alter_property_default(&clause.name, &clause.action)
+            .await?;
         let l0 = self.visible_l0().await;
-        Self::execute_alter_entity(&self.storage, &l0, &clause.name, clause.action).await
+        Self::execute_alter_entity(&self.storage, &l0, &clause.name, clause.action, default).await
     }
 
     pub(crate) async fn execute_alter_edge_type(&self, clause: AlterEdgeType) -> Result<()> {
         let _held = self
             .lock_for_add_property(&clause.name, &clause.action)
             .await?;
+        let default = self
+            .alter_property_default(&clause.name, &clause.action)
+            .await?;
         let l0 = self.visible_l0().await;
-        Self::execute_alter_entity(&self.storage, &l0, &clause.name, clause.action).await
+        Self::execute_alter_entity(&self.storage, &l0, &clause.name, clause.action, default).await
     }
 
     pub(crate) async fn execute_drop_label(&self, clause: DropLabel) -> Result<()> {
+        self.refuse_drop_while_populated(&clause.name, DeclaredEntity::Label)
+            .await?;
         let sm = self.storage.schema_manager_arc();
         sm.drop_label(&clause.name, clause.if_exists)?;
         sm.save().await?;
@@ -1201,9 +1322,85 @@ impl Executor {
     }
 
     pub(crate) async fn execute_drop_edge_type(&self, clause: DropEdgeType) -> Result<()> {
+        self.refuse_drop_while_populated(&clause.name, DeclaredEntity::EdgeType)
+            .await?;
         let sm = self.storage.schema_manager_arc();
         sm.drop_edge_type(&clause.name, clause.if_exists)?;
         sm.save().await?;
+        Ok(())
+    }
+
+    /// Refuses to drop a declared label or edge type while vertices or edges
+    /// carry it, counting what this statement can see: flushed data, the
+    /// unflushed buffers and the current transaction's own writes. Dropping
+    /// it would leave that data matchable under a tombstoned declaration.
+    /// Remove the label or delete the data first.
+    ///
+    /// # Errors
+    /// Names the label or edge type and how many entities still carry it.
+    pub(crate) async fn refuse_drop_while_populated(
+        &self,
+        name: &str,
+        kind: DeclaredEntity,
+    ) -> Result<()> {
+        let schema = self.storage.schema_manager().schema();
+        let declared = match kind {
+            DeclaredEntity::Label => schema.labels.get(name).is_some_and(|m| {
+                matches!(
+                    m.state,
+                    uni_common::core::schema::SchemaElementState::Active
+                )
+            }),
+            DeclaredEntity::EdgeType => schema.edge_types.get(name).is_some_and(|m| {
+                matches!(
+                    m.state,
+                    uni_common::core::schema::SchemaElementState::Active
+                )
+            }),
+        };
+        if !declared {
+            return Ok(());
+        }
+        let quoted = super::copy::quote_identifier(name);
+        let cypher = match kind {
+            DeclaredEntity::Label => format!("MATCH (n:{quoted}) RETURN count(n) AS c"),
+            DeclaredEntity::EdgeType => format!("MATCH ()-[r:{quoted}]->() RETURN count(r) AS c"),
+        };
+        let planner = crate::query::planner::QueryPlanner::new(schema);
+        let plan = planner.plan(uni_cypher::parse(&cypher)?)?;
+        let prop_manager =
+            PropertyManager::new(self.storage.clone(), self.storage.schema_manager_arc(), 0);
+        let batches = self
+            .execute_datafusion(plan, &prop_manager, &HashMap::new())
+            .await?;
+        let count = self
+            .record_batches_to_rows(batches)?
+            .first()
+            .and_then(|row| row.get("c"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if count > 0 {
+            let (what, noun, remedy) = match kind {
+                DeclaredEntity::Label => (
+                    "label",
+                    if count == 1 { "vertex" } else { "vertices" },
+                    "remove the label from them or delete them first",
+                ),
+                DeclaredEntity::EdgeType => (
+                    "edge type",
+                    if count == 1 { "edge" } else { "edges" },
+                    "delete them first",
+                ),
+            };
+            return Err(anyhow!(
+                "Cannot drop {} '{}': {} {} still carry it; {}",
+                what,
+                name,
+                count,
+                noun,
+                remedy
+            ));
+        }
         Ok(())
     }
 
@@ -3089,6 +3286,13 @@ impl Executor {
                                 None => writer.next_vid().await?,
                             };
 
+                            // DDL `DEFAULT`s for properties the pattern does not
+                            // name, before generated columns so those can read them.
+                            schema.apply_property_defaults(
+                                n.labels.iter().map(String::as_str),
+                                &mut props,
+                            );
+
                             // Enrich with generated columns only for known labels
                             for label_name in &n.labels {
                                 if schema.get_label_case_insensitive(label_name).is_some() {
@@ -3144,6 +3348,8 @@ impl Executor {
                                 // Validate/coerce edge properties against the declared
                                 // edge-type schema before storing — issue #68.
                                 let edge_schema = self.storage.schema_manager().schema();
+                                edge_schema
+                                    .apply_property_defaults([type_name.as_str()], &mut rel_props);
                                 let rel_props = Self::coerce_and_validate_props(
                                     rel_props,
                                     &edge_schema,
@@ -3361,10 +3567,30 @@ impl Executor {
         // within the declared term space). Canonicalize and validate the native value
         // at ingest so a malformed sparse vector is a clean `TypeError` here, rather
         // than a panic deep in the durable WAL value codec — which reconstructs via
-        // `SparseVector::new` and previously `.expect()`ed (issue #95). The degraded
-        // `Value::Map` / `Null` forms fall through to `accepts` unchanged.
+        // `SparseVector::new` and previously `.expect()`ed (issue #95). `Null` falls
+        // through to `accepts` unchanged.
         if let (DataType::SparseVector { dimensions }, Value::SparseVector { .. }) = (dt, &val) {
             return Self::canonicalize_sparse_vector(prop_name, val, *dimensions);
+        }
+        // A sparse vector written as a `{indices: [...], values: [...]}` map
+        // literal is stored as the native value, canonicalized the same way.
+        // Stored as the map it was never found by the sparse index or the
+        // exact re-score, which read the native form.
+        if let (DataType::SparseVector { dimensions }, Value::Map(_)) = (dt, &val) {
+            let Some((indices, values)) = val.sparse_parts() else {
+                anyhow::bail!(
+                    "TypeError: property '{}' is declared {:?} but the map is not a sparse \
+                     vector: expected exactly {{indices: [non-negative integers], values: \
+                     [numbers]}} with lists of equal length",
+                    prop_name,
+                    dt
+                );
+            };
+            return Self::canonicalize_sparse_vector(
+                prop_name,
+                Value::SparseVector { indices, values },
+                *dimensions,
+            );
         }
 
         // Dense and multi-vector columns: enforce the declared dimensions here so a
@@ -5428,6 +5654,63 @@ pub fn coerce_declared_value(
     val: Value,
 ) -> Result<Value> {
     Executor::coerce_to_declared_type(prop_name, dt, val)
+}
+
+/// Whether a DDL `DEFAULT` expression is a constant: built from literals,
+/// lists, maps, operators and functions of constants only. A function with no
+/// arguments (`rand()`, `timestamp()`, `datetime()`) reads the clock or a
+/// random source, so it is not; nor are the explicitly non-deterministic ones,
+/// aggregates and window functions.
+fn is_constant_default(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::List(items) => items.iter().all(is_constant_default),
+        Expr::Map(entries) => entries.iter().all(|(_, e)| is_constant_default(e)),
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct,
+            window_spec,
+        } => {
+            let lower = name.to_ascii_lowercase();
+            !args.is_empty()
+                && !*distinct
+                && window_spec.is_none()
+                && !expr.is_aggregate()
+                && !matches!(
+                    lower.as_str(),
+                    "rand" | "randomuuid" | "timestamp" | "id" | "elementid" | "labels" | "type"
+                )
+                && args.iter().all(is_constant_default)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            is_constant_default(left) && is_constant_default(right)
+        }
+        Expr::UnaryOp { expr, .. } | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
+            is_constant_default(expr)
+        }
+        Expr::Case {
+            expr,
+            when_then,
+            else_expr,
+        } => {
+            expr.as_deref().is_none_or(is_constant_default)
+                && when_then
+                    .iter()
+                    .all(|(w, t)| is_constant_default(w) && is_constant_default(t))
+                && else_expr.as_deref().is_none_or(is_constant_default)
+        }
+        Expr::In { expr, list } => is_constant_default(expr) && is_constant_default(list),
+        Expr::ArrayIndex { array, index } => {
+            is_constant_default(array) && is_constant_default(index)
+        }
+        Expr::ArraySlice { array, start, end } => {
+            is_constant_default(array)
+                && start.as_deref().is_none_or(is_constant_default)
+                && end.as_deref().is_none_or(is_constant_default)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

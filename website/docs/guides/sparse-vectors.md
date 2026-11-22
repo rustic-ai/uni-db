@@ -85,14 +85,21 @@ db.schema()
 
 ## Step 3: Insert Sparse Vectors
 
-A sparse vector is two **equal-length** lists: `indices` are the term ids (each `< dimensions`) and `values` are their weights. Pass it to the write as a sparse vector parameter:
+A sparse vector is two **equal-length** lists: `indices` are the term ids (each `< dimensions`) and `values` are their weights. Write it as an `{indices, values}` map literal, or pass it as a sparse vector parameter:
 
 ```cypher
+CREATE (:Doc {
+    content: 'graph databases for semantic retrieval',
+    emb: {indices: [42, 1337, 9001], values: [0.81, 0.44, 0.62]}
+})
+
 CREATE (:Doc {
     content: 'graph databases for semantic retrieval',
     emb: $emb
 })
 ```
+
+Either form is stored as the same sparse vector and is found by `uni.sparse.query` and `uni.search`. A map that is not exactly `{indices: [...], values: [...]}` with lists of equal length, non-negative integer ids and numeric weights is refused with a `TypeError`.
 
 ```python
 tx = session.tx()
@@ -103,7 +110,7 @@ tx.execute(
 tx.commit()
 ```
 
-The two lists are positional: term `42` has weight `0.81`, term `1337` has weight `0.44`, and so on. Term ids do not need to be sorted, but they must be unique and within `[0, dimensions)`.
+The two lists are positional: term `42` has weight `0.81`, term `1337` has weight `0.44`, and so on. Term ids do not need to be sorted (they are sorted on write, and the weights of a repeated id are summed), but they must be within `[0, dimensions)`.
 
 ---
 

@@ -1335,6 +1335,43 @@ fn build_all_props_column(
     Arc::new(builder.finish())
 }
 
+/// `(created_at, updated_at)` per edge, in nanoseconds since the epoch.
+type EdgeStamps = HashMap<Eid, (Option<i64>, Option<i64>)>;
+
+/// The system timestamps of `eids`: the flushed rows' values (see
+/// `PropertyManager::get_batch_edge_stored_timestamps`) overlaid by every L0
+/// buffer in the query's view, keeping the earliest creation and the latest
+/// update.
+async fn edge_system_timestamps(
+    graph_ctx: &GraphExecutionContext,
+    eids: &[Eid],
+) -> DFResult<EdgeStamps> {
+    let query_ctx = graph_ctx.query_context();
+    let mut out = graph_ctx
+        .property_manager()
+        .get_batch_edge_stored_timestamps(eids, Some(&query_ctx))
+        .await
+        .map_err(exec_err)?;
+    for l0 in graph_ctx.l0_context().iter_l0_buffers() {
+        let guard = l0.read();
+        for eid in eids {
+            let created = guard.edge_created_at.get(eid).copied();
+            let updated = guard.edge_updated_at.get(eid).copied();
+            if created.is_none() && updated.is_none() {
+                continue;
+            }
+            let entry = out.entry(*eid).or_insert((None, None));
+            if let Some(c) = created {
+                entry.0 = Some(entry.0.map_or(c, |cur| cur.min(c)));
+            }
+            if let Some(u) = updated {
+                entry.1 = Some(entry.1.map_or(u, |cur| cur.max(u)));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Build edge ID, type, and property columns for bound edge variables.
 async fn build_edge_columns(
     expansions: &[Expansion],
@@ -1404,6 +1441,7 @@ async fn build_edge_columns(
         };
 
         let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();
+        let mut stamps: Option<EdgeStamps> = None;
 
         for prop_name in edge_properties {
             // Not a stored property at all: the traversal's own per-row
@@ -1429,32 +1467,19 @@ async fn build_edge_columns(
                 continue;
             }
 
-            // System-managed edge timestamps live outside the property bag.
-            // Read them directly from L0 (earliest creation, latest update).
-            // Disk-only edges will surface as null — acceptable for the
-            // common case where the queried edges are L0-resident in the
-            // same session.
+            // System-managed edge timestamps live outside the property bag:
+            // the flushed rows' values overlaid by L0.
             if prop_name == "_created_at" || prop_name == "_updated_at" {
+                if stamps.is_none() {
+                    stamps = Some(edge_system_timestamps(graph_ctx, &eids).await?);
+                }
+                let stamps = stamps.as_ref().expect("just filled");
                 let mut builder =
                     arrow_array::builder::TimestampNanosecondBuilder::new().with_timezone("UTC");
-                let l0_ctx = graph_ctx.l0_context();
                 for eid in &eids {
-                    let mut value: Option<i64> = None;
-                    for l0 in l0_ctx.iter_l0_buffers() {
-                        let guard = l0.read();
-                        let opt = if prop_name == "_created_at" {
-                            guard.edge_created_at.get(eid).copied()
-                        } else {
-                            guard.edge_updated_at.get(eid).copied()
-                        };
-                        if let Some(ts) = opt {
-                            value = Some(match value {
-                                None => ts,
-                                Some(cur) if prop_name == "_created_at" => cur.min(ts),
-                                Some(cur) => cur.max(ts),
-                            });
-                        }
-                    }
+                    let value = stamps
+                        .get(eid)
+                        .and_then(|(c, u)| if prop_name == "_created_at" { *c } else { *u });
                     match value {
                         Some(ts) => builder.append_value(ts),
                         None => builder.append_null(),
@@ -3026,11 +3051,16 @@ impl GraphTraverseMainStream {
                     // Serialize all edge properties to a CypherValue blob directly
                     // from `Value` so typed values (temporals) are preserved.
                     for (_, _, _, _, props, _) in &expansions {
-                        if props.is_empty() {
+                        let map: HashMap<String, uni_common::Value> = props
+                            .iter()
+                            .filter(|(k, _)| {
+                                k.as_str() != "_created_at" && k.as_str() != "_updated_at"
+                            })
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        if map.is_empty() {
                             builder.append_null();
                         } else {
-                            let map: HashMap<String, uni_common::Value> =
-                                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             builder.append_value(uni_common::cypher_value_codec::encode(
                                 &uni_common::Value::Map(map),
                             ));
@@ -3345,6 +3375,48 @@ async fn build_edge_adjacency_map(
     Ok(adjacency)
 }
 
+/// Puts each edge's system timestamps into its adjacency property map as
+/// `_created_at` / `_updated_at` datetimes, where the expansion reads named
+/// edge properties. They are not stored properties: the `_all_props`
+/// projection leaves them out.
+async fn attach_edge_system_timestamps(
+    graph_ctx: &GraphExecutionContext,
+    adjacency: &mut EdgeAdjacencyMap,
+) -> DFResult<()> {
+    let mut eids: Vec<Eid> = adjacency
+        .values()
+        .flat_map(|n| n.iter().map(|(_, eid, _, _, _)| *eid))
+        .collect();
+    eids.sort_unstable();
+    eids.dedup();
+    if eids.is_empty() {
+        return Ok(());
+    }
+    let stamps = edge_system_timestamps(graph_ctx, &eids).await?;
+    let datetime = |nanos: i64| {
+        uni_common::Value::Temporal(uni_common::value::TemporalValue::DateTime {
+            nanos_since_epoch: nanos,
+            offset_seconds: 0,
+            timezone_name: None,
+        })
+    };
+    for neighbors in adjacency.values_mut() {
+        for (_, eid, _, props, _) in neighbors.iter_mut() {
+            let Some((created, updated)) = stamps.get(eid) else {
+                continue;
+            };
+            let props = Arc::make_mut(props);
+            if let Some(c) = created {
+                props.insert("_created_at".to_string(), datetime(*c));
+            }
+            if let Some(u) = updated {
+                props.insert("_updated_at".to_string(), datetime(*u));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build the edge adjacency map AND hydrate the traversed target vertices'
 /// properties from BOTH the L0 buffers and persisted (Lance) storage.
 ///
@@ -3361,8 +3433,13 @@ async fn build_edge_adjacency_and_target_props(
     direction: Direction,
     source_vids: Option<HashSet<Vid>>,
     target_properties: &[String],
+    edge_stamps: bool,
 ) -> DFResult<(EdgeAdjacencyMap, HashMap<Vid, uni_common::Properties>)> {
-    let adjacency = build_edge_adjacency_map(graph_ctx, type_names, direction, source_vids).await?;
+    let mut adjacency =
+        build_edge_adjacency_map(graph_ctx, type_names, direction, source_vids).await?;
+    if edge_stamps {
+        attach_edge_system_timestamps(graph_ctx, &mut adjacency).await?;
+    }
 
     if target_properties.is_empty() {
         return Ok((adjacency, HashMap::new()));
@@ -4312,6 +4389,11 @@ impl Stream for GraphTraverseMainStream {
                         let loading_types = self.type_names.clone();
                         let direction = self.direction;
                         let target_properties = self.target_properties.clone();
+                        let edge_stamps = self.edge_variable.is_some()
+                            && self
+                                .edge_properties
+                                .iter()
+                                .any(|p| p == "_created_at" || p == "_updated_at");
                         let fut = async move {
                             build_edge_adjacency_and_target_props(
                                 &loading_ctx,
@@ -4319,6 +4401,7 @@ impl Stream for GraphTraverseMainStream {
                                 direction,
                                 source_vids,
                                 &target_properties,
+                                edge_stamps,
                             )
                             .await
                         };

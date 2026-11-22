@@ -227,3 +227,127 @@ async fn test_tx_local_created_at_visible() -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
+
+/// `(created_at, updated_at)` of the single row `query` returns as `c` and `u`.
+async fn read_stamps(db: &uni_db::Uni, query: &str) -> Result<(i64, i64)> {
+    let res = db.session().query(query).await?;
+    assert_eq!(res.len(), 1, "{query}: expected one row");
+    let c = res.rows()[0].value("c").unwrap();
+    let u = res.rows()[0].value("u").unwrap();
+    let c_ns = extract_nanos(c).unwrap_or_else(|| panic!("{query}: created_at is {c:?}"));
+    let u_ns = extract_nanos(u).unwrap_or_else(|| panic!("{query}: updated_at is {u:?}"));
+    Ok((c_ns, u_ns))
+}
+
+/// Checks a freshly inserted row's stamps before and after a flush: both set,
+/// `updated_at >= created_at`, and the flush changes neither.
+async fn assert_fresh_stamps(db: &uni_db::Uni, query: &str) -> Result<()> {
+    let (c, u) = read_stamps(db, query).await?;
+    assert!(c > 0, "{query}: created_at must be set");
+    assert!(
+        u >= c,
+        "{query}: updated_at ({u}) must not be earlier than created_at ({c}) on insert"
+    );
+    db.flush().await?;
+    let (c2, u2) = read_stamps(db, query).await?;
+    assert_eq!(
+        (c, u),
+        (c2, u2),
+        "{query}: a flush must not change the stamps"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_insert_stamps_are_ordered_declared_label() -> Result<()> {
+    let dir = tempdir()?;
+    let db = UniBuilder::new(dir.path().to_str().unwrap().to_string())
+        .build()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL Person (name STRING)").await?;
+    tx.execute("CREATE (:Person {name: 'Alice'})").await?;
+    // Time passes inside the transaction before it commits.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    tx.commit().await?;
+    assert_fresh_stamps(
+        &db,
+        "MATCH (n:Person) RETURN created_at(n) AS c, updated_at(n) AS u",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_stamps_on_schemaless_label() -> Result<()> {
+    let dir = tempdir()?;
+    let db = UniBuilder::new(dir.path().to_str().unwrap().to_string())
+        .build()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Loose {name: 'x'})").await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    tx.commit().await?;
+    assert_fresh_stamps(
+        &db,
+        "MATCH (n:Loose) RETURN created_at(n) AS c, updated_at(n) AS u",
+    )
+    .await?;
+
+    // A SET after the flush advances updated_at.
+    let (_, u1) = read_stamps(
+        &db,
+        "MATCH (n:Loose) RETURN created_at(n) AS c, updated_at(n) AS u",
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let tx = db.session().tx().await?;
+    tx.execute("MATCH (n:Loose) SET n.name = 'y'").await?;
+    tx.commit().await?;
+    let (c2, u2) = read_stamps(
+        &db,
+        "MATCH (n:Loose) RETURN created_at(n) AS c, updated_at(n) AS u",
+    )
+    .await?;
+    assert!(c2 <= u2, "updated_at must not be earlier than created_at");
+    assert!(u2 > u1, "updated_at must advance after SET");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_edge_stamps_survive_flush() -> Result<()> {
+    let dir = tempdir()?;
+    let db = UniBuilder::new(dir.path().to_str().unwrap().to_string())
+        .build()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL Person (name STRING)").await?;
+    tx.execute("CREATE EDGE TYPE KNOWS (since INT) FROM Person TO Person")
+        .await?;
+    tx.execute("CREATE (:Person {name: 'A'})-[:KNOWS {since: 2020}]->(:Person {name: 'B'})")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    tx.commit().await?;
+    assert_fresh_stamps(
+        &db,
+        "MATCH (:Person)-[r:KNOWS]->(:Person) RETURN created_at(r) AS c, updated_at(r) AS u",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_schemaless_edge_stamps_survive_flush() -> Result<()> {
+    let dir = tempdir()?;
+    let db = UniBuilder::new(dir.path().to_str().unwrap().to_string())
+        .build()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Loose {name: 'A'})-[:LINKS {w: 1}]->(:Loose {name: 'B'})")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    tx.commit().await?;
+    assert_fresh_stamps(
+        &db,
+        "MATCH (:Loose)-[r:LINKS]->(:Loose) RETURN created_at(r) AS c, updated_at(r) AS u",
+    )
+    .await
+}

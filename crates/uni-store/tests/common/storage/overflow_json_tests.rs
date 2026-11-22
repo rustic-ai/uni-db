@@ -44,6 +44,7 @@ fn create_test_schema_with_partial_props() -> Schema {
             state: SchemaElementState::Active,
             generation_expression: None,
             description: None,
+            default: None,
         },
     );
     person_props.insert(
@@ -55,6 +56,7 @@ fn create_test_schema_with_partial_props() -> Schema {
             state: SchemaElementState::Active,
             generation_expression: None,
             description: None,
+            default: None,
         },
     );
     schema.properties.insert("Person".to_string(), person_props);
@@ -286,6 +288,7 @@ mod delta_tests {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description: None,
+                default: None,
             },
         );
         schema.properties.insert("KNOWS".to_string(), knows_props);

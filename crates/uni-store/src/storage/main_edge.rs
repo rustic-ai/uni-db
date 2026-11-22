@@ -603,6 +603,99 @@ impl MainEdgeDataset {
             .collect())
     }
 
+    /// The stored `(_created_at, _updated_at)` of each live edge in `eids`, in
+    /// nanoseconds since the epoch, from the main edges table.
+    ///
+    /// Every flushed edge is written here, declared and schemaless types
+    /// alike. Each flush of an edge appends a row stamped from that flush
+    /// window's buffer, so a later write's row carries a later `created_at`:
+    /// `created_at` is the earliest over the edge's rows, `updated_at` the
+    /// newest row's. An edge whose newest row is a tombstone is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails.
+    pub async fn find_timestamps_by_eids_counted(
+        backend: &dyn StorageBackend,
+        eids: &[Eid],
+        version: impl IntoRowVisibility,
+        counters: Option<&Arc<QueryCounters>>,
+    ) -> Result<HashMap<Eid, (Option<i64>, Option<i64>)>> {
+        use arrow_array::TimestampNanosecondArray;
+        let version = version.into_row_visibility();
+        if eids.is_empty()
+            || !backend
+                .table_exists(table_names::main_edge_table_name())
+                .await?
+        {
+            return Ok(HashMap::new());
+        }
+        // Per EID: (winning version, deleted, earliest created, winner's updated).
+        type Seen = (u64, bool, Option<i64>, Option<i64>);
+        let mut seen: HashMap<Eid, Seen> = HashMap::new();
+        let columns = vec!["_eid", "_version", "_deleted", "_created_at", "_updated_at"];
+        for chunk in eids.chunks(MAX_EIDS_PER_CHUNK) {
+            let filter = super::with_version_bound(
+                FilterExpr::one_of("_eid", chunk.iter().map(|e| Scalar::UInt(e.as_u64()))),
+                &version,
+            );
+            let batches =
+                Self::execute_query(backend, filter, Some(columns.clone()), counters).await?;
+            for batch in &batches {
+                let eid_arr = batch
+                    .column_by_name("_eid")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                let ver_arr = batch
+                    .column_by_name("_version")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                let deleted_arr = batch
+                    .column_by_name("_deleted")
+                    .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+                let ts = |column: &str, i: usize| {
+                    batch
+                        .column_by_name(column)
+                        .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>())
+                        .filter(|a| a.is_valid(i))
+                        .map(|a| a.value(i))
+                };
+                let (Some(eid_arr), Some(ver_arr)) = (eid_arr, ver_arr) else {
+                    continue;
+                };
+                for i in 0..batch.num_rows() {
+                    if eid_arr.is_null(i) {
+                        continue;
+                    }
+                    let eid = Eid::from(eid_arr.value(i));
+                    let row_version = if ver_arr.is_null(i) {
+                        0
+                    } else {
+                        ver_arr.value(i)
+                    };
+                    let deleted = deleted_arr.is_some_and(|d| d.is_valid(i) && d.value(i));
+                    let created = ts("_created_at", i);
+                    let updated = ts("_updated_at", i);
+                    let entry = seen
+                        .entry(eid)
+                        .or_insert((row_version, deleted, created, updated));
+                    entry.2 = match (entry.2, created) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    if row_version >= entry.0 {
+                        entry.0 = row_version;
+                        entry.1 = deleted;
+                        entry.3 = updated;
+                    }
+                }
+            }
+        }
+        Ok(seen
+            .into_iter()
+            .filter(|(_, (_, deleted, _, _))| !deleted)
+            .map(|(eid, (_, _, created, updated))| (eid, (created, updated)))
+            .collect())
+    }
+
     /// Resolve which edge types a set of EIDs belongs to, in one indexed pass.
     ///
     /// This exists to give `PropertyManager::get_batch_edge_props` a type hint
