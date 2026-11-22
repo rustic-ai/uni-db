@@ -8,7 +8,7 @@ Complete symbol surface of the `uni_db` Python bindings, **generated from `bindi
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**199 classes.**
+**202 classes.**
 
 ---
 
@@ -609,10 +609,12 @@ Async builder for creating and configuring an AsyncUni instance.
 | `xervo_catalog_from_file(path: str) -> AsyncUniBuilder` | — |
 | `xervo_runtime(runtime: ModelRuntime) -> AsyncUniBuilder` | — |
 | `cloud_config(config: dict[str, Any]) -> AsyncUniBuilder` | — |
+| `storage_options(options: dict[str, str]) -> AsyncUniBuilder` | — |
 | `config(config: dict[str, Any]) -> AsyncUniBuilder` | — |
 | `batch_size(size: int) -> AsyncUniBuilder` | — |
 | `wal_enabled(enabled: bool) -> AsyncUniBuilder` | — |
 | `read_only() -> AsyncUniBuilder` | — |
+| `set_aside_stale_wal() -> AsyncUniBuilder` | — |
 | `skip_invalid_locy_rules(skip: bool) -> AsyncUniBuilder` | — |
 | `write_lease(lease: WriteLease) -> AsyncUniBuilder` | — |
 | `strict_schema(enabled: bool) -> AsyncUniBuilder` | — |
@@ -2406,10 +2408,12 @@ Builder for creating or opening a Uni database.
 | `xervo_catalog_from_file(path: str) -> UniBuilder` | — |
 | `xervo_runtime(runtime: ModelRuntime) -> UniBuilder` | — |
 | `cloud_config(config: dict[str, Any]) -> UniBuilder` | — |
+| `storage_options(options: dict[str, str]) -> UniBuilder` | — |
 | `config(config: dict[str, Any]) -> UniBuilder` | — |
 | `batch_size(size: int) -> UniBuilder` | — |
 | `wal_enabled(enabled: bool) -> UniBuilder` | — |
 | `read_only() -> UniBuilder` | — |
+| `set_aside_stale_wal() -> UniBuilder` | — |
 | `skip_invalid_locy_rules(skip: bool) -> UniBuilder` | — |
 | `write_lease(lease: WriteLease) -> UniBuilder` | — |
 | `strict_schema(enabled: bool) -> UniBuilder` | — |
@@ -2473,25 +2477,7 @@ Constraint violation.
 
 ## `UniDatabaseLockedError` — extends `UniError`
 
-Kept for compatibility; nothing raises it. A store held by another writer raises `UniStoreLockedError`.
-
----
-
-## `UniStoreLockedError` — extends `UniError`
-
-Another handle holds the store open for writing; `holder` names it (process and host).
-
----
-
-## `UniWriterFencedError` — extends `UniError`
-
-This handle may no longer write: its lease was taken over or lapsed, it was closed, it is read-only, or it met a table version another writer committed. `reason` says which.
-
----
-
-## `UniStaleWalError` — extends `UniError`
-
-A hybrid store's local WAL belongs to an earlier writer: another host, or a copy of this directory, has opened the store since. `store`, `wal` and `segments` describe it; `set_aside_stale_wal()` moves it aside.
+Kept for compatibility; nothing raises it (see ``UniStoreLockedError``).
 
 ---
 
@@ -2854,9 +2840,36 @@ Derived facts are stale relative to the current database version.
 
 ---
 
+## `UniStaleWalError` — extends `UniError`
+
+The hybrid WAL is an earlier writer's; ``set_aside_stale_wal()`` moves it.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `store` | `str` |
+| `wal` | `str` |
+| `segments` | `int` |
+
+---
+
 ## `UniStorageError` — extends `UniError`
 
 Storage layer error.
+
+---
+
+## `UniStoreLockedError` — extends `UniError`
+
+Another handle holds the store open for writing; ``holder`` names it.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `store` | `str` |
+| `holder` | `str` |
 
 ---
 
@@ -2925,6 +2938,18 @@ Writes are stopped at the write throttle's hard limit with compaction disabled.
 |---|---|
 | `l1_runs` | `int` |
 | `hard_limit` | `int` |
+
+---
+
+## `UniWriterFencedError` — extends `UniError`
+
+This handle may no longer write (lease lost, closed, read-only).
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `reason` | `str` |
 
 ---
 
@@ -3019,8 +3044,8 @@ Write lease configuration for multi-agent coordination.
 | Signature | Description |
 |---|---|
 | `LOCAL() -> WriteLease` *(static)* | — |
-| `DYNAMODB(table: str) -> WriteLease` *(static)* | Not implemented: the open fails. |
-| `UNENFORCED() -> WriteLease` *(static)* | No lock or lease: one writer by convention. |
+| `UNENFORCED() -> WriteLease` *(static)* | — |
+| `DYNAMODB(table: str) -> WriteLease` *(static)* | — |
 
 ---
 

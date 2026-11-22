@@ -107,6 +107,9 @@ pub struct UniConfig {
     /// Object store resilience configuration
     pub object_store: ObjectStoreConfig,
 
+    /// Single-writer lease and lock timing (see "Writer lease" below).
+    pub writer_lease: WriterLeaseConfig,
+
     /// Maximum iterations for recursive CTE evaluation (default: 1000)
     pub max_recursive_cte_iterations: usize,
 

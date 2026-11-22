@@ -605,6 +605,7 @@ pub struct UniConfig {
     pub lance_metadata_cache_bytes: Option<usize>,
     pub lance_index_cache_bytes: Option<usize>,
     pub object_store: ObjectStoreConfig,
+    pub writer_lease: WriterLeaseConfig, // single-writer lease and lock timing
     pub index_rebuild: IndexRebuildConfig,
     pub strict_schema: bool,
     pub partial_lance_writes: bool,

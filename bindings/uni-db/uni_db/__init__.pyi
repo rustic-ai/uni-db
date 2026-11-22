@@ -35,7 +35,7 @@ class UniNotFoundError(UniError):
     ...
 
 class UniDatabaseLockedError(UniError):
-    """Database is locked by another process."""
+    """Kept for compatibility; nothing raises it (see ``UniStoreLockedError``)."""
 
     ...
 
@@ -270,21 +270,20 @@ class UniReadOnlyError(UniError):
     ...
 
 class UniStoreLockedError(UniError):
-    """The store is open for writing by another handle."""
+    """Another handle holds the store open for writing; ``holder`` names it."""
 
     store: str
     holder: str
 
 class UniStaleWalError(UniError):
-    """The WAL belongs to an earlier writer of the store; open with
-    ``set_aside_stale_wal()`` to move it aside."""
+    """The hybrid WAL is an earlier writer's; ``set_aside_stale_wal()`` moves it."""
 
     store: str
     wal: str
     segments: int
 
 class UniWriterFencedError(UniError):
-    """This handle can no longer write: its writer lease was lost or it was closed."""
+    """This handle may no longer write (lease lost, closed, read-only)."""
 
     reason: str
 
