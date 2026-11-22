@@ -133,11 +133,17 @@ Nothing a store writes leaves its prefix, so several stores can share a bucket. 
     )
     ```
 
-The WAL and ID allocator live in the local directory, and everything else lives in the object store. Configure the remote side as for a remote-only store. In Python, `hybrid`'s first argument must be the path the builder was opened at.
+The WAL and ID allocator live in the local directory, and everything else lives in the object store, forks included (a fork's WAL is remote). Configure the remote side as for a remote-only store. In Python, `hybrid`'s first argument must be the path the builder was opened at.
 
-- Commits are durable once written to the local WAL. Until the next flush (by default within 5 seconds) they exist only on that host.
-- If the local directory is lost, the store reopens from the object store with a fresh directory. ID allocation resumes above every ID in use. Commits that were not yet flushed are lost.
-- A hybrid store is held by its object-store lease and by a lock on its local directory, so a second host's writable open fails with `StoreLocked`. Commits not yet flushed live only in the first host's local WAL, and a host that takes over after the lease lapses does not see them.
+A hybrid store has **one host at a time**: the one holding its lease. Hybrid mode trades the object store's latency on each commit for a window in which recent commits exist only on that host.
+
+- **Commits** are durable once written to the local WAL. They reach the object store at the next flush: by default within 5 seconds, or after 10,000 mutations (`auto_flush_interval`, `auto_flush_threshold`). Until then they exist only on that host.
+- **A clean close** (`shutdown()`) flushes, so every commit is in the object store and the next host, on any directory, sees all of it. If that flush fails, the error is logged and the commits stay in the local WAL. A drop without `shutdown()` does not flush either: the commits stay in the local WAL and are replayed when the same directory is opened again.
+- **A second host** cannot write while the first holds the store. Its writable open fails with `StoreLocked`; a read-only open sees what has been flushed.
+- **Losing the local directory** loses the unflushed commits and nothing else. The store reopens from the object store with a fresh directory, and ID allocation resumes above every ID in use.
+- **A host that comes back after another took over** holds a WAL that no longer describes the store. That happens when it crashed (its lease then lapsed) or was dropped without `shutdown()`, with unflushed commits, and another host opened the store meanwhile. Its commits were made against a state the store has moved on from, so they are not replayed: the open fails with `StaleWal`, which names the WAL and how many segments hold commits. Open with `set_aside_stale_wal()` to move those segments to `wal_set_aside/` in the local directory, never deleted, and open the store as the object store has it. A read-only open ignores such a WAL.
+
+The store knows whose WAL it follows: each local directory's WAL carries an id (`wal_id.json`), and each writable open records its WAL's id in the object store (`catalog/wal_claim.json`) before its first commit, whether or not the store has ever been flushed. A store opened before this release has no record; its first open replays the local WAL as before and records it.
 
 ## Concurrency
 

@@ -608,6 +608,7 @@ pub async fn build_database_core(
     read_only: bool,
     write_lease: Option<::uni_db::api::multi_agent::WriteLease>,
     skip_invalid_locy_rules: bool,
+    set_aside_stale_wal: bool,
     xervo_runtime: Option<std::sync::Arc<::uni_db::ModelRuntime>>,
     storage_options: std::collections::BTreeMap<String, String>,
 ) -> Result<Uni, UniError> {
@@ -678,6 +679,10 @@ pub async fn build_database_core(
 
     if skip_invalid_locy_rules {
         builder = builder.skip_invalid_locy_rules(true);
+    }
+
+    if set_aside_stale_wal {
+        builder = builder.set_aside_stale_wal();
     }
 
     if let Some(wl) = write_lease {

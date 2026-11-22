@@ -8,6 +8,7 @@ server: what matters is that the open goes to the configured endpoint instead of
 the instance metadata service (issue #350).
 """
 
+import gc
 import json
 import os
 import tempfile
@@ -198,3 +199,71 @@ async def test_async_read_only_coexists_with_the_writer():
         r = await uni_db.AsyncUniBuilder.open(path).read_only().build()
         await r.shutdown()
         await w.shutdown()
+
+
+def _hybrid(builder_cls, root, host):
+    bucket = os.path.join(root, "bucket")
+    return (
+        builder_cls.open(os.path.join(root, host))
+        .hybrid(os.path.join(root, host), "file://" + os.path.join(bucket, "g"))
+        .storage_options({"uni_file_bucket_root": bucket})
+        .config({"auto_flush_interval": None, "auto_flush_threshold": 10**9})
+    )
+
+
+def _count(db):
+    return db.session().query("MATCH (p:Person) RETURN count(p) AS c")[0]["c"]
+
+
+def test_a_stale_hybrid_wal_is_refused_then_set_aside():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+        one = _hybrid(uni_db.UniBuilder, root, "one").build()
+        one.schema().label("Person").property("name", "string").apply()
+        tx = one.session().tx()
+        tx.execute("CREATE (:Person {name: 'Alice'})")
+        tx.commit()
+        one.flush()
+        tx = one.session().tx()
+        tx.execute("CREATE (:Person {name: 'Lost'})")
+        tx.commit()
+        del tx, one  # a crash: nothing flushed
+        gc.collect()
+
+        two = _hybrid(uni_db.UniBuilder, root, "two").build()
+        assert _count(two) == 1
+        two.shutdown()
+
+        with pytest.raises(uni_db.UniStaleWalError) as excinfo:
+            _hybrid(uni_db.UniBuilder, root, "one").build()
+        assert excinfo.value.segments == 1
+        assert os.path.join(root, "one") in excinfo.value.wal
+        assert excinfo.value.store.endswith(os.path.join("bucket", "g"))
+
+        one = _hybrid(uni_db.UniBuilder, root, "one").set_aside_stale_wal().build()
+        assert _count(one) == 1
+        one.shutdown()
+        assert os.listdir(os.path.join(root, "one", "wal_set_aside"))
+
+
+@pytest.mark.asyncio
+async def test_async_builder_refuses_then_sets_a_stale_wal_aside():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+        one = await _hybrid(uni_db.AsyncUniBuilder, root, "one").build()
+        await one.schema().label("Person").property("name", "string").apply()
+        session = one.session()
+        tx = await session.tx()
+        await tx.execute("CREATE (:Person {name: 'Lost'})")
+        await tx.commit()
+        del tx, session, one  # dropped without shutdown: nothing flushed
+        gc.collect()
+
+        two = await _hybrid(uni_db.AsyncUniBuilder, root, "two").build()
+        await two.shutdown()
+
+        with pytest.raises(uni_db.UniStaleWalError):
+            await _hybrid(uni_db.AsyncUniBuilder, root, "one").build()
+        one = await (
+            _hybrid(uni_db.AsyncUniBuilder, root, "one").set_aside_stale_wal().build()
+        )
+        await one.shutdown()
+        assert os.listdir(os.path.join(root, "one", "wal_set_aside"))

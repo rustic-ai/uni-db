@@ -94,6 +94,7 @@ use uni_common::core::schema::SchemaManager;
 use uni_store::runtime::id_allocator::IdAllocator;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::wal::WriteAheadLog;
+use uni_store::runtime::wal_lineage;
 use uni_store::storage::manager::StorageManager;
 
 use uni_store::runtime::writer::Writer;
@@ -1882,6 +1883,7 @@ pub struct UniBuilder {
     create_if_missing: bool,
     fail_if_exists: bool,
     read_only: bool,
+    set_aside_stale_wal: bool,
     write_lease: Option<multi_agent::WriteLease>,
     plugin_trust: Arc<plugin_trust::PluginTrustConfig>,
     temp_dir: Option<TempDir>,
@@ -1905,6 +1907,7 @@ impl UniBuilder {
             create_if_missing: true,
             fail_if_exists: false,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             plugin_trust: Arc::new(plugin_trust::PluginTrustConfig::default()),
             temp_dir: None,
@@ -2026,6 +2029,19 @@ impl UniBuilder {
     /// `ReadOnly` errors. Reads work normally.
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    /// Open a hybrid store whose local WAL is stale, setting the WAL aside.
+    ///
+    /// A hybrid host that crashed with unflushed commits, and whose store
+    /// another host has opened since, holds a WAL that no longer describes
+    /// the store; a plain open fails with [`UniError::StaleWal`]. With this
+    /// option its segments are moved to `wal_set_aside/` in the same
+    /// directory (never deleted) and the store opens as the object store has
+    /// it. A WAL that is the store's own is replayed as usual.
+    pub fn set_aside_stale_wal(mut self) -> Self {
+        self.set_aside_stale_wal = true;
         self
     }
 
@@ -2556,6 +2572,82 @@ impl UniBuilder {
             }
         };
 
+        // Which WAL a hybrid store follows (`uni_store::runtime::wal_lineage`).
+        // Its WAL is local while everything else is remote, so a WAL the store
+        // does not follow, still holding commits, is an earlier writer's: a
+        // host that crashed or was dropped with unflushed commits and whose
+        // store another host has opened since. Replaying it would lay commits
+        // made against an older state over newer data, with ids the newer
+        // writer may have reused. A store whose WAL lives beside it shares the
+        // WAL with every writer and is not checked.
+        let mut skip_wal_replay = false;
+        if is_hybrid {
+            let wal_dir = Path::new(&uri).join("wal").display().to_string();
+            let local_wal_id = if self.read_only {
+                wal_lineage::load(&wal_store).await
+            } else {
+                wal_lineage::load_or_create(&wal_store).await.map(Some)
+            }
+            .map_err(UniError::Internal)?;
+            let claimed = wal_lineage::load_claim(&data_store)
+                .await
+                .map_err(UniError::Internal)?;
+            if claimed.is_some() && claimed != local_wal_id {
+                let segments = wal_lineage::segments_with_commits(&wal_store)
+                    .await
+                    .map_err(UniError::Internal)?;
+                let local = local_wal_id.as_deref().unwrap_or("unknown");
+                if segments == 0 {
+                    // Nothing in it to lose: no segments, or only the mark a
+                    // clean close seals. A writer moves the marks out of the
+                    // way, since replay would read them as its own WAL's once
+                    // the store is claimed below.
+                    if !self.read_only {
+                        let moved = wal_lineage::set_aside(&wal_store, local)
+                            .await
+                            .map_err(UniError::Internal)?;
+                        tracing::debug!(set_aside = %moved, "set aside an earlier writer's WAL marks");
+                    }
+                } else if self.read_only {
+                    tracing::warn!(
+                        wal = %wal_dir,
+                        segments,
+                        "this WAL belongs to an earlier writer of the store; a read-only open \
+                         ignores it and reads the store as the object store has it"
+                    );
+                    skip_wal_replay = true;
+                } else if self.set_aside_stale_wal {
+                    let moved = wal_lineage::set_aside(&wal_store, local)
+                        .await
+                        .map_err(UniError::Internal)?;
+                    tracing::warn!(
+                        wal = %wal_dir,
+                        segments,
+                        set_aside = %moved,
+                        "set aside a WAL from an earlier writer of the store; its unflushed \
+                         commits are not in the store"
+                    );
+                } else {
+                    return Err(UniError::StaleWal {
+                        store: location.root_uri().to_string(),
+                        wal: wal_dir,
+                        segments,
+                    });
+                }
+            }
+            // A writable open claims the store for its WAL before anything is
+            // committed, so an earlier writer's WAL is recognised as such even
+            // if this one never flushes.
+            if let Some(wal_id) = local_wal_id.as_deref().filter(|_| !self.read_only)
+                && claimed.as_deref() != Some(wal_id)
+            {
+                storage.write_fence().check().map_err(typed_or_internal)?;
+                wal_lineage::claim(&data_store, wal_id, &wal_dir)
+                    .await
+                    .map_err(UniError::Internal)?;
+            }
+        }
+
         // The allocator never starts below an ID already in use, even when
         // its file is gone (a hybrid store's lost local directory): the
         // manifest records how far it had reserved, and a manifest from
@@ -2732,7 +2824,9 @@ impl UniBuilder {
         // and the reactivated declared triggers exist; their places in the
         // announcement order are taken now (see `wal_recovery`). A read-only
         // open has nothing to announce with.
-        let recovered_commits = {
+        let recovered_commits = if skip_wal_replay {
+            Default::default()
+        } else {
             let (replayed, recovered_commits) = wal_recovery::replay_wal(
                 &writer,
                 &storage,

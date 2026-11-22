@@ -13,6 +13,7 @@ pub mod compaction_test;
 pub mod created_updated_at_test;
 pub mod delta_test;
 pub mod embedding_stack_overflow_test;
+pub mod hybrid_wal_lineage;
 pub mod incoming_after_bulk_load;
 pub mod label_declare_backfill_resilience;
 pub mod lance_cache_sizing;

@@ -216,6 +216,12 @@ create_exception!(
 );
 create_exception!(
     _uni_db,
+    UniStaleWalError,
+    UniError,
+    "The WAL belongs to an earlier writer of the store (attributes: store, wal, segments)."
+);
+create_exception!(
+    _uni_db,
     UniWriterFencedError,
     UniError,
     "This handle can no longer write: its writer lease was lost or it was closed (attribute: reason)."
@@ -407,6 +413,22 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
                 let val = err.value(py);
                 val.setattr("store", store.as_str())?;
                 val.setattr("holder", holder.as_str())?;
+                Ok(())
+            })
+            .ok();
+            err
+        }
+        StaleWal {
+            store,
+            wal,
+            segments,
+        } => {
+            let err = UniStaleWalError::new_err(msg);
+            Python::attach(|py| -> PyResult<()> {
+                let val = err.value(py);
+                val.setattr("store", store.as_str())?;
+                val.setattr("wal", wal.as_str())?;
+                val.setattr("segments", segments)?;
                 Ok(())
             })
             .ok();
@@ -715,6 +737,7 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         // Access control
         UniReadOnlyError,
         UniStoreLockedError,
+        UniStaleWalError,
         UniWriterFencedError,
         UniPermissionDeniedError,
         // Storage & I/O

@@ -1,7 +1,7 @@
 # Proposal: correct, complete object-store support
 
 - **Date:** 2026-11-20
-- **Status:** Phase A implemented (2026-11-21); Phase B implemented; BACKUP part of Phase E implemented; Phases C, D proposed
+- **Status:** Phase A implemented (2026-11-21); Phases B and C implemented; BACKUP part of Phase E implemented; Phase D proposed
 - **Issues:** #349 (schema ignores the URL prefix), #350 (remote-only open
   can't take an endpoint or credentials). Related: #348 (no store lock).
 - **Scope:** S3 and S3-compatibles (MinIO, Cloudflare R2, LocalStack), GCS,
@@ -627,6 +627,21 @@ Once tripped, the handle refuses writes with `UniError::WriterFenced`. Lingering
 **Release points.** The lease is released at the end of `Uni::shutdown`, in `Drop for Uni` after its bounded wait, and in `Drop for UniInner` as a fallback.
 
 **Limits.** Lance table appends are not fenced: a stalled holder that resumes after a takeover can still append to a table before its fence trips. Closing that needs Phase D. The lease relies on holders' clocks agreeing within the skew allowance.
+
+## 8c. Phase C design (as implemented)
+
+Hybrid means: a local WAL and ID allocator for commits that don't wait on the object store, everything else (tables, indexes, manifests, catalog, fork WALs) in the object store, one host at a time. `shutdown()` flushes, so a clean close hands every commit over; a crash or a bare drop leaves the unflushed commits in that host's WAL.
+
+The lease stops two hosts writing at once, but not divergence. Host A crashes with unflushed commits; the lease lapses; host B opens with its own directory and writes. A's WAL no longer describes the store. Replay compared only LSNs against the manifest's `wal_high_water_mark`, a number from B's WAL, so A's return replayed whichever of its commits happened to be above B's mark, over B's data, with IDs B may have reused.
+
+- **Identity.** The local WAL carries `wal_id.json`; the store records the WAL it follows in `catalog/wal_claim.json`, in the object store.
+- **Claim.** A writable hybrid open records its WAL's id before its first commit, so B supersedes A even if B never flushes, and even on a store never flushed at all.
+- **Check.** A WAL the claim does not name, holding segments with mutations, fails the open with `UniError::StaleWal` (Python `UniStaleWalError`). `set_aside_stale_wal()` moves those segments to `wal_set_aside/` and opens; nothing is deleted. Seal-only segments (a clean close) are moved aside without asking. A read-only open skips the WAL.
+- **Compatibility.** A store without a claim (older binaries) adopts the local WAL, as before. BACKUP copies `wal_id.json` with the WAL.
+
+Only hybrid stores are checked: a local or remote-only store keeps its WAL beside it, shared by every writer. A first version stamped the id into every snapshot manifest and claimed by publishing a successor manifest; review found that the successor masked an older binary's manifest from the endpoint-conformance check, missed stores with a lost `latest` or none yet, and falsely refused a local store whose `wal_id.json` was lost. A separate claim file has none of those problems.
+
+Tests: `crates/uni/tests/common/storage/hybrid_wal_lineage.rs` (refusal after another host wrote or only opened, flushed or never flushed, set-aside, same-host replay, clean handover, read-only, legacy adoption, local and remote-only unchanged), unit tests in `wal_lineage.rs` and `snapshot/manager.rs`, Python `test_a_stale_hybrid_wal_is_refused_then_set_aside`.
 
 ## 9. Test plan
 

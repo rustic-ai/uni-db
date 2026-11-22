@@ -147,6 +147,7 @@ let db = Uni::open("./my-graph")
 | `schema_file(path)` | Load schema from JSON file on initialization. |
 | `config(config)` | Set `UniConfig` options (includes `strict_schema`, timeouts, cache, etc.). |
 | `read_only()` | Open in read-only mode (no writer created). |
+| `set_aside_stale_wal()` | Hybrid mode: when the local WAL belongs to an earlier writer of the store (`UniError::StaleWal`), move it to `wal_set_aside/` and open. |
 | `write_lease(lease)` | Set write lease strategy for multi-agent access. |
 | `xervo_catalog(catalog)` | Set Uni-Xervo model catalog. |
 | `xervo_runtime(runtime)` | Set pre-built Xervo `ModelRuntime` directly (for testing or advanced use). |

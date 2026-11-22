@@ -1041,6 +1041,13 @@ async fn a_backup_of_a_hybrid_store_carries_its_local_state() -> Result<()> {
         dest.join("id_allocator.json").is_file(),
         "the local allocator was not copied"
     );
+    // The WAL's id goes with the WAL, or the copy's manifest would name a WAL
+    // the copy does not have and its own WAL would be refused as stale.
+    assert_eq!(
+        std::fs::read(dest.join("wal_id.json"))?,
+        std::fs::read(local.join("wal_id.json"))?,
+        "the WAL's id was not copied"
+    );
     for f in files_under(&local.join("_system")) {
         assert!(
             dest.join("_system").join(&f).is_file(),

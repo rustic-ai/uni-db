@@ -73,6 +73,8 @@ fn is_flat_root_metadata(path: &str) -> bool {
     path.starts_with("wal/")
         || path.starts_with("_system/")
         || path == "id_allocator.json"
+        || path == crate::runtime::wal_lineage::WAL_ID_FILE
+        || path.starts_with("wal_set_aside/")
         || path == "catalog/layout.json"
         || ROOT_CATALOG_FILES.contains(&path)
 }
@@ -170,6 +172,16 @@ pub async fn backup_store(storage: &StorageManager, dest: &StoreLocation) -> Res
                 &src_aux,
                 "id_allocator.json",
                 "id_allocator.json",
+                &dest_meta,
+                &mut report,
+            )
+            .await?;
+            // The WAL's id goes with it: the copied manifest names it, and a
+            // WAL whose id the manifest does not name is an earlier writer's.
+            copy_if_present(
+                &src_aux,
+                crate::runtime::wal_lineage::WAL_ID_FILE,
+                crate::runtime::wal_lineage::WAL_ID_FILE,
                 &dest_meta,
                 &mut report,
             )

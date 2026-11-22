@@ -83,6 +83,7 @@ _EXC_INSTANCE_ATTRS: dict[str, set[str]] = {
     "UniUncommittedWritesError": {"operation", "reason"},
     "UniForkLifecycleError": {"name", "stage"},
     "UniStoreLockedError": {"store", "holder"},
+    "UniStaleWalError": {"store", "wal", "segments"},
     "UniWriterFencedError": {"reason"},
     "UniBulkCommitIncompleteError": {"load_id", "reason"},
     "UniBulkCommitOutcomeUnknownError": {"load_id", "reason"},

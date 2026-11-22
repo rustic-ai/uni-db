@@ -125,6 +125,7 @@ pub struct DatabaseBuilder {
     pub(crate) cloud_config: Option<uni_common::CloudStorageConfig>,
     pub(crate) uni_config: Option<uni_common::UniConfig>,
     pub(crate) read_only: bool,
+    pub(crate) set_aside_stale_wal: bool,
     pub(crate) write_lease: Option<crate::types::PyWriteLease>,
     pub(crate) skip_invalid_locy_rules: bool,
     pub(crate) storage_options: crate::core::RedactedOptions,
@@ -149,6 +150,7 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
             storage_options: Default::default(),
@@ -172,6 +174,7 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
             storage_options: Default::default(),
@@ -195,6 +198,7 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
             storage_options: Default::default(),
@@ -218,6 +222,7 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
             storage_options: Default::default(),
@@ -368,6 +373,14 @@ impl DatabaseBuilder {
         slf
     }
 
+    /// Open a hybrid store whose local WAL belongs to an earlier writer,
+    /// moving that WAL's segments to `wal_set_aside/` (never deleting them).
+    /// Without it such an open raises `UniStaleWalError`.
+    fn set_aside_stale_wal(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.set_aside_stale_wal = true;
+        slf
+    }
+
     /// Skip persisted Locy rules that no longer compile, instead of failing.
     fn skip_invalid_locy_rules(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
         slf.skip_invalid_locy_rules = skip;
@@ -480,6 +493,7 @@ impl DatabaseBuilder {
                     self.read_only,
                     rust_write_lease,
                     self.skip_invalid_locy_rules,
+                    self.set_aside_stale_wal,
                     self.xervo_runtime.as_ref().map(|rt| rt.inner.clone()),
                     self.storage_options.0.clone(),
                 ))

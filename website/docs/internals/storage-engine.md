@@ -1025,7 +1025,7 @@ Cloud credentials come from the environment, a typed `CloudStorageConfig`, or ra
 
 ### Hybrid Mode (Local + Cloud)
 
-For optimal performance with cloud storage, use hybrid mode to maintain a local write cache:
+Hybrid mode keeps the WAL and ID allocator in a local directory and everything else in the object store:
 
 ```rust
 // The remote side is configured from the environment.
@@ -1063,11 +1063,12 @@ let db = Uni::open("./local-wal")
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Benefits:**
-- **Low-latency writes**: All mutations go to local WAL + L0 buffer
-- **Durable storage**: Data flushed to cloud storage on interval/threshold
-- **Cost efficiency**: Minimize cloud API calls through batching
-- **Crash recovery**: WAL provides local durability before cloud sync
+**Semantics:**
+- **Commits** go to the local WAL and L0, so they don't wait on the object store. They are on that host only until a flush (on `auto_flush_interval` / `auto_flush_threshold`) writes them to the object store. `shutdown()` flushes; a failed flush there is logged and leaves the commits in the WAL.
+- **One host at a time.** The store is held by the object-store lease and by an OS lock on the local directory.
+- **Crash recovery** replays the local WAL when the same directory reopens.
+- **WAL lineage.** The local WAL has an id (`wal_id.json`), and the store records the id of the WAL it follows (`catalog/wal_claim.json`, in the object store). A writable open records its own WAL's id before its first commit. An open whose WAL is not the recorded one, and which holds segments with mutations, belongs to a host that crashed or was dropped and whose store another host has opened since: it fails with `StaleWal` (or, with `set_aside_stale_wal()`, moves the segments to `wal_set_aside/`). Replaying such a WAL would apply commits made against an older state, with IDs the newer writer may have reused. A read-only open skips it.
+- **Forks** keep their WAL in the object store (`R/storage/wal_forks/`), so they are not tied to the host.
 
 ---
 

@@ -1205,6 +1205,7 @@ pub struct AsyncDatabaseBuilder {
     cloud_config: Option<uni_common::CloudStorageConfig>,
     uni_config: Option<uni_common::UniConfig>,
     read_only: bool,
+    set_aside_stale_wal: bool,
     write_lease: Option<crate::types::PyWriteLease>,
     skip_invalid_locy_rules: bool,
     storage_options: crate::core::RedactedOptions,
@@ -1226,6 +1227,7 @@ impl Default for AsyncDatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
             storage_options: Default::default(),
@@ -1403,6 +1405,14 @@ impl AsyncDatabaseBuilder {
         slf
     }
 
+    /// Open a hybrid store whose local WAL belongs to an earlier writer,
+    /// moving that WAL's segments to `wal_set_aside/` (never deleting them).
+    /// Without it such an open raises `UniStaleWalError`.
+    fn set_aside_stale_wal(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.set_aside_stale_wal = true;
+        slf
+    }
+
     /// Skip persisted Locy rules that no longer compile, instead of failing.
     fn skip_invalid_locy_rules(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
         slf.skip_invalid_locy_rules = skip;
@@ -1489,6 +1499,7 @@ impl AsyncDatabaseBuilder {
         let uni_config = self.uni_config.clone();
         let read_only = self.read_only;
         let skip_invalid_locy_rules = self.skip_invalid_locy_rules;
+        let set_aside_stale_wal = self.set_aside_stale_wal;
         let xervo_runtime = self.xervo_runtime.as_ref().map(|rt| rt.inner.clone());
         let storage_options = self.storage_options.0.clone();
         // `Custom` is read-back only: the Rust variant wraps a
@@ -1536,6 +1547,7 @@ impl AsyncDatabaseBuilder {
                 read_only,
                 rust_write_lease,
                 skip_invalid_locy_rules,
+                set_aside_stale_wal,
                 xervo_runtime,
                 storage_options,
             )

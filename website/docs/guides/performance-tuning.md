@@ -730,9 +730,9 @@ let db = Uni::open("./local-wal")
     .await?;
 ```
 
-### Hybrid Mode for Optimal Performance
+### Hybrid Mode for Write Latency
 
-Use hybrid mode (local + cloud) for best write latency with cloud durability:
+Hybrid mode keeps commits in a local WAL, so they don't wait on the object store. They reach the object store at the next flush:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -754,6 +754,7 @@ Use hybrid mode (local + cloud) for best write latency with cloud durability:
 - Write latency matters (< 1ms)
 - Data must ultimately reside in cloud storage
 - You have local SSD for the write cache
+- One host writes the store at a time, and losing that host's disk may cost the commits since the last flush. The flush interval bounds that window; a successful `shutdown()` closes it.
 
 ### Auto-Flush Tuning for Cloud
 

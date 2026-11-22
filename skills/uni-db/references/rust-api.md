@@ -81,6 +81,7 @@ impl UniBuilder {
     pub fn hybrid(mut self, remote_url: &str) -> Self;        // WAL + IDs local, data remote
     #[deprecated] pub fn remote_storage(self, remote_url: &str, config: CloudStorageConfig) -> Self;
     pub fn read_only(mut self) -> Self;
+    pub fn set_aside_stale_wal(mut self) -> Self; // hybrid: move an earlier writer's WAL aside instead of UniError::StaleWal
     pub fn write_lease(mut self, lease: WriteLease) -> Self;
     pub async fn build(self) -> Result<Uni>;
     pub fn build_sync(self) -> Result<Uni>;       // blocking, creates own runtime

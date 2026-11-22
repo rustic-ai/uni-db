@@ -181,6 +181,7 @@ Fluent builder for advanced database configuration. Exposed as `uni_db.UniBuilde
 | `.wal_enabled(bool)` | Enable/disable write-ahead log (default `True`) |
 | `.strict_schema(bool)` | Reject writes with undeclared labels/edge types (default `False`) |
 | `.read_only()` | Open in read-only mode |
+| `.set_aside_stale_wal()` | Hybrid mode: when the local WAL belongs to an earlier writer of the store (`UniStaleWalError`, attributes `store`, `wal`, `segments`), move it to `wal_set_aside/` and open |
 | `.write_lease(lease)` | Single-writer enforcement: `WriteLease.LOCAL()` (default lock or lease), `WriteLease.UNENFORCED()` (none, one writer by convention); a second writable open raises `UniStoreLockedError`, a fenced handle `UniWriterFencedError` |
 | `.hybrid(local_path, remote_url)` | Hybrid storage: WAL and ID allocator in `local_path` (must be the opened path), everything else at `remote_url` |
 | `.build()` | Build and return the `Uni` instance |

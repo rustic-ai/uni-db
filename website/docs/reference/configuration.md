@@ -533,6 +533,7 @@ A store lives in a local directory or in an object store. In hybrid mode the WAL
 | `.cloud_storage(CloudStorageConfig)` | Typed endpoint, credentials and region. Unset fields fall back to the environment |
 | `.storage_option(key, value)` / `.storage_options(map)` | Raw `object_store` options for both storage clients. These win over everything else |
 | `.hybrid(remote_uri)` | Hybrid mode: data at `remote_uri`, WAL and ID allocator in the opened directory |
+| `.set_aside_stale_wal()` | Hybrid mode: move a WAL from an earlier writer of the store to `wal_set_aside/` instead of failing with `StaleWal` |
 | `.remote_storage(uri, config)` | Deprecated. Same as `.hybrid(uri).cloud_storage(config)` |
 
 Python mirrors these as `cloud_config(dict)`, `storage_options(dict)` and `hybrid(local_path, remote_uri)`. The CLI takes `--path <uri>` and `--storage-option KEY=VALUE`.
@@ -550,12 +551,9 @@ let db = Uni::open("./local_wal")
     .await?;
 ```
 
-**Benefits:**
-- Low-latency writes via local WAL
-- Scalable storage via cloud object store
-- Cost-effective for large datasets
+Commits are durable in the local WAL and reach the object store at the next flush (`auto_flush_interval`, default 5 s). The store has one host at a time: a second host's writable open fails with `StoreLocked`. `shutdown()` flushes, so a clean close leaves every commit in the object store.
 
-A hybrid store is held by its object-store lease, so a second host's writable open fails with `StoreLocked`. Commits not yet flushed live only in the first host's local WAL.
+A host that crashed with unflushed commits and comes back after another host has opened the store fails with `StaleWal`, since replaying its WAL would corrupt the newer data. `.set_aside_stale_wal()` moves that WAL to `wal_set_aside/` and opens. See [Hybrid mode](../features/storage-cloud.md#hybrid-mode).
 
 ### S3 Configuration
 

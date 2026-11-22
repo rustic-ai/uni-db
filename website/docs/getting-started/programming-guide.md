@@ -162,7 +162,7 @@ Credentials and endpoints come from the environment (`AWS_*` including web ident
 
 ### Hybrid Mode (Local + Cloud)
 
-For optimal write performance with cloud durability, use hybrid mode:
+Hybrid mode keeps commits in a local WAL, so they don't wait on the object store, and keeps the data in the object store:
 
 === "Rust"
 
@@ -203,10 +203,13 @@ For optimal write performance with cloud durability, use hybrid mode:
 
 In hybrid mode:
 
-- **Writes** go to the local WAL + L0 buffer (low latency)
+- **Writes** go to the local WAL + L0 buffer, so commits don't wait on the object store
 - **Flushes** persist data to cloud storage (configurable interval, default 5 seconds)
 - **Reads** merge local L0 with cloud storage data
+- **`shutdown()`** flushes, so after a clean close every commit is in the object store (a flush that fails there is logged, and the commits stay in the local WAL)
+- **One host at a time** holds the store; a second host's writable open fails with `StoreLocked`
 - A lost local directory loses only commits not yet flushed; the store reopens from the object store with a fresh directory.
+- A host that crashed with unflushed commits and comes back after another host has opened the store fails with `StaleWal` instead of replaying a WAL the store has moved on from. `set_aside_stale_wal()` moves that WAL aside and opens.
 
 ### Auto-Flush Configuration
 
