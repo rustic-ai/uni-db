@@ -315,6 +315,72 @@ class TestAsyncTransaction:
 
         assert alice.is_persisted
 
+    async def test_create_edge_on_pending_nodes(self, async_session):
+        """An edge may join nodes added earlier in the same transaction."""
+        async_session.register(Person)
+        await async_session.sync_schema()
+
+        tx = await async_session.transaction()
+        async with tx:
+            alice = Person(name="Alice", email="alice@test.com")
+            bob = Person(name="Bob", email="bob@test.com")
+            tx.add(alice)
+            tx.add(bob)
+            tx.create_edge(alice, "FRIEND_OF", bob)
+
+        assert alice.is_persisted and bob.is_persisted
+        await async_session._db.flush()
+        rows = await async_session.cypher(
+            "MATCH (a:Person)-[:FRIEND_OF]->(b:Person) RETURN a.name AS a, b.name AS b"
+        )
+        assert [(r["a"], r["b"]) for r in rows] == [("Alice", "Bob")]
+
+    async def test_failed_commit_detaches_created_nodes(self, async_session):
+        """A failed commit leaves no stale vid or identity-map entry behind."""
+        from uni_pydantic import TransactionError
+
+        class Refused(UniNode):
+            __label__ = "Refused"
+            name: str
+
+            @before_create
+            def refuse(self):
+                raise RuntimeError("refused")
+
+        async_session.register(Person, Refused)
+        await async_session.sync_schema()
+
+        alice = Person(name="Alice", email="alice@test.com")
+        tx = await async_session.transaction()
+        with pytest.raises(TransactionError):
+            async with tx:
+                tx.add(alice)
+                tx.add(Refused(name="r"))
+
+        assert not alice.is_persisted
+        assert not any(v is alice for v in async_session._identity_map.values())
+        assert await async_session.get(Person, email="alice@test.com") is None
+
+
+class TestAsyncOptionalVector:
+    """`Vector[N] | None` is nullable through the async schema path too."""
+
+    async def test_optional_vector_saves_null(self, async_session):
+        class Note(UniNode):
+            __label__ = "Note"
+            title: str
+            emb: Vector[2] | None = None
+
+        async_session.register(Note)
+        await async_session.sync_schema()
+
+        bare = Note(title="bare")
+        async_session.add(bare)
+        await async_session.commit()
+
+        found = await async_session.get(Note, vid=bare.vid)
+        assert found is not None and found.emb is None
+
 
 class TestAsyncLifecycleHooks:
     """Tests for lifecycle hooks in async session."""

@@ -41,11 +41,14 @@ fn parse_storage_option(raw: &str) -> std::result::Result<(String, String), Stri
     }
 }
 
+/// The datasets `uni import <name>` can load.
+const IMPORTERS: &[&str] = &["semantic-scholar"];
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Import data from JSONL
+    /// Import a dataset from JSONL with a built-in importer
     Import {
-        /// Dataset name (e.g. semantic-scholar)
+        /// Importer to run (available: semantic-scholar)
         name: String,
         /// Path to papers JSONL
         #[arg(long)]
@@ -144,11 +147,19 @@ async fn main() -> Result<()> {
             papers,
             citations,
             output,
-        } => {
-            println!("Importing dataset '{name}'...");
-            crate::demo::semantic_scholar::import_semantic_scholar(&papers, &citations, &output)
+        } => match name.as_str() {
+            "semantic-scholar" => {
+                println!("Importing dataset '{name}'...");
+                crate::demo::semantic_scholar::import_semantic_scholar(
+                    &papers, &citations, &output,
+                )
                 .await?;
-        }
+            }
+            _ => anyhow::bail!(
+                "unknown importer '{name}'; available importers: {}",
+                IMPORTERS.join(", ")
+            ),
+        },
         Commands::Query { statement, path } => {
             let db = open_db(&path, &storage_options).await?;
             let succeeded = repl::execute_query(&db, &statement).await;

@@ -120,17 +120,19 @@ let xervo = db.xervo();
 let embeddings = xervo.embed("embed/default", &["Function verify() checks signatures."]).await?;
 ```
 
-For bulk import, use JSONL with either pre-computed embeddings or rely on the auto-embed pipeline:
+For bulk loads, use the bulk writer (see [Bulk Ingest](../features/bulk-ingest.md)) with either
+pre-computed embeddings or the auto-embed pipeline. `uni import` does not load chunks: it runs
+only the built-in Semantic Scholar demo importer.
 
-```bash
-# With pre-computed embeddings
-# chunks.jsonl: {"id": "c1", "text": "Function verify() checks signatures.", "embedding": [...]}
-# Without embeddings (auto-generated if index has embedding config)
-# chunks.jsonl: {"id": "c1", "text": "Function verify() checks signatures."}
-
-uni import support-bot \
-  --papers chunks.jsonl \
-  --citations relations.jsonl
+```python
+writer = session.tx().bulk_writer().build()
+writer.insert_vertices("Chunk", [
+    # With a pre-computed embedding (c1_embedding: a list of floats)
+    {"id": "c1", "text": "Function verify() checks signatures.", "embedding": c1_embedding},
+    # Without one (generated if the index has an embedding config)
+    {"id": "c2", "text": "Function sign() produces signatures."},
+])
+writer.commit()
 ```
 
 ### Linking chunks to entities

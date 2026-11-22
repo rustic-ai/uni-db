@@ -12,6 +12,47 @@ Severity: **wrong** (states false behaviour or an API that does not exist), **st
 (was true), **missing** (current behaviour a reader would look for), **inconsistent**
 (two docs disagree), **minor**.
 
+## Fix decisions
+
+Every defect in section 1 was traced to its root cause before fixing. C21 was not a code defect: algorithm
+id outputs are integers on purpose (a test pins it), so only the declared yield type changes.
+One more defect was found while tracing, recorded as C35 below. Decisions on the defects that
+change a contract:
+
+- **C1 tagged fork drop:** refused while the fork has tags. The error names them; untag first.
+  Recovery leaves a fork Tombstoned when a branch delete fails rather than orphaning branches.
+- **C3 DDL `DEFAULT`:** implemented for new writes; existing rows are not backfilled.
+- **C11 inverted indexes:** used by the planner as a candidate prefilter for
+  `ANY(x IN n.p WHERE x IN …)`, with `CREATE INVERTED INDEX` DDL.
+- **C12 full-text query syntax:** phrases, `NOT`/`-term`, `AND`/`OR`, in flushed and unflushed data alike.
+- **C16 `DROP LABEL` / `DROP EDGE TYPE`:** refused while data exists. Neo4j has no `DROP LABEL`
+  (labels disappear with their last node); the user removes the label or deletes the data first.
+- **C23 CALIBRATE:** a model's FEATURES expressions supply its INPUT values by position, as at a
+  call site.
+- **C24 JSON full-text:** a derived text column per JSON full-text index, filled at flush and searched by
+  `uni.fts.query` and `CONTAINS` prefiltering.
+- **Fork diff pairing:** vertices sharing `(label, ext_id)` pair into `changed`; when one side is the
+  other's ancestor, vertices and edges also pair by id.
+
+Defaults taken where the choice was minor:
+- C9 keeps one NEW node per row and stores its properties.
+- C26 gives Locy `$session.<key>` as Cypher has it.
+- C20 keeps Python `fork_info` returning `None` and removes the always-zero
+  `vertices_skipped_no_uid`.
+- C28 flushes the fork before tagging.
+- C29 resolves UID-index misses by a primary scan.
+- C30 rejects unknown import names.
+- C13 reports an out-of-range BTIC bound as an error.
+
+### Status
+
+| Defects | Status |
+|---|---|
+| C6, C7, C8, C30 | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
+| C21 | Not a defect: ids are intended; declared yield type corrected |
+| C20 `fork_info` | Kept as documented (Python returns `None`) |
+| All others | Open |
+
 ## 1. Code defects found (the docs describe the intended behaviour)
 
 These are not doc fixes. The docs were left describing the intended behaviour; each needs
@@ -59,6 +100,7 @@ Found while fixing the docs (reported once, not reproduced a second time unless 
 | C32 | `examples/example-pyo3-geo` pins `pyo3 = "0.27"` while `uni-plugin-pyo3` uses 0.29, so the example does not resolve (two crates link `python`) and the `cargo run` in `plugins/loaders/pyo3.md` cannot work. | `examples/example-pyo3-geo/Cargo.toml` |
 | C33 | Because of C23, the CALIBRATE-fitted calibrators in the drug-drug-interaction and predictive-maintenance notebooks come out inverted, and calibrated Brier scores are worse than raw. Those notebooks now rank on the raw classifier score; restore the calibrated ranking once C23 is fixed. | notebook runs |
 | C34 | A WASM or Extism load with an empty grant list reports the missing `ScalarFn` as `UniInternalError`, not a typed capability error. `rules().remove(name)` while another rule depends on it fails with `undefined rule: name` without naming the dependent. | probe |
+| C35 | Fork tags are named `fork_{tag}_{dataset}` with no fork id, but Lance tags are dataset-wide: two forks tagging `audit` collide, `list_fork_tags` lists another fork's tags, and `untag_fork` can delete them. | `crates/uni/src/api/fork_admin.rs:734,755,809,859-864` |
 
 Review findings the code showed to be wrong (the docs were left as they were):
 `uni.schema.createIndex(..., {type:'BITMAP'})` builds a real Lance Bitmap index (only Cypher

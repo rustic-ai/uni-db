@@ -502,15 +502,14 @@ updated = session.query(Person).filter(Person.name == "Alice").update(age=31)
 ## Transactions
 
 ```python
-# An edge joins nodes that are already persisted
-alice = Person(name="Alice", email="alice@example.com")
-bob = Person(name="Bob", email="bob@example.com")
-session.add_all([alice, bob])
-session.commit()
-
 # Context manager (auto-commit/rollback)
 with session.transaction() as tx:
-    tx.add(Person(name="Dana", email="dana@example.com"))
+    alice = Person(name="Alice", email="alice@example.com")
+    bob = Person(name="Bob", email="bob@example.com")
+    tx.add(alice)
+    tx.add(bob)
+    # Commit creates the added nodes before the edges, so an edge may join
+    # nodes added in the same transaction as well as persisted ones
     tx.create_edge(alice, "FRIEND_OF", bob)
     # Auto-commits on success, rolls back on exception
 
@@ -522,6 +521,11 @@ try:
 except Exception:
     tx.rollback()
 ```
+
+`tx.create_edge` accepts a node that is persisted or was `tx.add`-ed to the same
+transaction; any other unsaved node raises `NotPersisted`. When a commit fails, the
+transaction rolls back and the nodes it had created get their unsaved state back
+(no `vid`, not in the session's identity map), so they can be added again.
 
 ---
 
@@ -589,7 +593,8 @@ Automatic conversion between Python and Uni types:
 | `dict` | `json` | JSON object |
 | `list[T]` | `list:T` | Typed list |
 | `Vector[N]` | `vector:N` | N-dim vector |
-| `T \| None` | `T` + nullable | Optional field |
+| `SparseVector[N]` | `sparse_vector:N` | Learned-sparse vector, saved as `uni_db.SparseVector` |
+| `T \| None` | `T` + nullable | Optional field (`Vector[N] \| None` is a nullable vector column) |
 
 ---
 
@@ -643,7 +648,7 @@ class Post(UniNode):
 
     title: str
     content: str = Field(index="fulltext")
-    embedding: Vector[384]
+    embedding: Vector[384] | None = None
 
     author: User | None = Relationship("AUTHORED", direction="incoming")
 

@@ -521,6 +521,13 @@ class UniNode(BaseModel, metaclass=UniModelMeta):
         self._uid = uid
         self._is_new = False
 
+    def _detach_session(self) -> None:
+        """Undo ``_attach_session`` (the create it recorded was rolled back)."""
+        self._session = None
+        self._vid = None
+        self._uid = None
+        self._is_new = True
+
     @classmethod
     def get_property_fields(cls) -> dict[str, FieldInfo]:
         """Get all property fields (excluding relationships)."""

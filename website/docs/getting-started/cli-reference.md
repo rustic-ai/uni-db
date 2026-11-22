@@ -37,7 +37,12 @@ With no command, `uni` starts the REPL on `./storage`.
 
 ### `import` — Import Data
 
-Import data from JSONL files into a new or existing database.
+Run a built-in importer that loads JSONL files into a new or existing database.
+`<NAME>` selects the importer. The only one is `semantic-scholar`, which loads
+papers and citations with the fixed demo schema (see
+[Data Ingestion](../guides/data-ingestion.md)). Any other name fails with an
+error that lists the available importers, and nothing is written. To load your
+own data, use the bulk writer or Cypher instead.
 
 #### Synopsis
 
@@ -49,14 +54,14 @@ uni import <NAME> --papers <PATH> --citations <PATH> [--output <PATH>]
 
 | Argument | Description |
 |----------|-------------|
-| `<NAME>` | Dataset name identifier (e.g., `semantic-scholar`) |
+| `<NAME>` | Importer to run: `semantic-scholar` |
 
 #### Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--papers <PATH>` | Path to vertices JSONL file | — |
-| `--citations <PATH>` | Path to edges JSONL file | — |
+| `--papers <PATH>` | Path to the papers (vertices) JSONL file | — |
+| `--citations <PATH>` | Path to the citations (edges) JSONL file | — |
 | `--output <PATH>` | Output directory for storage | `./storage` |
 
 #### Examples

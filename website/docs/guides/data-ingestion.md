@@ -745,8 +745,8 @@ let bulk = tx.bulk_writer()
 
 ```bash
 # Parallel imports are safe only when writing to separate storage paths
-uni import shard1 --papers shard1.jsonl --citations shard1_edges.jsonl --output ./storage/shard1 &
-uni import shard2 --papers shard2.jsonl --citations shard2_edges.jsonl --output ./storage/shard2 &
+uni import semantic-scholar --papers shard1.jsonl --citations shard1_edges.jsonl --output ./storage/shard1 &
+uni import semantic-scholar --papers shard2.jsonl --citations shard2_edges.jsonl --output ./storage/shard2 &
 wait
 ```
 

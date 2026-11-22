@@ -125,3 +125,47 @@ fn imported_papers_have_no_paper_label() {
         "expected 3 papers for MATCH (p:Paper); parsed {paper_count:?}"
     );
 }
+
+/// `uni import <name>` runs the importer the name selects; an unknown name
+/// fails, lists the available importers, and writes nothing.
+#[test]
+fn import_rejects_unknown_dataset_name() {
+    let bin = env!("CARGO_BIN_EXE_uni");
+    let work = unique_tmp_dir("unknown_import");
+    std::fs::create_dir_all(&work).unwrap();
+
+    let papers = work.join("papers.jsonl");
+    std::fs::write(&papers, "{\"vid\":1,\"title\":\"A\",\"year\":2020}\n").unwrap();
+    let citations = work.join("citations.jsonl");
+    std::fs::write(&citations, "").unwrap();
+    let db_path = work.join("db");
+
+    let import = Command::new(bin)
+        .arg("import")
+        .arg("support-bot")
+        .arg("--papers")
+        .arg(&papers)
+        .arg("--citations")
+        .arg(&citations)
+        .arg("--output")
+        .arg(&db_path)
+        .output()
+        .expect("failed to spawn uni import");
+    let stdout = String::from_utf8_lossy(&import.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&import.stderr).into_owned();
+    let db_created = db_path.exists();
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert!(
+        !import.status.success(),
+        "import of an unknown dataset succeeded: stdout=\n{stdout}\nstderr=\n{stderr}"
+    );
+    assert!(
+        stderr.contains("support-bot") && stderr.contains("semantic-scholar"),
+        "error should name the dataset and the available importers; stderr=\n{stderr}"
+    );
+    assert!(
+        !db_created,
+        "an unknown dataset must not create the output DB"
+    );
+}

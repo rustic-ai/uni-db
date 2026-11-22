@@ -300,16 +300,14 @@ class SchemaGenerator:
                 continue  # Additive-only: skip existing labels
             lb = builder.label(label)
             for prop in label_schema.properties.values():
-                # Check for vector type
-                if prop.data_type.startswith("vector:"):
-                    dims = int(prop.data_type.split(":")[1])
-                    lb = lb.vector(prop.name, dims)
-                elif prop.nullable:
+                # property()/property_nullable() parse "vector:N", so a
+                # `Vector[N] | None` field becomes a nullable vector column.
+                if prop.nullable:
                     lb = lb.property_nullable(prop.name, prop.data_type)
                 else:
                     lb = lb.property(prop.name, prop.data_type)
 
-                # Add indexes (not vector — vector is handled by .vector())
+                # Add scalar indexes (vector/sparse/fulltext ones are built below)
                 if prop.index_type and prop.index_type in ("btree", "hash"):
                     lb = lb.index(prop.name, prop.index_type)
             builder = lb.done()
@@ -373,10 +371,9 @@ class SchemaGenerator:
                 continue
             lb = builder.label(label)
             for prop in label_schema.properties.values():
-                if prop.data_type.startswith("vector:"):
-                    dims = int(prop.data_type.split(":")[1])
-                    lb = lb.vector(prop.name, dims)
-                elif prop.nullable:
+                # property()/property_nullable() parse "vector:N", so a
+                # `Vector[N] | None` field becomes a nullable vector column.
+                if prop.nullable:
                     lb = lb.property_nullable(prop.name, prop.data_type)
                 else:
                     lb = lb.property(prop.name, prop.data_type)
