@@ -452,7 +452,7 @@ for item in items {
 let id = db.create_snapshot("batch").await?;
 let mut reader = db.session();
 reader.pin_to_version(&id).await?;
-for query in queries {
+for query in &queries {
     reader.query(query).await?;  // Same snapshot
 }
 

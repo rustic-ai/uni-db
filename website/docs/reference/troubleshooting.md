@@ -268,8 +268,10 @@ Error: Query execution failed: Out of memory
 2. **Stream results:**
    ```rust
    let mut cursor = session.query_with(query).cursor().await?;
-   while let Some(row) = cursor.next().await? {
-       // Process a row at a time
+   while let Some(batch) = cursor.next_batch().await {
+       for row in batch? {
+           // Process a page of rows at a time
+       }
    }
    ```
 
@@ -537,8 +539,10 @@ target.
 3. **Use streaming queries:**
    ```rust
    let mut cursor = session.query_with(query).cursor().await?;
-   while let Some(_row) = cursor.next().await? {
-       // Process results without loading all into memory
+   while let Some(batch) = cursor.next_batch().await {
+       for _row in batch? {
+           // Process results without loading all into memory
+       }
    }
    ```
 

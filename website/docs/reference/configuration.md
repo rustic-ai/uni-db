@@ -857,7 +857,7 @@ let config = UniConfig {
     auto_flush_threshold: 100_000,
     auto_flush_interval: None,  // Disable time-based flush during batch
     cache_size: 10 * 1024 * 1024 * 1024,  // 10 GB
-    parallelism: num_cpus::get(),
+    parallelism: std::thread::available_parallelism().map_or(1, |n| n.get()),
     execution_batch_size: Some(8192),
     ..Default::default()
 };

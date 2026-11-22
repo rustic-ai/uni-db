@@ -65,7 +65,6 @@ A model that scores assets for failure likelihood, invoked inside a rule:
     use uni_db::Uni;
     use uni_locy::{LocyConfig, MockClassifier};
 
-    # async fn demo() -> anyhow::Result<()> {
     let db = Uni::temporary().build().await?;
     db.schema()
         .label("Asset").property("score", uni_db::DataType::Float64)
@@ -103,8 +102,6 @@ A model that scores assets for failure likelihood, invoked inside a rule:
     "#;
     let result = session.locy_with(program).with_config(config).run().await?;
     println!("{:?}", result.derived_rule("at_risk").await?);
-    # Ok(())
-    # }
     ```
 
 Two things worth knowing up front:

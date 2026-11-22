@@ -35,6 +35,7 @@ db.schema()
         .index("embedding", IndexType::Vector(VectorIndexCfg {
             algorithm: VectorAlgo::IvfPq { partitions: 1024, sub_vectors: 16 },
             metric: VectorMetric::Cosine,
+            embedding: None,
         }))
         .done()
     // `IN_CATEGORY` points at `Category`, so the label must be declared here.

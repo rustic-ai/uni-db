@@ -15,7 +15,7 @@ process-line topology:
     in the curated AI4I slice.
   - VALIDATE with Brier + accuracy on the same labels.
   - EXPLAIN trace surfacing the NeuralProvenance per derivation.
-  - Ranked maintenance queue combining calibrated per-asset risk with
+  - Ranked maintenance queue combining per-asset classifier risk with
     downstream-impact line reliability.
 
 The dataset is vendored under
@@ -109,7 +109,7 @@ def _build_notebook() -> dict[str, Any]:
                 "- `CALIBRATE failure_likelihood ... METHOD platt_scaling` against the `actual_failed` labels, with raw vs calibrated Brier delta.",
                 "- `VALIDATE` reports Brier + accuracy on the same labels.",
                 "- `EXPLAIN` traces surface the classifier's `NeuralProvenance` per derivation.",
-                "- A ranked maintenance queue combines calibrated per-asset risk with downstream-impact line reliability.",
+                "- A ranked maintenance queue combines per-asset classifier risk with downstream-impact line reliability.",
                 "",
                 "The runtime classifier is a deterministic Python callable so the notebook is reproducible without ONNX / sklearn deps. In production you'd register any callable matching the `list[dict] -> list[float]` contract.",
             ],
@@ -465,7 +465,7 @@ def _build_notebook() -> dict[str, Any]:
                 "calib_result = session.locy_with(CALIBRATE_PROGRAM).with_config(config).run()",
                 "calib_records = [c for c in calib_result.command_results if isinstance(c, dict) and c.get('type') == 'calibrate']",
                 "BRIER_DELTA = None",
-                "CALIBRATOR = None  # exposed for downstream calibrated-rescoring (cell 9)",
+                "CALIBRATOR = None  # the fitted calibrator, when the command returns one",
                 "if calib_records:",
                 "    c = calib_records[0]",
                 "    print(f'Calibration: {c[\"method\"]}')",
@@ -610,7 +610,7 @@ def _build_notebook() -> dict[str, Any]:
             [
                 "## 9) Ranked Maintenance Queue: Per-Asset Risk × Downstream Impact",
                 "",
-                "Maintenance prioritisation isn't just \"highest probability of failure\". It's \"highest probability of failure weighted by the value of what fails downstream\". We join the per-asset calibrated risk with the line-reliability rollup to produce a ranked queue that surfaces the assets whose failure would cascade the most.",
+                "Maintenance prioritisation isn't just \"highest probability of failure\". It's \"highest probability of failure weighted by the value of what fails downstream\". We join the per-asset classifier risk with the line-reliability rollup to produce a ranked queue that surfaces the assets whose failure would cascade the most.",
             ],
         )
     )
@@ -625,20 +625,11 @@ def _build_notebook() -> dict[str, Any]:
                 "asset_rows = compose_result.derived.get('asset_risk', [])",
                 "line_rows = compose_result.derived.get('line_reliability', [])",
                 "",
-                "# Apply the fitted calibrator so the queue ranks on CALIBRATED risk,",
-                "# not raw classifier output. If CALIBRATOR is None (calibration cell",
-                "# didn't return one), we fall back to raw risk and flag that fact.",
                 "asset_risk_by_udi = {",
-                "    r['e'].properties['udi']: (",
-                "        CALIBRATOR.apply(r['risk']) if CALIBRATOR is not None else r['risk']",
-                "    )",
+                "    r['e'].properties['udi']: r['risk']",
                 "    for r in asset_rows",
                 "    if hasattr(r.get('e'), 'properties')",
                 "}",
-                "if CALIBRATOR is None:",
-                "    print('NOTE: no calibrator returned — queue ranked on RAW risk')",
-                "else:",
-                "    print(f'Queue ranked on CALIBRATED risk via {CALIBRATOR}')",
                 "",
                 "downstream_min_reliability = {}",
                 "for r in line_rows:",
@@ -657,7 +648,7 @@ def _build_notebook() -> dict[str, Any]:
                 "        continue",
                 "    blast_radius[udi] = blast_radius.get(udi, 0) + 1",
                 "",
-                "# Combined score: high (calibrated) asset risk + downstream-of low",
+                "# Combined score: high asset risk + downstream-of low",
                 "# reliability + larger blast radius => higher priority.",
                 "queue = []",
                 "for udi, risk in asset_risk_by_udi.items():",

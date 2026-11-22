@@ -12,13 +12,13 @@ Yield engineers manually correlate sensor readings from SECOM-style manufacturin
 
 ## With Uni
 
-The notebook loads real SECOM manufacturing data (1,567 lots, 590 sensor features) and focuses on a 96-lot cohort, defining a handful of declarative rules that cover the diagnostic workflow. Fail-lot to tool mapping identifies which tools processed failing wafers. Hotspot ranking orders tools by the number of failed lots whose excursions trace back to each tool. Containment simulation answers "what if we quarantine Tool X?" by counting how many failed lots a hold on the suspect tool would contain versus leave residual (`ASSUME`). Minimal-change search (`ABDUCE`) finds the smallest set of graph edits that would stop a given lot from triggering the quarantine rule. Every conclusion includes a derivation trace (`EXPLAIN RULE`) showing the lot-to-feature-to-tool evidence chain that supports it.
+The notebook loads real SECOM manufacturing data (1,567 lots, 590 sensor features) and focuses on a 96-lot cohort, defining a handful of declarative rules that cover the diagnostic workflow. Fail-lot to tool mapping identifies which tools processed failing wafers. Hotspot ranking orders tools by the number of failed lots whose excursions trace back to each tool. Containment simulation answers "what if we quarantine Tool X?" by counting how many failed lots a hold on the suspect tool would contain versus leave residual (`ASSUME`). `ABDUCE` proposes single graph edits, each validated, that would stop a given lot from triggering the quarantine rule. Every conclusion includes a derivation trace (`EXPLAIN RULE`) showing the lot-to-feature-to-tool evidence chain that supports it.
 
 ## What You'll See
 
 - Ranked tool hotspots by failed-lot count, each backed by a traceable evidence chain
 - Containment scenarios: how many failed lots a hold on the suspect tool would contain versus leave residual
-- Minimal-change recommendations — the smallest set of graph edits that would clear a lot's quarantine trigger
+- Validated single-edit recommendations that would clear a lot's quarantine trigger
 - Derivation evidence for each conclusion, tracing the lot-to-feature-to-tool chain
 
 ## Why It Matters

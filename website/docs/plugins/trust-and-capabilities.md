@@ -208,9 +208,12 @@ mechanism that keeps this surface from drifting.
     with open("geo_component.wasm", "rb") as f:
         outcome = db.load_wasm_component(f.read(), grants=["ScalarFn"])
 
-    # Extism plugins use the same grants list:
+    # Extism plugins use the same grants list. (Shown on a second instance:
+    # both geo builds register `ai.example.geo.haversine`, and a qname can be
+    # registered only once per instance.)
+    db2 = Uni.temporary()
     with open("geo_extism.wasm", "rb") as f:
-        outcome = db.load_wasm_extism(f.read(), grants=["ScalarFn"])
+        outcome = db2.load_wasm_extism(f.read(), grants=["ScalarFn"])
     ```
 
     Both methods exist only in a build with the `wasm-plugins` /

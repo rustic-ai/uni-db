@@ -7,7 +7,6 @@ This walkthrough shows non-recursive and recursive reasoning, then explains one 
 ```rust
 use uni_db::Uni;
 
-# async fn run() -> Result<(), uni_db::UniError> {
 let db = Uni::in_memory().build().await?;
 let session = db.session();
 
@@ -30,8 +29,6 @@ QUERY reachable WHERE a.name = 'A' RETURN b.name AS target
 
 let result = session.locy(program).await?;
 println!("rows = {:?}", result.rows());
-# Ok(())
-# }
 ```
 
 ## Python Example

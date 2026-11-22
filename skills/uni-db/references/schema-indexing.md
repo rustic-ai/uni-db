@@ -25,7 +25,7 @@ MATCH (n:Person {ext_id: 'user-123'}) RETURN n
 Dense, sequential, never reused. Serves as `_vid` column in all Lance tables and as array offsets in CSR adjacency structures. Sentinel: `Vid::INVALID = u64::MAX`.
 
 ```rust
-use uni_db::core::Vid;
+use uni_db::Vid;
 let vid = Vid::new(42);  // dense id; labels are resolved via VidLabelsIndex
 ```
 

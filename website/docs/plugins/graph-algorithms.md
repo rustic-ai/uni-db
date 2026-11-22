@@ -145,7 +145,7 @@ Sandboxed guests do not call `graph_named` at all — the handles arrive beside 
 
 The `graphs` key is additive, so a guest written before named scopes existed ignores it and behaves exactly as before.
 
-Each scope takes the **full** projection-config vocabulary independently — Native `nodeLabels` / `edgeTypes` / `weightProperty` / `nodeProperties`, or a Cypher `nodeQuery` / `edgeQuery`, or a `name` for a stored named graph.
+Each scope takes the **full** projection-config vocabulary independently — Native `nodeLabels` / `edgeTypes` / `weightProperty` / `nodeProperties` / `edgeProperties`, or a Cypher `nodeQuery` / `edgeQuery`, or a `name` for a stored named graph.
 
 Three properties are worth being precise about.
 
@@ -400,7 +400,7 @@ quietly misleading you.
 
 #### Direction `both`
 
-`expand`, `degrees`, and `spmv` accept `dir="both"` — the union of a vertex's out- and in-edges. It is **fail-loud**: `"both"` requires a projection built with `includeReverse: true`, and calling it against a projection without the reverse CSR raises a typed error naming `includeReverse`. Build the projection with the reverse adjacency, or use `"out"` / `"in"`. `spmv` with `"both"` is unweighted, because the reverse CSR carries no edge weights.
+`expand`, `degrees`, and `spmv` accept `dir="both"` — the union of a vertex's out- and in-edges. It is **fail-loud**: `"both"` requires a projection built with `includeReverse: true` (the default for a guest algorithm's projection), and calling it against a projection built with `includeReverse: false` raises a typed error naming `includeReverse`. Build the projection with the reverse adjacency, or use `"out"` / `"in"`. `spmv` with `"both"` is unweighted, because the reverse CSR carries no edge weights.
 
 ### Edge sets
 
@@ -473,7 +473,7 @@ Together these express reachability or SpMV over a random edge subset (percolati
 
 This Rhai script owns the search. The tree shape, exploration constant, score formula and stopping rule are all the guest's; the host only runs the loops that do bulk work.
 
-```rust
+```rhai
 let arena = sess.arena_new(8191, 2);
 let root  = sess.arena_alloc(arena, 1);
 
@@ -511,6 +511,8 @@ while n < 4096 {
 }
 sess.arena_freeze(arena)   // now an ordinary graph — run PageRank on it if you like
 ```
+
+The body is the algorithm function, which receives the session (`sess`) as its first argument. Its 4,096 rollouts over an 8,191-slot arena cost more native work than the [size-derived default budget](#the-native-work-budget) allows on a very small projection (a handful of vertices); call it over a projection of a few dozen vertices or more.
 
 Two details that matter more than they look:
 

@@ -163,7 +163,7 @@ Returned by `Uni::open()`, `Uni::create()`, etc. Configures the database before 
 ```rust
 let db = Uni::open("./my-graph")
     .schema_file("schema.json")
-    .config(UniConfig { /* ... */ })
+    .config(UniConfig::default())
     .read_only()
     .write_lease(WriteLease::Local)
     .hybrid("s3://bucket/data")
@@ -1732,8 +1732,8 @@ let names = session.rules().list();
 let info = session.rules().get("edge_rule");
 println!("Rules: {:?}, count: {}", names, session.rules().count());
 
-// Remove and clear
-session.rules().remove("edge_rule").await?;
+// Remove and clear (path_rule depends on edge_rule, so remove it first)
+session.rules().remove("path_rule").await?;
 session.rules().clear().await?;
 ```
 

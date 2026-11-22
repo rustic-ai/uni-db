@@ -22,7 +22,6 @@ Schemaless search does not accept a pushed-down property filter.
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -36,8 +35,6 @@ Schemaless search does not accept a pushed-down property filter.
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"

@@ -5453,7 +5453,7 @@ The `EmbedHybrid` alias is dispatched through the same host-side model runtime a
 Applications can access configured embedding and generation aliases directly through the host API:
 
 ```rust
-use uni_xervo::Message;
+use uni_db::xervo::{GenerationOptions, Message};
 
 let xervo = db.xervo();  // Always succeeds; individual methods error if unconfigured
 
@@ -7183,14 +7183,15 @@ retry helper — `is_retriable()` classifies `SerializationConflict`,
 ```rust
 // Re-runs the whole transaction body on a retriable conflict
 // (jittered exponential backoff; default 5 attempts).
-session.transact_with_retry(RetryOptions::default(), |tx| async move {
-    let n: i64 = tx.query_scalar("MATCH (c:Counter {id:'x'}) RETURN c.n").await?;
+session.transact_with_retry(RetryOptions::default(), |tx| Box::pin(async move {
+    let row = tx.query_with("MATCH (c:Counter {id:'x'}) RETURN c.n AS n").fetch_one().await?;
+    let n: i64 = match row { Some(r) => r.get("n")?, None => 0 };
     tx.execute_with("MATCH (c:Counter {id:'x'}) SET c.n = $v")
         .param("v", n + 1)
         .run()
         .await?;
     Ok(())
-}).await?;
+})).await?;
 
 // Single-statement convenience wrapper:
 session.execute_with_retry("MERGE (u:User {email:'a@b.com'})").await?;
@@ -7487,9 +7488,9 @@ Sub-APIs are accessed via accessor methods on `Uni`, `Session`, or `Transaction`
 
 ```rust
 // Locy rule management (available at all three scopes)
-db.rules().register("risk(x) :- ...")?;
+db.rules().register("risk(x) :- ...").await?;
 session.rules().list();
-tx.rules().register("local_rule(x) :- ...")?;
+tx.rules().register("local_rule(x) :- ...").await?;
 
 // Database administration (on Uni only)
 db.compaction().compact("Person").await?;

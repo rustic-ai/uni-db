@@ -196,9 +196,11 @@ dict.
 ## Capability names
 
 Grant strings (Python `grants`, parsed by `Capability::parse_grant` into a
-Rust `CapabilitySet`) and the entries in
-`effective_capabilities` / `denied_capabilities` use the variant names of
-`uni_plugin::Capability`. The authoritative set follows; see
+Rust `CapabilitySet`) use the variant names of `uni_plugin::Capability`. The
+entries in `effective_capabilities` / `denied_capabilities` are each
+capability's `Debug` rendering: the bare name for a variant without data
+(`ScalarFn`), and the name with its attenuation for one that carries data
+(`Network { allow: ["https://api.example.com/**"] }`). The authoritative set follows; see
 [Trust & Capabilities](trust-and-capabilities.md) for how declared capabilities,
 host grants, and the effective (intersected) set interact.
 

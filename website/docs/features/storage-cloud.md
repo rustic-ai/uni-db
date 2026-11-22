@@ -15,7 +15,6 @@ Uni stores data in Lance tables on local disk or in an object store: Amazon S3 a
     ```rust
     use uni_db::{CloudStorageConfig, Uni};
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     // Configured from the environment (AWS_* variables, IRSA, ECS task roles, ...).
     let db = Uni::open("s3://my-bucket/graph").build().await?;
 
@@ -38,8 +37,6 @@ Uni stores data in Lance tables on local disk or in an object store: Amazon S3 a
         .storage_option("azure_storage_use_emulator", "true")
         .build()
         .await?;
-    # Ok(())
-    # }
     ```
 
 === "Python"

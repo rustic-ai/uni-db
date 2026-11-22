@@ -20,7 +20,7 @@ The notebook computes an exposure score for each finding by combining CVSS base 
 - Blast radius per source asset, traced by recursive `ALONG` propagation across dependency edges (paths up to several hops deep)
 - Team-level exposure rollups grouping findings by remediation owner, with average, max, and urgent-finding counts
 - A best-action remediation plan that picks one action per urgent finding by lowest residual risk, then cost and downtime (`BEST BY`)
-- Counterfactual containment with `ASSUME` (applying virtual patches to high-criticality assets) and minimal-change search with `ABDUCE` to find what would remove an urgent patch requirement
+- Counterfactual containment with `ASSUME` (applying virtual patches to high-criticality assets) and single-edit candidates from `ABDUCE`, each validated, for what would remove an urgent patch requirement
 
 ## Why It Matters
 

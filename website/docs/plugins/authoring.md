@@ -486,7 +486,7 @@ it. The `m6` test is the pattern to copy — load the plugin, build an input
 batch, invoke by `QName`, and compare against the reference, byte-equal for
 the compiled WASM paths or within a small ULP tolerance for scripted loaders.
 The geo example also ships unit tests on the math itself (Paris→London
-≈ 343.557 km, antipodes ≈ half-circumference) that you can mirror for your
+≈ 343.556 km, antipodes ≈ half-circumference) that you can mirror for your
 own formula.
 
 ---

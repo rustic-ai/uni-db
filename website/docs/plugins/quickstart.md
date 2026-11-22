@@ -169,7 +169,9 @@ effective set is empty even though you passed `grants=["ScalarFn"]` — that gra
 is a *surface* grant that authorizes registering the scalar, distinct from the
 host-service capabilities a manifest can declare. If you withhold a capability a
 plugin does declare, it shows up under `denied_capabilities` instead — a quick
-way to spot a misconfigured grant set. In Rust, the same fields are typed members
+way to spot a misconfigured grant set. (A plugin that also imports the host
+functions behind that capability, such as `example-wasm-net` with `Network`,
+fails to load instead: the import is not linked.) In Rust, the same fields are typed members
 of `uni_plugin_wasm::loader::LoadOutcome`.
 
 See [Reference](reference.md) for the complete field table and the full list
@@ -191,7 +193,7 @@ expression is allowed:
         "RETURN ai.example.geo.haversine(48.8566, 2.3522, 51.5074, -0.1278) "
         "AS km"
     )
-    print(rows)  # km ~= 343.557
+    print(rows[0]["km"])  # ~= 343.556
     ```
 
 === "Rust"
@@ -204,11 +206,11 @@ expression is allowed:
              AS km",
         )
         .await?;
-    // km ~= 343.557
+    // km ~= 343.556
     ```
 
 The four `f64` arguments are `lat1, lon1, lat2, lon2`; the result is the
-distance in kilometres (~343.557 km for Paris→London). Like any DataFusion
+distance in kilometres (~343.556 km for Paris→London). Like any DataFusion
 scalar, it is vectorised — pass column expressions over a `MATCH` and it
 evaluates row-by-row across the whole batch.
 

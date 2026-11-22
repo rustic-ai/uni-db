@@ -712,7 +712,7 @@ let result = session.locy_with("QUERY r WHERE x = $val")
     .timeout(Duration::from_secs(60))
     .max_iterations(500)
     .cancellation_token(token)
-    .with_config(LocyConfig { .. })
+    .with_config(LocyConfig::default())
     .run()
     .await?;
 
@@ -727,7 +727,7 @@ let result = tx.locy_with("QUERY r WHERE x = $val")
     .param("val", "Alice").run().await?;
 
 // Apply session-level derived facts
-let derived = session.locy("DERIVE infer_edges").await?.derived_fact_set.unwrap();
+let derived = session.locy("DERIVE infer_edges").await?.derived().unwrap().clone();
 tx.apply(derived).await?;
 tx.commit().await?;
 

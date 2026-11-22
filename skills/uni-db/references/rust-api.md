@@ -300,7 +300,8 @@ pub enum DataType {
     String, Int32, Int64, Float32, Float64, Bool,
     Timestamp, Date, Time, DateTime, Duration, CypherValue, Bytes,
     Point(PointType),              // Geographic | Cartesian2D | Cartesian3D
-    Vector { dimensions: usize },
+    Vector { dimensions: usize }, SparseVector { dimensions: usize }, BinaryVector { dimensions: usize },
+    Btic,
     Crdt(CrdtType),                // GCounter | GSet | ORSet | LWWRegister | LWWMap | Rga | VectorClock | VCRegister
     List(Box<DataType>),
     Map(Box<DataType>, Box<DataType>),
@@ -468,7 +469,9 @@ impl Row {
 pub enum Value {
     Null, Bool(bool), Int(i64), Float(f64), String(String), Bytes(Vec<u8>),
     List(Vec<Value>), Map(HashMap<String, Value>),
-    Node(Node), Edge(Edge), Path(Path), Vector(Vec<f32>), Temporal(TemporalValue),
+    Node(Node), Edge(Edge), Path(Path), Vector(Vec<f32>),
+    SparseVector { indices: Vec<u32>, values: Vec<f32> }, BinaryVector(Vec<u8>),
+    Temporal(TemporalValue),
 }
 pub struct Node { pub vid: Vid, pub labels: Vec<String>, pub properties: HashMap<String, Value> }
 pub struct Edge { pub eid: Eid, pub edge_type: String, pub src: Vid, pub dst: Vid, pub properties: HashMap<String, Value> }
@@ -682,18 +685,22 @@ pub enum UniError {
     // Transaction
     Transaction { message }, TransactionConflict { message }, TransactionAlreadyCompleted,
     TransactionExpired { tx_id, hint }, CommitTimeout { tx_id, hint },
+    SerializationConflict { message }, ConstraintConflict { message }, TransactionRollbackOnly,
+    LockTimeout { timeout_ms },
     // Access control
     ReadOnly { operation }, PermissionDenied { action }, DatabaseLocked /* never raised */,
     // Single writer and hybrid lineage
     StoreLocked { store, holder }, WriterFenced { reason }, StaleWal { store, wal, segments },
     WriteContextAlreadyActive { session_id, hint },
     // Resource limits
-    MemoryLimitExceeded { limit_bytes }, Timeout { timeout_ms }, Cancelled,
+    MemoryLimitExceeded { limit_bytes, message }, Timeout { timeout_ms }, Cancelled,
     // Locy
-    StaleDerivedFacts { version_gap }, RuleConflict { rule_name },
+    StaleDerivedFacts { version_gap }, RuleConflict { rule_name }, LocyIncomplete { detail },
     // Other
     HookRejected { message }, Constraint { message },
     Storage { message, source }, Io(std::io::Error), Internal(anyhow::Error),
+    // ... plus fork (ForkNotFound, ForkInUse, ...), bulk-load, trigger, auth and
+    // other variants: see crates/uni-common/src/api/error.rs
 }
 ```
 
@@ -709,7 +716,7 @@ db.schema()
     .label("Product")
         .property("name", DataType::String)
         .property("price", DataType::Float64)
-        .vector("embedding", 384)
+        .property_nullable("embedding", DataType::Vector { dimensions: 384 })
         .index("name", IndexType::Scalar(ScalarType::BTree))
     .apply().await?;
 

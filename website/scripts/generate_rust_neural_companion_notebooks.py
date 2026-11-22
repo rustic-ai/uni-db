@@ -47,6 +47,15 @@ def _code(key: str, idx: int, lines: list[str]) -> dict[str, Any]:
     }
 
 
+def _deps(key: str, idx: int) -> dict[str, Any]:
+    # evcxr dependency directives; paths are relative to this notebook.
+    return _code(key, idx, [
+        ":dep uni-db = { path = \"../../../crates/uni\" }",
+        ":dep uni-locy = { path = \"../../../crates/uni-locy\" }",
+        ":dep tokio = { version = \"1\", features = [\"full\"] }",
+    ])
+
+
 def _rust_metadata() -> dict[str, Any]:
     return {
         "kernelspec": {
@@ -90,6 +99,7 @@ def _pdm_notebook() -> dict[str, Any]:
         "- Read the EXPLAIN output to see `NeuralProvenance` per derivation.",
     ]))
     cells.append(_md(key, len(cells), ["## 1) Setup"]))
+    cells.append(_deps(key, len(cells)))
     cells.append(_code(key, len(cells), [
         "use std::sync::Arc;",
         "use uni_db::{DataType, Uni, Result};",
@@ -208,6 +218,7 @@ def _adr_notebook() -> dict[str, Any]:
         "Compact Rust counterpart to the Python ADR flagship. Same shape: an inline pharmacovigilance graph + a `MockClassifier` registered under the model name + `CREATE MODEL` + `CALIBRATE` + `VALIDATE` + `EXPLAIN`.",
     ]))
     cells.append(_md(key, len(cells), ["## 1) Setup + Schema"]))
+    cells.append(_deps(key, len(cells)))
     cells.append(_code(key, len(cells), [
         "use std::sync::Arc;",
         "use uni_db::{DataType, Uni, Result};",
@@ -316,6 +327,7 @@ def _ddi_notebook() -> dict[str, Any]:
         "Compact Rust counterpart to the Python DDI flagship. Same shape: inline pairwise-interaction graph + a `MockClassifier` + `CREATE MODEL` + `CALIBRATE` + `VALIDATE` + `EXPLAIN`. In production this is exactly where you'd plug in a small MLP head over precomputed R-GCN drug embeddings.",
     ]))
     cells.append(_md(key, len(cells), ["## 1) Setup + Schema"]))
+    cells.append(_deps(key, len(cells)))
     cells.append(_code(key, len(cells), [
         "use std::sync::Arc;",
         "use uni_db::{DataType, Uni, Result};",

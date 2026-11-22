@@ -15,7 +15,6 @@ Uni combines a property graph with vectors and JSON documents. You can model ent
     ```rust
     use uni_db::{DataType, Uni};
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
 
     db.schema()
@@ -33,8 +32,6 @@ Uni combines a property graph with vectors and JSON documents. You can model ent
     tx.execute("CREATE (:Person {name: 'Ada', age: 31, city: 'London'})")
         .await?;
     tx.commit().await?;
-    # Ok(())
-    # }
     ```
 
 === "Python"

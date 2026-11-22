@@ -16,15 +16,12 @@ Uni provides ACID transactions with Serializable Snapshot Isolation (SSI). Reads
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
     let tx = session.tx().await?;
     tx.execute("CREATE (:User {email: 'a@b.com'})").await?;
     tx.commit().await?;
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -60,7 +57,6 @@ SSI is on by default (`UniConfig.ssi_enabled = true`). Under SSI, concurrent rea
 ```rust
 use uni_db::{RetryOptions, Uni};
 
-# async fn demo() -> Result<(), uni_db::UniError> {
 let db = Uni::open("./my_db").build().await?;
 let session = db.session();
 
@@ -79,8 +75,6 @@ session
         })
     })
     .await?;
-# Ok(())
-# }
 ```
 
 ## Scratch transactions — throwaway write isolation

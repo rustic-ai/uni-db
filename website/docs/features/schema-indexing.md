@@ -14,7 +14,6 @@ Uni lets you define schema, constraints, and indexes to enforce correctness and 
     ```rust
     use uni_db::{DataType, IndexType, ScalarType, Uni};
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
 
     db.schema()
@@ -25,8 +24,6 @@ Uni lets you define schema, constraints, and indexes to enforce correctness and 
         .apply()
         .await?;
 
-    # Ok(())
-    # }
     ```
 
 === "Python"

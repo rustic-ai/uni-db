@@ -591,12 +591,7 @@ Edges also support overflow properties:
 db.schema()
     .label("Person")
     .edge_type("KNOWS", &["Person"], &["Person"])
-    // Only 'since' in schema
-    .apply().await?;
-
-db.schema()
-    .properties("KNOWS")
-    .property("since", DataType::Int32)
+        .property("since", DataType::Int32)  // Only 'since' in schema
     .apply().await?;
 
 // Create with overflow edge properties

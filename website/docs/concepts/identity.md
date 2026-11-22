@@ -66,7 +66,7 @@ manipulation. For O(1) array indexing during query execution, remap a VID to a
 ### Usage
 
 ```rust
-use uni_db::core::Vid;
+use uni_db::Vid;
 
 let vid = Vid::new(42);       // a single u64 id
 assert_eq!(vid.as_u64(), 42);
@@ -86,7 +86,7 @@ storage, not from bits of the id.
 ### Usage
 
 ```rust
-use uni_db::core::Eid;
+use uni_db::Eid;
 
 let eid = Eid::new(21);
 assert_eq!(eid.as_u64(), 21);

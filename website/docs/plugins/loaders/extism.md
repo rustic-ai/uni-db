@@ -38,7 +38,7 @@ the plugin's declared capabilities with the host's grants and adds only the host
 functions whose `required_capability` is in that effective set to the plugin's
 import table. A host function that is always available (no `required_capability`)
 is added unconditionally; one gated behind an ungranted capability is left out,
-so the plugin's call to it is unresolvable.
+so a plugin that imports it fails to load with an `unknown import` error.
 
 ## Authoring
 
@@ -267,7 +267,7 @@ any other plugin function. The host encodes the call's arguments as an Arrow IPC
 `RecordBatch`, invokes the plugin's `invoke_<qname>` export, and decodes the
 returned Arrow IPC batch — for the geo example, invoking
 `ai.example.geo.haversine` with Paris and London coordinates returns
-≈343.557 km.
+≈343.556 km.
 
 ## WASM Component Model vs Extism
 

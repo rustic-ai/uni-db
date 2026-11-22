@@ -14,13 +14,10 @@ Uni provides first-class Rust and Python APIs, plus a CLI for exploration and sc
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
     let rows = session.query("MATCH (n) RETURN count(n)").await?;
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"

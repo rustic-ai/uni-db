@@ -20,7 +20,6 @@ Built-in algorithms run over a projection of declared labels and edge types: dec
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -29,8 +28,6 @@ Built-in algorithms run over a projection of declared labels and edge types: dec
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"

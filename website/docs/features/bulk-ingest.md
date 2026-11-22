@@ -17,7 +17,6 @@ The bulk writer is strict: the labels and edge types it writes must be declared 
     use std::collections::HashMap;
     use uni_db::{EdgeData, Uni, Value};
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -41,8 +40,6 @@ The bulk writer is strict: the labels and edge types it writes must be declared 
     let stats = writer.commit().await?;
 
     println!("{:?}", stats);
-    # Ok(())
-    # }
     ```
 
 === "Python"

@@ -847,17 +847,22 @@ LIMIT 10
 
 ### Batch Queries
 
-For multiple queries, batch them:
+There is no batch vector-search call. Run one parameterized query per vector:
 
 ```rust
-// Process multiple query vectors efficiently
-let queries = vec![query1, query2, query3];
-let results = storage.batch_vector_search(
-    "Paper",
-    "embedding",
-    &queries,
-    10  // k per query
-).await?;
+let queries: Vec<Vec<f32>> = vec![query1, query2, query3];
+let mut results = Vec::new();
+for q in queries {
+    let rows = session
+        .query_with(
+            "CALL uni.vector.query('Paper', 'embedding', $q, 10) \
+             YIELD node, distance RETURN node.title AS title, distance",
+        )
+        .param("q", q) // k = 10 per query
+        .fetch_all()
+        .await?;
+    results.push(rows);
+}
 ```
 
 ### Caching Query Vectors

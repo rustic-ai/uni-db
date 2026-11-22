@@ -56,6 +56,9 @@ Found while fixing the docs (reported once, not reproduced a second time unless 
 | C29 | `promote_from_fork_with_options(upsert=True)` right after a plain promote of two vertices without `ext_id` reported `vertices_inserted=2` rather than skipping them, which suggests duplicate inserts. Not reproduced. | probe |
 | C30 | `uni import <name>` ignores the dataset name and always runs the Semantic Scholar importer. | `crates/uni-cli/src/main.rs` |
 | C31 | `MCOUNT(*)` does not parse; `MCOUNT()` does. | probe |
+| C32 | `examples/example-pyo3-geo` pins `pyo3 = "0.27"` while `uni-plugin-pyo3` uses 0.29, so the example does not resolve (two crates link `python`) and the `cargo run` in `plugins/loaders/pyo3.md` cannot work. | `examples/example-pyo3-geo/Cargo.toml` |
+| C33 | Because of C23, the CALIBRATE-fitted calibrators in the drug-drug-interaction and predictive-maintenance notebooks come out inverted, and calibrated Brier scores are worse than raw. Those notebooks now rank on the raw classifier score; restore the calibrated ranking once C23 is fixed. | notebook runs |
+| C34 | A WASM or Extism load with an empty grant list reports the missing `ScalarFn` as `UniInternalError`, not a typed capability error. `rules().remove(name)` while another rule depends on it fails with `undefined rule: name` without naming the dependent. | probe |
 
 Review findings the code showed to be wrong (the docs were left as they were):
 `uni.schema.createIndex(..., {type:'BITMAP'})` builds a real Lance Bitmap index (only Cypher

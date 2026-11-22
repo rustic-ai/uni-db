@@ -195,28 +195,24 @@ When L0 fills up, it flushes to the Delta layer as Lance datasets.
 
 ```rust
 pub struct DeltaDataset {
-    /// Lance dataset for deltas
-    dataset: Arc<Dataset>,
-
     /// Edge type this delta is for
-    edge_type: EdgeTypeId,
+    edge_type: String,
 
-    /// Direction (outgoing or incoming)
-    direction: Direction,
+    /// Direction: "fwd" or "bwd"
+    direction: String,
+
+    /// Lance branch for branched (fork) reads; `None` = primary
+    branch: Option<String>,
 }
 
 pub struct L0Manager {
-    /// Current L0 buffer
-    buffer: Arc<RwLock<L0Buffer>>,
+    /// Active L0 buffer (outer lock swaps it on rotation)
+    current: RwLock<Arc<RwLock<L0Buffer>>>,
 
-    /// Storage backend
-    store: Arc<dyn ObjectStore>,
+    /// Rotated buffers still being flushed; visible to reads until done
+    pending_flush: RwLock<Vec<Arc<RwLock<L0Buffer>>>>,
 
-    /// Schema manager reference
-    schema: Arc<SchemaManager>,
-
-    /// Configuration
-    config: L0ManagerConfig,
+    // ... snapshot pin token, plugin registry, bulk version reservations
 }
 ```
 

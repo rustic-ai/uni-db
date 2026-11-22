@@ -498,16 +498,18 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 use std::collections::HashMap;
 use serde_json::json;
+use uni_db::Value;
 
-// Allocate VID (label_id is required but not encoded in VID)
-let label_id = schema_manager.schema().label_id_by_name("Paper").unwrap();
-let vid = writer.next_vid(label_id).await?;
+// Allocate VID (pure auto-increment; the label is not encoded in the VID)
+let vid = writer.next_vid().await?;
 
-let mut props: HashMap<String, serde_json::Value> = HashMap::new();
-props.insert("title".to_string(), json!("New Paper"));
-props.insert("year".to_string(), json!(2024));
+let mut props: HashMap<String, Value> = HashMap::new();
+props.insert("title".to_string(), json!("New Paper").into());
+props.insert("year".to_string(), json!(2024).into());
 
-writer.insert_vertex(vid, props).await?;
+writer
+    .insert_vertex_with_labels(vid, props, &["Paper".to_string()], None)
+    .await?;
 ```
 
 ### Insert Edges
@@ -515,30 +517,33 @@ writer.insert_vertex(vid, props).await?;
 ```rust
 use std::collections::HashMap;
 use serde_json::json;
+use uni_db::Value;
 
 let edge_type_id = schema_manager.schema().edge_type_id_by_name("CITES").unwrap();
 let eid = writer.next_eid(edge_type_id).await?;
 
-let mut props: HashMap<String, serde_json::Value> = HashMap::new();
-props.insert("weight".to_string(), json!(0.95));
+let mut props: HashMap<String, Value> = HashMap::new();
+props.insert("weight".to_string(), json!(0.95).into());
 
-writer.insert_edge(src_vid, dst_vid, edge_type_id, eid, props).await?;
+writer
+    .insert_edge(src_vid, dst_vid, edge_type_id, eid, props, Some("CITES".to_string()), None)
+    .await?;
 ```
 
 ### Batch Inserts (Vertices)
 
 ```rust
 use std::collections::HashMap;
+use uni_db::Value;
 
-let label_id = schema_manager.schema().label_id_by_name("Paper").unwrap();
-let vids = writer.allocate_vids(label_id, papers.len()).await?;
-let props_batch: Vec<HashMap<String, serde_json::Value>> = papers
+let vids = writer.allocate_vids(papers.len()).await?;
+let props_batch: Vec<HashMap<String, Value>> = papers
     .iter()
     .map(build_properties)
     .collect();
 
 writer
-    .insert_vertices_batch(vids, props_batch, vec!["Paper".to_string()])
+    .insert_vertices_batch(vids, props_batch, vec!["Paper".to_string()], None)
     .await?;
 ```
 

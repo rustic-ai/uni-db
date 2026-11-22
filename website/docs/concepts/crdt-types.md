@@ -462,7 +462,7 @@ assert_eq!(clock.get("node_a"), 2);  // Incremented twice (new + set)
 ### Merge Behavior
 
 ```rust
-use uni_crdt::{VCRegister, MergeResult};
+use uni_crdt::{VCRegister, vc_register::MergeResult};
 
 let mut r1 = VCRegister::new("A".to_string(), "node1");
 let r2 = r1.clone();

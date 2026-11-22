@@ -44,12 +44,13 @@ The first step is opening or creating a database. Uni uses a builder pattern for
     async fn main() -> Result<()> {
         // Open or create a database (creates if doesn't exist)
         let db = Uni::open("./my-graph").build().await?;
+        db.shutdown().await?; // release the store before opening it again
 
         // Open existing database (fails if doesn't exist)
         let db = Uni::open_existing("./my-graph").build().await?;
 
         // Create new database (fails if already exists)
-        let db = Uni::create("./my-graph").build().await?;
+        let db = Uni::create("./new-graph").build().await?;
 
         // In-memory database (for testing)
         let db = Uni::in_memory().build().await?;
@@ -566,10 +567,10 @@ Always use parameters for user-provided values to prevent injection attacks:
         .await?;
 
     // Parameters from HashMap
-    let params = hashmap! {
-        "name" => "Alice".into(),
-        "company" => "TechCorp".into(),
-    };
+    let params = HashMap::from([
+        ("name", Value::from("Alice")),
+        ("company", Value::from("TechCorp")),
+    ]);
     let results = session.query_with(
         "MATCH (p:Person {name: $name})-[:WORKS_AT]->(c:Company {name: $company}) RETURN p, c"
     )
@@ -973,10 +974,10 @@ For large datasets, use the bulk writer for efficient loading.
 
     // Insert vertices in bulk
     let people: Vec<HashMap<String, Value>> = (0..100_000)
-        .map(|i| hashmap! {
-            "name" => format!("Person-{}", i).into(),
-            "age" => (20 + i % 50).into(),
-        })
+        .map(|i| HashMap::from([
+            ("name".to_string(), Value::from(format!("Person-{}", i))),
+            ("age".to_string(), Value::from(20 + i % 50)),
+        ]))
         .collect();
 
     let vids = bulk.insert_vertices("Person", people).await?;
@@ -986,7 +987,7 @@ For large datasets, use the bulk writer for efficient loading.
         .map(|pair| EdgeData {
             src_vid: pair[0],
             dst_vid: pair[1],
-            properties: hashmap! { "since" => 2024.into() },
+            properties: HashMap::from([("since".to_string(), Value::from(2024))]),
         })
         .collect();
 
