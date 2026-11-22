@@ -26,9 +26,9 @@ tx.commit().await?;
 | `Uni::fork_info(name)` | Metadata for a single fork. |
 | `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkInUse` while sessions are alive, `ForkInflightTx` while a transaction is open on the fork, `ForkHasChildren` while nested children exist. |
 | `Uni::drop_fork_cascade(name)` | Drop the fork and every descendant. Pre-validates the whole subtree (every node must satisfy the `ForkInUse`/`ForkInflightTx` checks); errors with `ForkSubtreeInUse` before tombstoning anything. Drops deepest-first; crash mid-cascade resumes via tombstone recovery. |
-| `Session::flush()` | Flush the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches. Phase 3 auto-flushes a parent fork during nested-fork creation, but `Session::flush()` is the explicit knob when you need it. |
+| `Session::flush()` | Flush the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches. Fork creation auto-flushes the parent session's L0 (primary or fork), but `Session::flush()` is the explicit knob when you need it. |
 | `Session::fork(name).ttl(Duration)` | Phase 4a. Set a wall-clock TTL on the fork; the background sweeper drops it via cascade once expired. Has no effect when the fork already exists. |
-| `Uni::tag_fork(name, tag)` | Phase 4a. Tag a fork's branches with a Lance tag pinned to the current version. Tagged refs are GC-exempt — they survive Lance compaction *and* fork drops, which makes a tag-then-drop sequence safe for audit retention. |
+| `Uni::tag_fork(name, tag)` | Phase 4a. Tag a fork's branches with a Lance tag pinned to the current version. Tagged refs are GC-exempt while the fork exists. Untag a fork before dropping it: `drop_fork` on a tagged fork fails at stage `delete_branch` and leaves it Tombstoned, and tags are not readable after a drop. |
 | `Uni::untag_fork(name, tag)` | Phase 4a. Idempotent — missing tags are no-ops. |
 | `Uni::list_fork_tags(name)` | Phase 4a. Returns the unique tag names applied to this fork. |
 | `Session::pin_to_version(snapshot_id)` / `pin_to_timestamp(ts)` / `refresh()` | Phase 4a now works on forked sessions. Pinned forked sessions read through the fork's branches at the pinned version; writes return `ReadOnly`. Also the cheap **read-only** rollout primitive — see "Cheaper alternatives" below. |
@@ -80,7 +80,7 @@ Two `session.fork("x")` calls on the same name resolve to the same `UniInner`. A
 ## Operational signals
 
 - `uni_fork_l1_flushes{fork=...}` gauge — per-fork flush count.
-- `tracing::warn!` once per writer when the count crosses `UniConfig::fork_fragment_warn_threshold` (default 256). Fork compaction is Phase 5; until then, drop-and-recreate to bound fragment growth.
+- `tracing::warn!` once per writer when the count crosses `UniConfig::fork_fragment_warn_threshold` (default 256). Forks are not compacted; drop-and-recreate to bound fragment growth.
 
 ## Strict-schema mode
 
@@ -136,7 +136,7 @@ Drop semantics:
 
 **Budget.** `UniConfig::max_forks: Option<usize>` caps total fork count (Active + Pending + Tombstoned). Hitting the cap surfaces `ForkBudgetExceeded { current, max }`. Tombstoned forks count because they still hold branch state on disk until recovery completes.
 
-**Tags.** `db.tag_fork(name, "audit-2026-q1").await?` creates one Lance tag per dataset, namespaced `fork_{tag}_{dataset}`, pinned to the branch's current version. Tags are GC-exempt — a tagged-then-dropped fork's state remains on disk for audit retention. `db.list_fork_tags(name)` returns the deduplicated user-visible tag names; `db.untag_fork(name, tag)` is idempotent.
+**Tags.** `db.tag_fork(name, "audit-2026-q1").await?` creates one Lance tag per dataset, namespaced `fork_{tag}_{dataset}`, pinned to the branch's current version. Tags are GC-exempt while the fork exists. Untag before `drop_fork` (a tagged fork's drop fails at stage `delete_branch`); after a drop, `list_fork_tags` / `untag_fork` raise `ForkNotFound`. `db.list_fork_tags(name)` returns the deduplicated user-visible tag names; `db.untag_fork(name, tag)` is idempotent.
 
 **Cancellation.** Forked sessions hold `parent_token.child_token()`. Cancelling a parent session cascades to every descendant; cancelling a child does not affect the parent. `Session::cancel()` cancels the currently-held token and replaces it with a fresh one — tests asserting propagation must capture token clones BEFORE calling cancel.
 
@@ -161,8 +161,11 @@ fork = primary.fork("scenario").ttl(timedelta(hours=1)).build()
 tx = fork.tx()
 tx.execute("CREATE (:Person {name: 'fork-only'})")
 tx.commit()
+fork.flush()                                # tags pin flushed branch versions
 
-db.tag_fork("scenario", "audit-2026-q1")    # GC-exempt; survives drop
+db.tag_fork("scenario", "audit-2026-q1")    # GC-exempt while the fork exists
+print(db.list_fork_tags("scenario"))       # ['audit-2026-q1']
+db.untag_fork("scenario", "audit-2026-q1")  # untag before dropping
 del fork
 db.drop_fork("scenario")
 
@@ -185,7 +188,7 @@ except uni_db.UniForkBudgetExceededError as e:
 
 See `bindings/uni-db/examples/fork_quickstart.py` and
 `bindings/uni-db/examples/fork_audit.py` for runnable demos. Full
-reference at `docs/complete_python_api.md` § "24. Forks (Phase 4b)".
+reference at `website/docs/reference/python-api.md`.
 
 ## Fork-local index fusion (Phase 5a-impl)
 
@@ -209,7 +212,7 @@ through automatically. `CALL uni.vector.query(...)` and
 `CALL uni.fts.query(...)` on a forked session return fused results
 across primary-inherited and fork-local rows via Lance's
 `base_paths` chain. Recall scaffold lives at
-`crates/uni/tests/fork_index_recall_bench.rs` (`#[ignore]`'d).
+`crates/uni/tests/common/fork/fork_index_recall_bench.rs` (`#[ignore]`'d).
 
 ## Phase 6 / 6b — Diff & promote
 
@@ -217,7 +220,9 @@ across primary-inherited and fork-local rows via Lance's
 `ForkDiff { vertices, edges }` describing the structural delta
 between two views. Identity is **content UID**, not VID — two
 unrelated forks that happened to roll the same VIDs still pair
-correctly. `diff(a, b).invert() == diff(b, a)` by construction.
+correctly. The vertex UID hashes label, `ext_id` and properties;
+the edge key includes properties. `changed` is not populated: a
+property edit appears as one delete plus one add. `diff(a, b).invert() == diff(b, a)` by construction.
 
 `db.promote_from_fork(name, &[PromotePattern])` scans the fork per
 pattern, dedups by `(label, uid)` for vertices and

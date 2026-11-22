@@ -241,8 +241,8 @@ deleted_count = (
 # Update all matching
 updated_count = (
     session.query(Person)
-    .filter(Person.status == "pending")
-    .update(status="approved")
+    .filter(Person.age.is_null())
+    .update(age=0)
 )
 ```
 
@@ -487,12 +487,13 @@ session.commit()
 ### 4. Use Transactions for Related Operations
 
 ```python
+# Persist the nodes first: an edge joins nodes that are already saved
+session.add_all([alice, bob, charlie])
+session.commit()
+
 with session.transaction() as tx:
-    alice = Person(name="Alice")
-    bob = Person(name="Bob")
-    tx.add(alice)
-    tx.add(bob)
     tx.create_edge(alice, "FRIEND_OF", bob)
+    tx.create_edge(alice, "FRIEND_OF", charlie)
     # All or nothing
 ```
 

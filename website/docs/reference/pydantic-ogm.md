@@ -12,7 +12,7 @@ Or install from source:
 
 ```bash
 cd bindings/uni-pydantic
-poetry install
+uv sync        # also builds uni-db from ../uni-db
 ```
 
 ## Quick Start
@@ -494,7 +494,7 @@ for doc in hits:
 deleted = session.query(Person).filter(Person.age < 18).delete()
 
 # Bulk update
-updated = session.query(Person).filter(Person.age < 18).update(status="minor")
+updated = session.query(Person).filter(Person.name == "Alice").update(age=31)
 ```
 
 ---
@@ -502,19 +502,22 @@ updated = session.query(Person).filter(Person.age < 18).update(status="minor")
 ## Transactions
 
 ```python
+# An edge joins nodes that are already persisted
+alice = Person(name="Alice", email="alice@example.com")
+bob = Person(name="Bob", email="bob@example.com")
+session.add_all([alice, bob])
+session.commit()
+
 # Context manager (auto-commit/rollback)
 with session.transaction() as tx:
-    alice = Person(name="Alice")
-    bob = Person(name="Bob")
-    tx.add(alice)
-    tx.add(bob)
+    tx.add(Person(name="Dana", email="dana@example.com"))
     tx.create_edge(alice, "FRIEND_OF", bob)
     # Auto-commits on success, rolls back on exception
 
 # Manual control
 tx = session.begin()
 try:
-    tx.add(Person(name="Charlie"))
+    tx.add(Person(name="Charlie", email="charlie@example.com"))
     tx.commit()
 except Exception:
     tx.rollback()
@@ -625,7 +628,6 @@ class User(UniNode):
     email: str = Field(unique=True, index="btree")
     name: str = Field(index="btree")
     bio: str | None = Field(default=None, index="fulltext")
-    embedding: Vector[384] | None = None
     created_at: date | None = None
 
     posts: list["Post"] = Relationship("AUTHORED", direction="outgoing")

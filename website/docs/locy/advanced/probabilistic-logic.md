@@ -74,7 +74,7 @@ In Locy:
 CREATE RULE vendor_reliability AS
 MATCH (v:Vendor)-[:SUPPLIES]->(c:Component)
 WHERE c IS component_failure_risk
-FOLD reliability = MPROD(1.0 - component_failure_risk.risk)
+FOLD reliability = MPROD(1.0 - risk)
 YIELD KEY v, reliability
 ```
 
@@ -123,7 +123,7 @@ YIELD KEY v, reliability
 
 ## Compiler Guardrails
 
-**ProbabilityDomainViolation warning.** When MNOR or MPROD is used with non-literal arguments, the compiler emits a warning reminding you that inputs should be valid probabilities in [0, 1]. Literal constants (e.g., `MNOR(0.3)`) are checked at compile time and do not trigger the warning.
+**ProbabilityDomainViolation warning.** When MNOR or MPROD in a **recursive** rule takes a non-literal argument, the compiler emits this static hint (in `compile_warnings`) reminding you that inputs should be valid probabilities in [0, 1]. It does not inspect values: a literal argument (e.g., `MNOR(0.3)`) does not trigger it, and a non-recursive rule never does.
 
 **BEST BY rejection.** Declared lattice folds — MNOR and MPROD among them — are incompatible with `BEST BY` witness selection. The compiler rejects this combination with a `BestByWithMonotonicFold` error.
 
@@ -236,7 +236,7 @@ Rows from approximate groups are marked with `_approximate = true`, and Rust `Lo
 
 ### TopKProofs Semiring
 
-`LocyConfig.semiring = TopKProofs(k)` evaluates each `MNOR` fact over its `k` most probable rows (its proofs), exactly: each proof is its own event AND the facts it references, as in exact mode, so proofs sharing an edge — even one below a referenced fact — count it once. With `k` at least a fact's number of rows the value is the possible-worlds probability; with fewer it is the probability of the kept proofs. On the `A … D` graph above, `TopKProofs(8)` gives `reach(A, D) = 0.264` and `TopKProofs(1)` keeps the 0.18 proof through `C`. A fact with at most `k` rows and no shared event keeps its default value, which is already exact. A referenced fact of a rule without a `PROB` column is certain and adds no event: two edges into one hub both referencing `hub_score(h)` stay independent (`1 - 0.3 × 0.4 = 0.88`).
+`LocyConfig.semiring = SemiringKind::TopKProofs { k }` (Python: `semiring={'top_k_proofs': k}`) evaluates each `MNOR` fact over its `k` most probable rows (its proofs), exactly: each proof is its own event AND the facts it references, as in exact mode, so proofs sharing an edge — even one below a referenced fact — count it once. With `k` at least a fact's number of rows the value is the possible-worlds probability; with fewer it is the probability of the kept proofs. On the `A … D` graph above, `TopKProofs(8)` gives `reach(A, D) = 0.264` and `TopKProofs(1)` keeps the 0.18 proof through `C`. A fact with at most `k` rows and no shared event keeps its default value, which is already exact. A referenced fact of a rule without a `PROB` column is certain and adds no event: two edges into one hub both referencing `hub_score(h)` stay independent (`1 - 0.3 × 0.4 = 0.88`).
 
 !!! warning "Behavior change"
     `TopKProofs` used to treat the referenced facts of a row as its only events, weighted by the
@@ -252,7 +252,7 @@ of their probabilities.
 
 ### MaxMinProb Semiring (Viterbi / Fuzzy)
 
-`LocyConfig.semiring = MaxMinProb` changes the aggregate math: `MNOR` becomes `max(pᵢ)` and `MPROD` becomes `min(pᵢ)`. Useful when the values aren't probabilities (e.g. fuzzy-set memberships) and you want monotone composition without the independence assumption. Locy emits `FuzzyNotProbabilistic` on any rule that also declares `PROB` under this semiring, since you've opted out of probability semantics.
+`LocyConfig.semiring = SemiringKind::MaxMinProb` (Python: `semiring='max_min_prob'`) changes the aggregate math: `MNOR` becomes `max(pᵢ)` and `MPROD` becomes `min(pᵢ)`. Useful when the values aren't probabilities (e.g. fuzzy-set memberships) and you want monotone composition without the independence assumption. Locy emits `FuzzyNotProbabilistic` on any rule that also declares `PROB` under this semiring, since you've opted out of probability semantics.
 
 ## Relevant Config Knobs
 
@@ -265,7 +265,7 @@ of their probabilities.
 
 ## Combining with similar_to
 
-`similar_to()` produces a similarity, which can feed MNOR and MPROD as evidence. Its range depends on the index metric (see [Score Conversion](../../guides/vector-search.md#score-conversion)): `(0, 1]` for L2, but raw cosine in `[-1, 1]` for a cosine index. MNOR and MPROD need probabilities in `[0, 1]`, so a negative cosine is clamped to `0` with a `probability_domain_violation` warning (or is an error under `strict_probability_domain`). Rescale cosine with `(1 + similar_to(...)) / 2` when its negative range should count as weak rather than no evidence:
+`similar_to()` produces a similarity, which can feed MNOR and MPROD as evidence. Its range depends on the index metric (see [Score Conversion](../../guides/vector-search.md#score-conversion)): `(0, 1]` for L2, but raw cosine in `[-1, 1]` for a cosine index. MNOR and MPROD need probabilities in `[0, 1]`, so a negative cosine is clamped to `0` (or is an error under `strict_probability_domain`); the clamp adds no warning to the result. Rescale cosine with `(1 + similar_to(...)) / 2` when its negative range should count as weak rather than no evidence:
 
 ```locy
 // Combine semantic relevance signals with noisy-OR

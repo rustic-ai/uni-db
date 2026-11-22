@@ -109,7 +109,7 @@ pub struct L0Buffer {
 | Format | SimpleGraph + HashMap | Row-oriented for inserts |
 | Durability | WAL-backed | Survives crashes |
 | Latency | ~550µs per 1K writes | Memory-speed |
-| Capacity | Configurable (default 128MB) | Auto-flush when full |
+| Capacity | Bounded by `auto_flush_threshold` (default 10,000 mutations) | Auto-flush when reached |
 
 **Write Path:**
 
@@ -282,7 +282,7 @@ Uni uses a three-tier compaction strategy, each operating at a different level o
 
 #### Tier 1: CSR Overlay Compaction
 
-Automatic in-memory merge of frozen L0 CSR segment overlays into the main CSR after flush. Triggers when `frozen_segments >= 4`. Runs inline during the flush path — no background scheduling needed.
+Automatic in-memory merge of frozen L0 CSR segment overlays into the main CSR after flush. The flush checks the count and, when `frozen_segments >= frozen_segments_compact_threshold` (default 2), spawns the merge as a background task; a flush skips it while the previous one is still running.
 
 #### Tier 2: Semantic Compaction
 
@@ -389,22 +389,22 @@ pub struct ColumnStats {
 
 ### Vertex Datasets
 
-One Lance dataset per vertex label:
+One Lance dataset per vertex label, plus one main `vertices` table that holds every vertex (all labels, and schemaless ones) with its properties as JSONB in `props_json`:
 
 ```
 storage/
-├── vertices/
-│   ├── Paper/                    # :Paper vertices
-│   │   ├── _versions/
-│   │   ├── _indices/
-│   │   │   ├── embedding_hnsw/   # Vector index
-│   │   │   └── year_btree/       # Scalar index
-│   │   └── data/
-│   ├── Author/                   # :Author vertices
-│   │   └── ...
-│   └── Venue/                    # :Venue vertices
-│       └── ...
+├── vertices.lance/               # Main vertex table (all labels)
+├── vertices_Paper.lance/         # :Paper vertices
+│   ├── _versions/
+│   ├── _indices/
+│   │   └── <uuid>/               # One directory per Lance index (vector, scalar, FTS)
+│   ├── _transactions/
+│   └── data/
+├── vertices_Author.lance/        # :Author vertices
+└── vertices_Venue.lance/         # :Venue vertices
 ```
+
+Table names come from `crates/uni-store/src/backend/table_names.rs` (`vertex_table_name`, `main_vertex_table_name`).
 
 **Vertex Schema:**
 
@@ -417,23 +417,22 @@ storage/
 │   ┌───────────────┬──────────────┬────────────────────────────────────────┐│
 │   │ Column        │ Type         │ Description                            ││
 │   ├───────────────┼──────────────┼────────────────────────────────────────┤│
-│   │ _vid          │ UInt64       │ Internal vertex ID (label bits + ID)  ││
-│   │ _uid          │ Binary(32)   │ UniId (32-byte SHA3-256) - optional   ││
+│   │ _vid          │ UInt64       │ Internal vertex ID                     ││
+│   │ _uid          │ FixedSize(32)│ UniId (32-byte SHA3-256) - optional   ││
 │   │ _deleted      │ Bool         │ Tombstone marker (soft delete)        ││
 │   │ _version      │ UInt64       │ Last modified version                 ││
 │   │ ext_id        │ String       │ External ID (extracted from props)    ││
 │   │ _labels       │ List<String> │ Complete label set (multi-label)      ││
-│   │ _created_at   │ Timestamp    │ Creation timestamp                    ││
-│   │ _updated_at   │ Timestamp    │ Last update timestamp                 ││
+│   │ _created_at   │ Timestamp(ns)│ Creation timestamp                    ││
+│   │ _updated_at   │ Timestamp(ns)│ Last update timestamp                 ││
 │   └───────────────┴──────────────┴────────────────────────────────────────┘│
 │                                                                             │
-│   User Properties (schema-defined):                                         │
+│   User Properties (schema-defined, sorted by name):                         │
 │   ┌──────────┬──────────┬────────────────────────────────────────────────┐ │
-│   │ title    │ String   │ Paper title                                    │ │
-│   │ year     │ Int32    │ Publication year                               │ │
 │   │ abstract │ String   │ Paper abstract (nullable)                      │ │
 │   │ embedding│ Vector   │ 768-dimensional embedding                      │ │
-│   │ _doc     │ Json     │ Document mode flexible fields (deprecated)     │ │
+│   │ title    │ String   │ Paper title                                    │ │
+│   │ year     │ Int64    │ Publication year                               │ │
 │   └──────────┴──────────┴────────────────────────────────────────────────┘ │
 │                                                                             │
 │   Schemaless Properties:                                                    │
@@ -449,67 +448,65 @@ storage/
 
 ### Edge Datasets
 
-One Lance dataset per edge type:
+Edges are stored in one main `edges` table (every edge, its properties as JSONB in `props_json`) and, per edge type, two delta tables, one per direction:
 
 ```
 storage/
-├── edges/
-│   ├── CITES/                    # :CITES edges
-│   │   └── ...
-│   ├── AUTHORED_BY/              # :AUTHORED_BY edges
-│   │   └── ...
-│   └── PUBLISHED_IN/
-│       └── ...
+├── edges.lance/                  # Main edge table (all types)
+├── deltas_CITES_fwd.lance/       # :CITES delta log, keyed by source
+├── deltas_CITES_bwd.lance/       # :CITES delta log, keyed by destination
+├── deltas_AUTHORED_BY_fwd.lance/
+├── deltas_AUTHORED_BY_bwd.lance/
+└── ...
 ```
 
-**Edge Schema:**
+**Edge Schemas:**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            EDGE DATASET SCHEMA                               │
+│                            EDGE DATASET SCHEMAS                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│   System Columns:                                                           │
+│   Main `edges` table (storage/main_edge.rs):                                │
 │   ┌───────────────┬──────────────┬────────────────────────────────────────┐│
 │   │ Column        │ Type         │ Description                            ││
 │   ├───────────────┼──────────────┼────────────────────────────────────────┤│
-│   │ _eid          │ UInt64       │ Internal edge ID (type bits + ID)     ││
-│   │ _src_vid      │ UInt64       │ Source vertex VID                      ││
-│   │ _dst_vid      │ UInt64       │ Destination vertex VID                 ││
+│   │ _eid          │ UInt64       │ Internal edge ID                       ││
+│   │ src_vid       │ UInt64       │ Source vertex VID                      ││
+│   │ dst_vid       │ UInt64       │ Destination vertex VID                 ││
+│   │ type          │ Utf8         │ Edge type name                         ││
+│   │ props_json    │ LargeBinary  │ All properties (JSONB)                 ││
 │   │ _deleted      │ Bool         │ Tombstone marker                       ││
 │   │ _version      │ UInt64       │ Last modified version                  ││
-│   │ _created_at   │ Timestamp    │ Creation timestamp                     ││
-│   │ _updated_at   │ Timestamp    │ Last update timestamp                  ││
+│   │ _created_at   │ Timestamp(ns)│ Creation timestamp                     ││
+│   │ _updated_at   │ Timestamp(ns)│ Last update timestamp                  ││
 │   └───────────────┴──────────────┴────────────────────────────────────────┘│
 │                                                                             │
-│   Edge Properties (schema-defined):                                         │
-│   ┌──────────┬──────────┬────────────────────────────────────────────────┐ │
-│   │ weight   │ Float64  │ Edge weight/score                              │ │
-│   │ position │ Int32    │ Author position (for AUTHORED_BY)              │ │
-│   │ timestamp│ Timestamp│ When the edge was created                      │ │
-│   └──────────┴──────────┴────────────────────────────────────────────────┘ │
-│                                                                             │
-│   Schemaless Properties:                                                    │
-│   ┌────────────────┬──────────────┬──────────────────────────────────────┐ │
-│   │ overflow_json  │ LargeBinary  │ JSONB binary for non-schema props   │ │
-│   │                │ (JSONB)      │ - Same as vertex overflow support   │ │
-│   └────────────────┴──────────────┴──────────────────────────────────────┘ │
+│   Delta table `deltas_{type}_{fwd|bwd}` (storage/delta.rs):                 │
+│   ┌───────────────┬──────────────┬────────────────────────────────────────┐│
+│   │ src_vid       │ UInt64       │ Source vertex VID                      ││
+│   │ dst_vid       │ UInt64       │ Destination vertex VID                 ││
+│   │ eid           │ UInt64       │ Edge ID                                ││
+│   │ op            │ UInt8        │ 0 = insert, 1 = delete                 ││
+│   │ _version      │ UInt64       │ Version of the operation               ││
+│   │ _created_at   │ Timestamp(ns)│ Creation timestamp                     ││
+│   │ _updated_at   │ Timestamp(ns)│ Last update timestamp                  ││
+│   │ <properties>  │ (declared)   │ Schema-defined edge properties, sorted ││
+│   │ overflow_json │ LargeBinary  │ JSONB for non-schema properties        ││
+│   └───────────────┴──────────────┴────────────────────────────────────────┘│
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Adjacency Datasets
 
-Optimized for graph traversal (CSR-style):
+Optimized for graph traversal (CSR-style), one table per edge type and direction, written by compaction:
 
 ```
 storage/
-├── adjacency/
-│   ├── CITES_OUT/                # Outgoing CITES edges
-│   │   └── ...
-│   ├── CITES_IN/                 # Incoming CITES edges (reverse)
-│   │   └── ...
-│   └── ...
+├── adjacency_CITES_fwd.lance/    # Outgoing CITES edges
+├── adjacency_CITES_bwd.lance/    # Incoming CITES edges (reverse)
+└── ...
 ```
 
 **Adjacency Schema:**
@@ -938,7 +935,8 @@ Uni uses the `object_store` crate for storage abstraction, supporting local file
 | Amazon S3 | `s3://bucket/path` | **Stable** |
 | Google Cloud Storage | `gs://bucket/path` | **Stable** |
 | Azure Blob Storage | `az://container/path` | **Stable** |
-| Memory | (in-memory) | **Stable** (testing) |
+
+There is no in-memory object store: a `memory://` URI is rejected, and `Uni::in_memory()` opens a store in a temporary directory that is removed when the database is dropped.
 
 ### Using Local Storage
 
@@ -949,7 +947,7 @@ let db = Uni::open("./my-database").build().await?;
 // Explicit file:// URI
 let db = Uni::open("file:///var/data/uni").build().await?;
 
-// In-memory for testing
+// Temporary directory for testing
 let db = Uni::in_memory().build().await?;
 ```
 
@@ -1078,7 +1076,7 @@ use uni_db::UniConfig;
 let mut config = UniConfig::default();
 config.auto_flush_threshold = 10_000;
 config.auto_flush_interval = Some(Duration::from_secs(5));
-config.compaction.max_l1_runs = 4;
+config.compaction.max_l1_runs = 8;
 config.compaction.max_l1_size_bytes = 256 * 1024 * 1024;
 ```
 

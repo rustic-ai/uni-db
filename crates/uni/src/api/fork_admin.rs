@@ -681,10 +681,14 @@ impl Uni {
     ///
     /// Creates one tag per dataset the fork has branched, named
     /// `fork_{tag}_{dataset}`. Lance tags are GC-exempt — the tagged
-    /// versions survive compaction's retention sweep — so a tagged
-    /// fork's state is preserved on disk even after the fork itself
-    /// is dropped (cascade or otherwise). Useful for audit hold,
-    /// regulatory snapshots, or named pre-publish checkpoints.
+    /// versions survive compaction's retention sweep while the fork
+    /// exists. Useful for audit hold, regulatory snapshots, or named
+    /// pre-publish checkpoints.
+    ///
+    /// Untag a fork before dropping it: a tagged branch cannot be
+    /// deleted, so [`Self::drop_fork`] fails at its `delete_branch`
+    /// stage and leaves the fork Tombstoned, and tags are not listed
+    /// once the fork is gone.
     ///
     /// The tag pins the branch's *current* version: subsequent fork
     /// writes do not "follow" the tag.

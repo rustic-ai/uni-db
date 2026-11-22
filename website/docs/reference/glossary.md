@@ -71,7 +71,7 @@ A connection between two vertices in a graph. In Uni, edges have:
 - **Properties**: Optional key-value attributes
 
 ### EID (Edge ID)
-A 64-bit identifier for edges. Encoded as `edge_type_id (16 bits) | local_offset (48 bits)`. See [Identity Model](../concepts/identity.md).
+A 64-bit identifier for edges, allocated from one database-wide auto-increment counter. It does not encode the edge type. See [Identity Model](../concepts/identity.md).
 
 ### Embedding
 A dense vector representation of data (text, images, etc.) in a high-dimensional space. Similar items have embeddings close together. See [Vector Search](../guides/vector-search.md).
@@ -95,9 +95,6 @@ The process of writing in-memory data (L0) to persistent storage (L1). Triggered
 
 ### Graph Database
 A database optimized for storing and querying connected data. Models data as vertices (nodes) and edges (relationships) rather than tables and rows.
-
-### gryf
-A Rust graph library providing in-memory graph structures and algorithms. Uni uses gryf for the L0 buffer and working graphs.
 
 ---
 
@@ -142,7 +139,7 @@ Finding the K vectors most similar to a query vector. Uni's vector search return
 ## L
 
 ### L0 Buffer
-The in-memory write buffer that accepts all incoming mutations. Contains a gryf graph for topology and Arrow builders for properties. See [Storage Engine](../internals/storage-engine.md).
+The in-memory write buffer that accepts all incoming mutations. Contains an adjacency-list graph (`SimpleGraph`) for topology and the pending property values. See [Storage Engine](../internals/storage-engine.md).
 
 ### L1 Layer
 Immutable Lance datasets created by flushing L0. Contains sorted runs of data not yet compacted into L2.
@@ -151,7 +148,7 @@ Immutable Lance datasets created by flushing L0. Contains sorted runs of data no
 The base storage layer containing fully compacted, indexed data. Most data resides here after compaction.
 
 ### Label
-A type classifier for vertices (e.g., `Paper`, `Author`). Similar to a table name in relational databases. Encoded in the VID.
+A type classifier for vertices (e.g., `Paper`, `Author`). Similar to a table name in relational databases. A vertex can carry several labels.
 
 ### Lance
 A columnar data format optimized for ML workloads. Features native vector indexing, versioning, and cloud storage support. Uni uses Lance as its primary storage format. See [Storage Engine](../internals/storage-engine.md).
@@ -200,7 +197,7 @@ A pre-parsed and pre-planned query for repeated execution with different paramet
 An optimization that pushes filter conditions down to the storage layer. Reduces I/O by filtering at scan time rather than after loading. See [Query Planning](../internals/query-planning.md).
 
 ### Profile
-A Cypher command prefix that executes the query and shows detailed timing for each operation. More informative than EXPLAIN.
+Running a query with `query_with(...).profile()`, which executes it and returns the result with a `ProfileOutput`: total time, planning time, peak memory and per-operator timing and row counts. More informative than EXPLAIN. There is no `PROFILE` keyword.
 
 ### Property
 A key-value attribute on a vertex or edge. Properties have defined types (String, Int32, Vector, etc.) in the schema.
@@ -236,7 +233,7 @@ See [Edge](#edge).
 The primary read scope for all database access. Created via `db.session()`. Cheap, sync, and `Arc`-based — sessions can be cloned and shared across threads. All queries, Locy evaluations, and transaction creation go through a session.
 
 ### SessionHook
-A trait for intercepting query and commit events. Registered via `session.add_hook()`. Hooks receive callbacks before/after queries and commits, enabling logging, metrics, and custom middleware patterns.
+A trait for intercepting query and commit events. Registered with `Uni::add_plugin(BuiltinHookPlugin::new(name, hook))`; `session.add_hook()` is deprecated. Hooks receive callbacks before/after queries and commits, enabling logging, metrics, and custom middleware patterns.
 
 ### SessionTemplate
 A pre-configured session factory for repeated session creation with identical parameters, rules, and hooks. Useful when many sessions share the same configuration.
@@ -297,7 +294,7 @@ A node in the graph representing an entity. In Uni, vertices have:
 - **Properties**: Key-value attributes
 
 ### VID (Vertex ID)
-A 64-bit identifier for vertices. Encoded as `label_id (16 bits) | local_offset (48 bits)`. See [Identity Model](../concepts/identity.md).
+A 64-bit identifier for vertices, allocated from one database-wide auto-increment counter. It does not encode the label. See [Identity Model](../concepts/identity.md).
 
 ---
 
@@ -316,7 +313,7 @@ A content-addressed identifier using SHA3-256 hash (32 bytes). Used for provenan
 A Cypher clause that pipes results from one query part to another. Enables subquery-like behavior and intermediate aggregations.
 
 ### Working Graph
-An in-memory graph materialized from storage for query execution. Backed by gryf.
+An in-memory graph materialized from storage for algorithm execution: a `GraphProjection`, a dense CSR (compressed sparse row) structure.
 
 ---
 

@@ -212,14 +212,14 @@ The catalogue is closed on purpose — every kernel is native `O(V+E)` work, so 
 ```
 gc.select(m, a, b)
 → `select` is not a kernel. For a conditional blend, compose it:
-  ewise(b, ewise(m, ewise(a, b, "sub"), "mul"), "add")
+  ewise(b, ewise(m, ewise(a, b, "axpy", -1.0), "mul"), "add")
 
 gc.arena_spmv(a, col)
 → `arena_spmv` is not a kernel. For aggregation over links you grew, compose it:
   spmv(arena_freeze(a), col, "linear_algebra", "out")
 ```
 
-This fires on both the op-string form (`ewise(a, b, "gt")`) and the method form (`gc.gt(a, b)`), in every loader. A name with no published composition gets the ordinary "not found" message rather than invented advice — the hint exists to point at real compositions, not to guess.
+This fires on both the op-string form (`ewise(a, b, "gt")`) and the method form (`gc.select(m, a, b)`), in every loader. A name with no published composition gets the ordinary "not found" message rather than invented advice — the hint exists to point at real compositions, not to guess.
 
 ## Kernel catalogue
 
@@ -339,16 +339,16 @@ Two related contracts worth knowing:
 ### Composing operations the catalog does not name
 
 The kernel set is deliberately coarse and the op vocabularies are closed, so `ewise` has no
-`gt` and `map_apply` has no `step`. That does **not** mean thresholds and conditionals are out
-of reach: `map_to_set` carries a closed predicate enum and `set_to_map` lifts the resulting
-bitset back to a `[V]` map, which composes with `ewise mul` into an ordinary masked blend.
+`gt` (comparison is the separate `compare` kernel) and `map_apply` has no `step`. That does
+**not** mean thresholds and conditionals are out of reach: `map_to_set` carries a closed
+predicate enum and `set_to_map` lifts the resulting bitset back to a `[V]` map, which composes
+with `ewise mul` into an ordinary masked blend.
 
 Ask for an op that is not in a vocabulary and the engine now answers with the composition:
 
 ```
-bad ewise op `gt` — elementwise comparison is composable:
-set_to_map(map_to_set(ewise(a, b, "axpy", -1.0), "gt", 0.0), 1.0);
-valid ewise ops: add, mul, min, max, axpy, div
+bad ewise op `gt` — elementwise comparison is composable: compare(a, b, "gt");
+valid ewise ops: add, mul, min, max, axpy, div, mod
 ```
 
 | You wanted | Compose it as |

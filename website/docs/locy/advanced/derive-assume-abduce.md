@@ -4,8 +4,9 @@
 
 `DERIVE` has two forms with different semantics.
 
-`DERIVE` writes **edges** — `(a)-[:TYPE]->(b)` or `(a)<-[:TYPE]-(b)` — or merges
-nodes with `DERIVE MERGE`. There is no bare-node form: to mark a node, derive an
+`DERIVE` writes **edges** — `(a)-[:TYPE]->(b)` or `(a)<-[:TYPE]-(b)` — or, with
+`DERIVE MERGE a, b`, a `MERGED_WITH` edge from `a` to `b` (the two nodes stay
+separate). There is no bare-node form: to mark a node, derive an
 edge to a marker node, or yield the node from the rule and set the label in a
 follow-up Cypher write.
 
@@ -19,7 +20,7 @@ CREATE RULE infer_friend AS
 MATCH (a)-[:KNOWS]->(b)
 DERIVE (a)-[:FRIEND]->(b)
 
-// MERGE: combine matching paths into one node
+// MERGE: link matched pairs with a MERGED_WITH edge
 CREATE RULE merge_paths AS
 MATCH (a)-[r]->(b)
 DERIVE MERGE a, b

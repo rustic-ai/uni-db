@@ -22,8 +22,8 @@ uni-store = { workspace = true }
 uni-plugin = { workspace = true }
 uni-plugin-rhai = { workspace = true }
 # Optional WASM loaders — gated by the `wasm-plugins` / `extism-plugins`
-# binding features (on by default for the standard wheel). Wheel variants
-# that reuse this source without the features compile the wrappers out.
+# binding features (off by default; see `[features]`). Builds without the
+# features compile the wrappers out.
 uni-plugin-wasm = { workspace = true, optional = true }
 uni-plugin-extism = { workspace = true, optional = true }
 # GraphCompute registry backing guest graph algorithms; only needed when a

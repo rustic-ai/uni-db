@@ -16,9 +16,9 @@ primary and fork data.
 
 ## Status
 
-Forks are **shipped and GA** in both Rust and Python. The full surface is available: writable and nestable forks; lifecycle controls (TTL, budget, Lance tags, parent→child cancellation, pin/refresh on forked sessions); and diff + promotion for write-audit-publish workflows. The Python bindings (`Session.fork`/`fork_schema`, `Uni.list_forks`/`drop_fork`/`drop_fork_cascade`/`tag_fork`/`diff_fork_primary`/`promote_from_fork`) mirror the Rust API one-to-one.
+Forks are **shipped and GA** in both Rust and Python. The full surface is available: writable and nestable forks; lifecycle controls (TTL, budget, Lance tags, parent→child cancellation, pin/refresh on forked sessions); and diff + promotion for write-audit-publish workflows. The Python bindings (`Session.fork`/`fork_schema`, `Uni.list_forks`/`drop_fork`/`drop_fork_cascade`/`tag_fork`/`diff_fork_primary`/`promote_from_fork`/`promote_from_fork_with_options`) mirror the Rust API.
 
-Fork-local indexes and index fusion are **shipped** in Rust and Python sync/async sessions (see [Fork-local indexes](#fork-local-indexes)). Fork **compaction** is the remaining planned enhancement, so until it lands, long-lived heavy-write forks should be `drop_fork`-and-recreate to bound fragment accumulation (see [Operational signals](#operational-signals)).
+Fork-local indexes and index fusion are **shipped** in Rust and Python sync/async sessions (see [Fork-local indexes](#fork-local-indexes)). Forks are **not compacted**: long-lived heavy-write forks should be `drop_fork`-and-recreate (or promoted) to bound fragment accumulation (see [Operational signals](#operational-signals)).
 
 ## Quick start
 
@@ -72,12 +72,13 @@ assert_eq!(
 |---|---|
 | `Uni::list_forks()` | All Active forks. |
 | `Uni::fork_info(name)` | Metadata for a single fork. |
-| `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkHasChildren` while nested children exist. |
+| `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkHasChildren` while nested children exist. Waits up to `UniConfig::drop_fork_drain_timeout` (default `10s`) for released sessions to drain before failing with `ForkInUse`. |
 | `Uni::drop_fork_cascade(name)` | Drop the fork and every descendant; pre-validates the subtree for live sessions / open transactions and surfaces `ForkSubtreeInUse` on any blocker before tombstoning anything. |
-| `Uni::diff_fork_primary(name)` | Structural diff `diff(primary, fork)` returning a `ForkDiff` of added / deleted / changed vertices and edges, paired by content UID. |
+| `Uni::diff_fork_primary(name)` | Structural diff `diff(primary, fork)` returning a `ForkDiff` of added and deleted vertices and edges, paired by content UID. An edited row appears as one deleted plus one added; `changed` is not populated. |
 | `Uni::diff_forks(a, b)` | Structural diff between two named forks. `diff(a, b).invert() == diff(b, a)`. |
 | `Uni::promote_from_fork(name, &[PromotePattern])` | Scan the fork per pattern, dedup by content UID, insert matches on primary in one transaction. Mix vertex and edge patterns in one call. |
-| `Session::flush()` | Flush the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches. Phase 3 auto-flushes a parent fork during nested-fork creation, so most users never call this directly. |
+| `Uni::promote_from_fork_with_options(name, &[PromotePattern], &PromoteOptions)` | Promote with explicit merge options: `ext_id`-keyed upsert, delete-promotion, and a `ConflictPolicy`. See [Promote options](#promote-options). |
+| `Session::flush()` | Flush the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches. Fork creation auto-flushes the parent (primary or a parent fork) first, so most users never call this directly. |
 
 ### Fork-local schema additions
 
@@ -104,20 +105,23 @@ Required only under `UniConfig { strict_schema: true, .. }`. In schemaless mode 
 
 ### Errors
 
-All fork-related errors are `UniError::Fork*` variants. Each maps to a dedicated Python exception (a subclass of `UniError`):
+Fork-related errors are mostly `UniError::Fork*` variants. Most map to a dedicated Python exception (a subclass of `UniError`):
 
 | Rust variant | Fields | Python exception | Raised when |
 |---|---|---|---|
 | `ForkNotFound` | `name` | `UniForkNotFoundError` | The named fork does not exist. |
 | `ForkAlreadyExists` | `name` | `UniForkAlreadyExistsError` | `ForkBuilder::new_()` on a name that is taken. |
-| `ForkInUse` | `name`, `holder_count` | `UniForkInUseError` | `drop_fork` while sessions still hold the fork. |
+| `ForkNameInvalid` | `reason` | (base `UniError`) | The fork name is empty, all whitespace, too long, or contains control characters. |
+| `ForkInUse` | `name`, `holder_count` | `UniForkInUseError` | `drop_fork` while sessions still hold the fork after `drop_fork_drain_timeout`. |
 | `ForkInflightTx` | `name` | `UniForkInflightTxError` | `drop_fork` while a `Transaction` is still open on the fork. |
 | `ForkHasChildren` | `name`, `children` | `UniForkHasChildrenError` | `drop_fork` while nested children exist — drop them first or use `drop_fork_cascade`. |
 | `ForkSubtreeInUse` | `blockers` | `UniForkSubtreeInUseError` | `drop_fork_cascade` blocked by live sessions / open transactions in the subtree. No branch is deleted. |
 | `ForkBudgetExceeded` | `current`, `max` | `UniForkBudgetExceededError` | Fork creation would exceed `UniConfig::max_forks`. |
 | `PendingFlushTimeout` | `name` | (timeout `UniError`) | `drop_fork` could not drain pending async flushes within `UniConfig::drop_fork_drain_timeout` (default `10s`). |
 | `ForkCorruptRegistry` | `message` | `UniForkCorruptRegistryError` | The on-disk fork registry failed to parse or validate. |
-| `ForkLifecycle` | `name`, `stage`, `source` | `UniForkLifecycleError` | A tag / untag / list-tags operation failed at the named `stage`. |
+| `ForkLifecycle` | `name`, `stage`, `source` | `UniForkLifecycleError` | A create, open, drop, schema-overlay, tag, untag or list-tags step failed at the named `stage` (for example `create_branch`, `tombstoned_open`, `delete_branch`, `overlay_persist`, `tag`). |
+| `RestoreBlockedByForks` | `forks` | `UniRestoreBlockedByForksError` | `restore_snapshot` while any fork exists; drop them first. |
+| `ReadOnly` | `operation` | `UniReadOnlyError` | Fork create, drop or tag on a read-only handle, or a write on a pinned forked session. |
 
 `ForkInflightTx` fires when `drop_fork` is called while at least one `Transaction` is alive on the fork — commit or roll back first, then retry. `forked.tx()` is fully writable; there is no read-only-fork restriction.
 
@@ -153,24 +157,25 @@ tx.commit().await?;
 
 ## Promotion and diff
 
-Promotion and diff close the write-audit-publish loop. Identity is **content-addressed UID** for vertices (`SHA3-256(label, ext_id, properties)`) and `(src_uid, dst_uid)` scoped to the edge type for edges — so siblings off a shared parent, or two unrelated forks that happened to roll the same VIDs, compare correctly.
+Promotion and diff close the write-audit-publish loop. Identity is **content-addressed UID** for vertices (`SHA3-256(label, ext_id, properties)`) and an edge UID over `(src_uid, dst_uid, edge_type, properties)` for edges — so siblings off a shared parent, or two unrelated forks that happened to roll the same VIDs, compare correctly.
 
 ### Diff
 
 ```rust
 let diff = db.diff_fork_primary("audit").await?;
 println!(
-    "{} added, {} deleted, {} changed",
+    "{} added, {} deleted",
     diff.vertices.added.len(),
     diff.vertices.deleted.len(),
-    diff.vertices.changed.len(),
 );
 for v in &diff.vertices.added {
     println!("+ ({} uid={}) {:?}", v.label, v.uid, v.properties);
 }
 ```
 
-`ForkDiff::invert()` swaps `added` ↔ `deleted` and `before` ↔ `after` so `diff(a, b).invert() == diff(b, a)` by construction.
+Because the UID folds in the properties, an edited vertex or edge has a different UID on each side: it appears once in `deleted` (the old row) and once in `added` (the new row). `changed` is not populated.
+
+`ForkDiff::invert()` swaps `added` ↔ `deleted` so `diff(a, b).invert() == diff(b, a)` by construction.
 
 ### Promote
 
@@ -219,6 +224,51 @@ means the neighbouring counters understate the truth:
 Re-running the promote after the transient failure clears is safe: the dedup
 pass runs again and skips whatever did land.
 
+### Promote options
+
+`promote_from_fork` is insert-only. `promote_from_fork_with_options` takes a
+`PromoteOptions`:
+
+| Constructor / field | Effect |
+|---|---|
+| `PromoteOptions::insert_only()` (default) | Same as `promote_from_fork`. |
+| `PromoteOptions::with_upsert()` / `upsert` | A fork edit to a vertex that exists on primary, matched by `(label, ext_id)`, is applied in place instead of inserting a twin. Vertices without an `ext_id` keep the content-UID insert-or-skip behaviour. |
+| `PromoteOptions::with_merge()` / `delete_promotion` | Upsert plus delete-promotion: primary vertices present at the fork point but removed on the fork are deleted from primary (`ext_id`-keyed; rows without an `ext_id` are reported, never deleted). Builds a fork-point baseline. |
+| `.on_conflict(ConflictPolicy)` | For a vertex edited on both primary and the fork since the fork point: `ConflictPolicy::Skip` (default) leaves primary's value, `ConflictPolicy::Overwrite` applies the fork's. |
+
+```rust
+use uni_db::{ConflictPolicy, PromoteOptions, PromotePattern};
+
+let report = db
+    .promote_from_fork_with_options(
+        "publish_q2",
+        &[PromotePattern::label("Person")],
+        &PromoteOptions::with_merge().on_conflict(ConflictPolicy::Overwrite),
+    )
+    .await?;
+```
+
+`PromoteReport` fields:
+
+| Field | Meaning |
+|---|---|
+| `vertices_inserted` | Vertices inserted on primary. |
+| `vertices_updated` | Existing primary vertices updated in place (upsert). |
+| `vertices_skipped_no_op` | Fork rows matching a primary vertex by `(label, ext_id)` with identical properties. |
+| `vertices_skipped_uid_conflict` | Fork rows skipped because primary already has the same UID. |
+| `vertices_deleted` | Primary vertices removed by delete-promotion. |
+| `vertices_skipped_no_ext_id_for_delete` | Removed fork-point rows without an `ext_id`; reported, not deleted. |
+| `vertices_conflicting` | Vertices edited on both sides since the fork point, resolved per `on_conflict`. |
+| `vertices_inserted_unverified`, `edges_inserted_unverified`, `vertices_deletes_unverified` | See the table above. |
+| `edges_inserted` | Edges inserted on primary. |
+| `edges_skipped_duplicate` | Fork edges skipped because primary already has an edge of that type between the endpoints. |
+| `edges_skipped_no_endpoint` | Fork edges skipped because an endpoint is not on primary. |
+| `edges_skipped` | Edges touching a promoted vertex that no edge pattern in the call promoted. |
+| `per_pattern_inserted` | Rows inserted per pattern, by position. |
+
+In Python, `uni_db.PromoteOptions(upsert=..., delete_promotion=..., on_conflict=uni_db.ConflictPolicy.Skip)`
+is passed to `db.promote_from_fork_with_options(name, patterns, options)`.
+
 ### Python
 
 The same surface is available via `uni_db` in Python, sync and async.
@@ -234,7 +284,7 @@ The same surface is available via `uni_db` in Python, sync and async.
     import uni_db
 
     diff = db.diff_fork_primary("audit")
-    print(diff)  # ForkDiff(vertices=added=2/deleted=0/changed=0, edges=...)
+    print(diff)  # ForkDiff(vertices=added=2/deleted=1/changed=0, edges=...)
     for v in diff.vertices.added:
         print(v.label, v.uid, v.properties)
 
@@ -354,6 +404,7 @@ fork.build_fork_local_index("Person", "email", ForkLocalIndexKind::ScalarBtree).
 | `VidUid` | `VidUidForkFirst` | VID / UID identity lookups (fork-first, falls back to primary). |
 | `Vector` | `AnnRerank` | Vector ANN search (top-k merge + rerank). |
 | `FullText` | `Bm25Rrf` | BM25 full-text search (reciprocal-rank fusion). |
+| `Sparse` | `SparseDot` | Learned-sparse `uni.sparse.query` (a branch scan re-scored by sparse dot product; the kind is a planner marker, no index file is written). |
 
 **Automatic building.** A background builder also creates fork-local indexes once a fork's per-label row count crosses a threshold, so most workloads never call the API directly:
 
@@ -363,7 +414,7 @@ fork.build_fork_local_index("Person", "email", ForkLocalIndexKind::ScalarBtree).
 | `fork_index_builder_interval` | `30s` | Background builder poll interval. |
 | `disable_fork_index_builder` | `false` | Skip spawning the builder (e.g. in tests). |
 
-**Seeing fusion in a plan.** When a fork-local index is used, `explain()` shows a `FusedIndexScan` node whose `FusionKind` is one of `BtreeUnion`, `SortedKWayMerge`, `VidUidForkFirst`, `AnnRerank`, or `Bm25Rrf`. The lossy kinds (`Vector`, `FullText`) are additionally wrapped as `FusedIndexScanWrapped`, purely for observability — runtime behaviour is identical.
+**Seeing fusion in a plan.** When a fork-local index is used, `explain()` shows a `FusedIndexScan` node whose `FusionKind` is one of `BtreeUnion`, `SortedKWayMerge`, `VidUidForkFirst`, `AnnRerank`, `Bm25Rrf`, or `SparseDot`. A `uni.search` call whose properties map has a `sparse` key is labelled `SparseRrf`, independent of fork-local indexes. The lossy kinds (`Vector`, `FullText`, `Sparse`) are additionally wrapped as `FusedIndexScanWrapped`, purely for observability — runtime behaviour is identical.
 
 ## Lifecycle admin
 
@@ -386,13 +437,13 @@ let cfg = UniConfig { max_forks: Some(100), ..UniConfig::default() };
 
 Hitting the cap surfaces `ForkBudgetExceeded { current, max }`. Counts include `Active + Pending + Tombstoned` so create/drop churn cannot slip past while tombstones await recovery.
 
-**Tags.** Pin a Lance tag to the fork's current branch tip per dataset. Tagged versions are GC-exempt — they survive Lance compaction *and* fork drops, which makes a tag-then-drop sequence safe for audit retention:
+**Tags.** Pin a Lance tag to the fork's current branch tip per dataset. While the fork exists, tagged versions are GC-exempt: they survive Lance compaction, and later fork writes do not move the tag. Remove a fork's tags before dropping it; `drop_fork` on a tagged fork fails with `ForkLifecycle { stage: "delete_branch" }` and leaves the fork Tombstoned. Tag operations look the fork up in the registry, so after a drop `list_fork_tags` and `untag_fork` return `ForkNotFound`.
 
 ```rust
 db.tag_fork("audit-fork", "2026-q1-close").await?;
 let tags = db.list_fork_tags("audit-fork").await?;
-db.drop_fork("audit-fork").await?;   // branches go; tagged versions remain
 db.untag_fork("audit-fork", "2026-q1-close").await?;  // idempotent
+db.drop_fork("audit-fork").await?;
 ```
 
 The on-disk tag is `fork_{tag}_{dataset}`. `list_fork_tags` returns the deduplicated user-visible tag names.
@@ -415,7 +466,7 @@ assert!(b_token.is_cancelled());        // cascade reached the grandchild
 ## Operational signals
 
 - `uni_fork_l1_flushes{fork=...}` — gauge incremented on every successful fork flush. A proxy for fragment growth on the fork's branches.
-- `tracing::warn!` fires once per writer when the per-fork flush count crosses `UniConfig::fork_fragment_warn_threshold` (default 256). Fork compaction is deferred to Phase 5; until then, long-lived heavy-write forks should be `drop_fork`-and-recreate to bound fragment accumulation.
+- `tracing::warn!` fires once per writer when the per-fork flush count crosses `UniConfig::fork_fragment_warn_threshold` (default 256). Forks are not compacted, so long-lived heavy-write forks should be `drop_fork`-and-recreate (or promoted) to bound fragment accumulation.
 
 ## Crash recovery
 

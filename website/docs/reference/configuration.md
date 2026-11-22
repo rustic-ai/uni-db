@@ -17,7 +17,7 @@ This document provides a comprehensive reference for all Uni configuration optio
 
 Uni can be configured through:
 1. **Rust API** — `UniConfig` (available)
-2. **Environment Variables** — Selected operational overrides are supported (for example `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`); a general `UNI_*` mapping is not implemented
+2. **Environment Variables** — Selected operational overrides are supported (for example `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT`); a general `UNI_*` mapping is not implemented
 3. **Configuration File** — Planned (`uni.toml` or JSON)
 
 ```
@@ -152,7 +152,7 @@ pub struct UniConfig {
     /// `async_flush_enabled` is true (default: 2).
     pub max_pending_flushes: usize,
 
-    /// Per-stream async flush timeout (default: 60s; UNI_FLUSH_STREAM_TIMEOUT_SECS override).
+    /// Per-stream async flush timeout (default: 60s; UNI_FLUSH_STREAM_TIMEOUT override).
     pub flush_stream_timeout: Duration,
 
     /// Maximum time without progress draining async flushes (default: 900s).
@@ -221,7 +221,7 @@ pub struct UniConfig {
 | `auto_flush_interval` | duration | 5s | Time-based flush interval (None to disable) |
 | `auto_flush_min_mutations` | count | 1 | Minimum mutations for time-based flush |
 | `wal_enabled` | bool | true | Enable write-ahead logging |
-| `flush_drain_timeout` | duration | 120s | Max time `flush()` waits for in-flight async flushes to drain. Exceeding it is an **error**, never a silent partial flush |
+| `flush_drain_timeout` | duration | 900s | Max time `flush()` waits for in-flight async flushes to drain. Exceeding it is an **error**, never a silent partial flush |
 | `query_timeout` | duration | 30s | Default query execution timeout. An exact (`Flat`) scan over ~1M vectors runs past this — raise it for brute-force vector work |
 | `commit_timeout` | duration | 5s | Max wall time a commit may take before `CommitTimeout` abort |
 | `max_query_memory` | bytes | 1 GB | Maximum memory per query |
@@ -322,10 +322,10 @@ Between `soft_limit` and `hard_limit` a write waits up to
 (1.6 s at the defaults), re-checking every 100 ms and resuming as soon as
 compaction brings the count below `soft_limit`. At `hard_limit` and above,
 writes stop until a compaction lowers the count. Background compaction and a
-full manual compaction (`CALL uni.admin.compact()` or `Uni::compact`) both
+full manual compaction (`CALL uni.admin.compact()`) both
 lower it the same way: by the number of generations counted when the pass
 *started*, so generations flushed while it ran stay counted. A scoped
-`compact_label` / `compact_edge_type` does not change the count, because it
+compaction (`db.compaction().compact(name)`) does not change the count, because it
 does not fold every generation. A statement's `timeout` ends either
 wait with a `Timeout` error; the transaction's bulk inserts
 (`bulk_insert_vertices`, `bulk_insert_edges`) are bounded by
@@ -338,7 +338,7 @@ does not wait at all and a write at `hard_limit` fails at once with
 `UniError::WriteStalled { l1_runs, hard_limit }` (Python:
 `UniWriteStalledError`, with `l1_runs` and `hard_limit` attributes). The
 error is not retriable as is: run `CALL uni.admin.compact()` through
-`session.run()` (or `Uni::compact`), which lowers the count and resumes writes, or re-enable
+`session.run()`, which lowers the count and resumes writes, or re-enable
 compaction.
 
 From Python both nested configs are set through the `config()` dict, as
@@ -508,7 +508,7 @@ Index tuning is **not** controlled by `UniConfig`. Cypher DDL currently selects 
 
 ## Environment Variables
 
-Apart from `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`, Uni reads no `UNI_*` variables. Environment variables in use today:
+Apart from `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT`, Uni reads no `UNI_*` variables. Environment variables in use today:
 
 | Variable | Used For |
 |----------|----------|
@@ -602,7 +602,7 @@ let config = CloudStorageConfig::S3 {
 };
 ```
 
-The ID allocator uses conditional writes. On a service without them, the first ID reservation fails; set the `aws_conditional_put` storage option to the mechanism the service supports.
+The writer lease and the ID allocator use conditional writes. On a service without them, a writable open is refused with `LeaseUnsupported`; set the `aws_conditional_put` storage option to the mechanism the service supports.
 
 ### GCS Configuration
 
@@ -659,7 +659,7 @@ Managed identity, workload identity and client-secret credentials are configured
 
 | Field | Default | Meaning |
 |---|---|---|
-| `ttl` | 30 s | Object-store lease lifetime without renewal. A crashed writer blocks others this long. |
+| `ttl` | 30 s | Object-store lease lifetime without renewal. A crashed writer blocks others this long plus `clock_skew` (about 35 s at the defaults). |
 | `renew_interval` | 10 s | Lease renewal and `WriteLeaseProvider::heartbeat` period. Must be above zero and below `ttl`. |
 | `acquire_grace` | 5 s | How long a writable open waits for a held store before `StoreLocked`. |
 | `clock_skew` | 5 s | Allowance added before a takeover, and subtracted from a holder's own deadline. |
@@ -672,11 +672,14 @@ Reads see the table versions the latest manifest names (its read cut), not each 
 
 ### Cloud Storage with BACKUP/COPY
 
-BACKUP and COPY commands support cloud URLs. A URL with the same scheme as a database on an object store inherits its endpoint, credentials and network settings, but not its bucket, nor its region unless the endpoint is custom (an Azure URL naming another account inherits nothing). Other URLs, and URLs from a local database, are configured from the environment. Local paths and `file://` URIs are checked against the file sandbox.
+BACKUP and COPY commands support cloud URLs. A URL with the same scheme as a database on an object store inherits its endpoint, credentials and network settings, but not its bucket, nor its region unless the endpoint is custom (an Azure URL naming another account inherits nothing). Inherited credentials go only to the inherited endpoint: when the destination resolves to another endpoint (one named in its options or its environment), they are dropped and the destination's own are used. Other URLs, and URLs from a local database, are configured from the environment. `BACKUP TO <url> WITH {…}` takes raw object-store options for the destination (string, number or boolean values), applied over the inherited ones. Local paths and `file://` URIs are checked against the file sandbox.
 
 ```cypher
 // Backup to S3
 BACKUP TO 's3://backup-bucket/uni-backup-2024'
+
+// Backup to another S3-compatible service
+BACKUP TO 's3://backup-bucket/uni-backup' WITH {aws_endpoint: 'http://localhost:9000', aws_allow_http: 'true'}
 
 // Import from S3
 COPY Person FROM 's3://data-bucket/people.parquet'

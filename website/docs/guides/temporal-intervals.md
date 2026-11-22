@@ -56,8 +56,11 @@ RETURN btic('1985-03')
 // Day precision: [1985-03-15, 1985-03-16)
 RETURN btic('1985-03-15')
 
-// Full timestamp: [that millisecond, +1ms)
+// Timestamp to the second: [14:30:00, 14:30:01)
 RETURN btic('1985-03-15T14:30:00Z')
+
+// With milliseconds: [that millisecond, +1ms)
+RETURN btic('1985-03-15T14:30:00.123Z')
 ```
 
 ### Ranges (solidus notation)

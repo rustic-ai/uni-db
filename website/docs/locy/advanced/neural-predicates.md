@@ -132,6 +132,8 @@ A `CREATE MODEL` declaration registers the **name** with the compiler, but the r
 
 === "Python"
     ```python
+    from typing import Any
+
     import uni_db
 
     def my_scorer(inputs: list[dict[str, Any]]) -> list[float]:
@@ -183,7 +185,7 @@ CALIBRATE failure_likelihood
   HOLDOUT 0.2
 ```
 
-`CALIBRATE <model> ON MATCH <pattern> [WHERE ...] TARGET <expr> METHOD <method> [HOLDOUT n]` — the MATCH pattern collects the rows the model is invoked over, `TARGET` is the ground-truth label expression, `METHOD` picks the calibrator, and the optional `HOLDOUT` reserves a fraction for fitting.
+`CALIBRATE <model> ON MATCH <pattern> [WHERE ...] TARGET <expr> METHOD <method> [HOLDOUT fraction]` — the MATCH pattern collects the rows the model is invoked over, `TARGET` is the ground-truth label expression, `METHOD` picks the calibrator, and the optional `HOLDOUT` (default `0.2`, strictly between 0 and 1) is the fraction of rows held out for scoring: the first `ceil(n × fraction)` rows in MATCH order are held out, and the calibrator is fitted on the rest.
 
 Built-in methods:
 
@@ -196,43 +198,45 @@ Built-in methods:
 | `dirichlet` | Multi-class | True multi-class outputs (e.g. severity-tier predictions). |
 | `conformal` / `conformal(alpha)` | Split-conformal | Distribution-free confidence bands; bare `conformal` defaults to `alpha = 0.1`. |
 
-The `CALIBRATE` command runs against the same data the rule already binds (the rule's own derived facts plus the `params` you pass), then fits the calibrator and returns a `CalibrateCommandResult`:
+The `CALIBRATE` command runs its own `MATCH ... [WHERE ...]` as a query, calls the classifier once over all the returned rows, fits the calibrator, and returns a calibrate command result (in Python, a dict with `type: 'calibrate'`):
+
+The classifier is called with one dict per row, keyed by the model's `INPUT` binding name, holding that variable's value in the MATCH row — not the feature expressions of a rule's call site. A scalar (number, string, boolean) is passed as is; a node or any other non-scalar value arrives as `None`. With `INPUT (a)` and `ON MATCH (a:Asset)`, a Python classifier therefore receives `{'a': None}` rows during `CALIBRATE`, and must accept them (`max(0.0, r["a"])` raises `TypeError`).
 
 | Field | Meaning |
 |---|---|
 | `model_name` | The `CREATE MODEL` name |
 | `method` | The calibration method used |
-| `n_samples` | Held-out sample count fitted |
-| `holdout_size` | Reserved fraction (0.0–1.0) used for fitting |
-| `raw_brier` | Brier score on raw outputs |
-| `calibrated_brier` | Brier score after calibration |
-| `raw_ece` | Expected Calibration Error on raw outputs |
-| `calibrated_ece` | Expected Calibration Error after calibration |
+| `n_samples` | Rows collected and classified (training plus holdout) |
+| `holdout_size` | Number of held-out rows (an integer count) the four scores below are computed on |
+| `raw_brier` | Brier score of the raw outputs on the holdout |
+| `calibrated_brier` | Brier score on the holdout after calibration |
+| `raw_ece` | Expected Calibration Error of the raw outputs on the holdout |
+| `calibrated_ece` | Expected Calibration Error on the holdout after calibration |
 | `confidence_band_quantile` | If a conformal predictor was fit alongside, the quantile |
 
 Calibrated probabilities are what the rule emits on subsequent invocations. The raw output remains available in `NeuralProvenance` for audit.
 
 ## VALIDATE
 
-`VALIDATE` scores a rule's predictions against ground-truth labels without modifying the classifier:
+`VALIDATE` scores a rule's predictions against ground-truth labels without modifying the classifier. It names the **rule** (here `at_risk`, from [Invoking a Model in a Rule](#invoking-a-model-in-a-rule)), not the model:
 
 ```text
-VALIDATE failure_likelihood
+VALIDATE at_risk
   ON MATCH (a:Asset)
   TARGET a.actually_failed
   METRICS brier_score, ece
 ```
 
-`VALIDATE <model> ON MATCH <pattern> [WHERE ...] TARGET <expr> METRICS <metric_list>` — the rule's `PROB` output is joined against the `TARGET` ground-truth expression over the MATCH rows, and the requested metrics are computed on the resulting `(prediction, label)` pairs.
+`VALIDATE <rule> ON MATCH <pattern> [WHERE ...] TARGET <expr> METRICS <metric_list>` — the rule's `PROB` output is joined against the `TARGET` ground-truth expression over the MATCH rows, and the requested metrics are computed on the resulting `(prediction, label)` pairs.
 
-Returns a `ValidateCommandResult`:
+Returns a validate command result (in Python, a dict with `type: 'validate'`):
 
 | Field | Meaning |
 |---|---|
 | `rule_name` | The rule whose `PROB` column is being validated |
 | `prob_column` | The column name |
 | `n_samples` | Number of label-prediction pairs scored |
-| `metrics` | Dict mapping metric name to value |
+| `metrics` | Dict mapping metric to value, keyed `BrierScore`, `LogLoss`, `Ece`, `DebiasedEce`, `Accuracy`, `Auc` |
 
 Supported metrics: `brier_score`, `log_loss`, `ece`, `debiased_ece`, `accuracy`, `auc`. Multi-metric validation in one call.
 
@@ -261,9 +265,9 @@ The semiring controls how probabilities compose through `MNOR`, `MPROD`, and sha
 
 - **`AddMultProb` (default)** — independence-mode noisy-OR for `MNOR` and product for `MPROD`. Byte-identical to the pre-neural Locy. Use unless you have a reason to opt out.
 - **`MaxMinProb` (Viterbi / fuzzy-truth)** — `MNOR` becomes max, `MPROD` becomes min. Useful when probabilities aren't actually probabilities (e.g. fuzzy-set memberships) and you want monotone composition without the independence assumption. Emits a `FuzzyNotProbabilistic` warning on any rule that also declares `PROB`, since you opted out of probability semantics.
-- **`TopKProofs(k)`** — evaluates each `MNOR` fact over its `k` most probable rows (proofs), exactly: each proof is its own event AND the facts it references, so proofs sharing an edge count it once. With `k` at least a fact's number of rows the value is the possible-worlds probability. Pick this when shared proofs are a real concern and you want to bound the work per fact.
+- **`TopKProofs { k }`** — evaluates each `MNOR` fact over its `k` most probable rows (proofs), exactly: each proof is its own event AND the facts it references, so proofs sharing an edge count it once. With `k` at least a fact's number of rows the value is the possible-worlds probability. Pick this when shared proofs are a real concern and you want to bound the work per fact.
 
-Set via `LocyConfig.semiring` (Rust) or by string name in the Python `with_config({"semiring": "TopKProofs(8)"})`.
+Set via `LocyConfig.semiring` (Rust: `SemiringKind::AddMultProb`, `SemiringKind::MaxMinProb`, `SemiringKind::TopKProofs { k: 8 }`). From Python pass `"add_mult_prob"`, `"max_min_prob"` or `"bdd_exact"` as a string, or the dict `{"top_k_proofs": 8}`: `with_config({"semiring": {"top_k_proofs": 8}})`.
 
 ## Warnings
 
@@ -288,7 +292,7 @@ Locy distinguishes two warning channels. **Compile-time warnings** (`WarningCode
 | `SharedRetrievalContext` | Multiple `similar_to`/`semantic_match` features in the same rule share the same query embedding | The features are not independent of each other; the rule's joint composition over them may be biased. `@independent` suppresses. |
 | `UncalibratedNeuralPredicate` | A rule invokes a PROB model that declares no `CALIBRATION` (or `CALIBRATION none`) | The uncalibrated probability flows into the probabilistic stack, compounding miscalibration. Run a `CALIBRATE` statement or acknowledge with `CALIBRATION none`. |
 | `UncalibratedLLMLogprobs` | An uncalibrated `CREATE MODEL` whose `xervo_alias` looks like an LLM provider | Raw LLM logprobs are not calibrated probabilities. |
-| `ProbabilityDomainViolation` | A probability input falls outside `[0, 1]` | The value was clamped (or rejected under `strict_probability_domain`). |
+| `ProbabilityDomainViolation` | An `MNOR` or `MPROD` in a recursive rule takes a non-literal argument | A static hint that the argument may fall outside `[0, 1]`; no value is inspected. At run time an out-of-range input is clamped (or rejected under `strict_probability_domain`). |
 | `FoldInRecursivePath` | A clause has a recursive IS-ref and a FOLD aggregate but no ALONG | The rule rolls up per KEY, composing level by level. Use `ALONG` if you meant per-path accumulation. |
 | `EceBinningBias` | `VALIDATE METRICS ece` was requested | Equal-width-binning ECE is biased in the small-sample regime; prefer `debiased_ece`. |
 
@@ -311,9 +315,9 @@ Fields on `LocyConfig` that govern neural predicates:
 | `classifier_registry` | `{}` | Map from `CREATE MODEL` name to `Arc<dyn NeuralClassifier>`. Populate before running. |
 | `classifier_cache` | `None` | Shared memoization cache across queries. `None` builds a fresh cache per query. |
 | `classifier_cache_max` | `100_000` | Max entries in the per-query cache before eviction. |
-| `neural_provenance_store` | `None` | Where `NeuralProvenance` records land for EXPLAIN. `None` falls back to a yield-alias lookup. |
+| `classifier_provenance_store` | `None` | Where `NeuralProvenance` records land for EXPLAIN. `None` falls back to a yield-alias lookup. |
 | `semiring` | `AddMultProb` | Active semiring; see "Semiring Choice" above. |
-| `top_k_proofs` | `0` | When `semiring = TopKProofs`, the K. |
+| `top_k_proofs` | `0` | Keep at most this many recorded derivations per fact for `EXPLAIN RULE` provenance, the most probable first (`0` keeps all). Independent of the `TopKProofs { k }` semiring, which carries its own `k`. |
 | `neural_predicates_preview` | `true` | Compile-time toggle for `CREATE MODEL` acceptance. |
 
 ## Related

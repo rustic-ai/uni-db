@@ -294,7 +294,7 @@ Lazy-loads vertex/edge properties from storage on demand.
        │                                                             │
        │  ┌─────────────────────────────────────────────────────┐   │
        │  │  Cache: LruCache<(Vid, String), Value>              │   │
-       │  │  Capacity: configurable (default: 10,000 entries)   │   │
+       │  │  Capacity: cache_size / 1024 entries (~1M default)  │   │
        │  └─────────────────────────────────────────────────────┘   │
        └─────────────────────────────────────────────────────────────┘
 ```
@@ -349,29 +349,28 @@ The Storage Layer provides durable, versioned, columnar storage via Lance.
 ### Dataset Layout
 
 ```
-storage/
-├── schema.json                    # Schema definition
-├── snapshots/
-│   └── manifest_v42.json         # Point-in-time snapshot
-├── vertices_Paper/               # Per-label vertex dataset
-│   ├── data/
-│   │   ├── 0000.lance
-│   │   └── 0001.lance
-│   └── _versions/
-│       └── 42.manifest
-├── vertices_Author/
-│   └── ...
-├── edges_CITES/                  # Per-type edge dataset
-│   └── ...
-├── adj_out_CITES_Paper/          # Adjacency (outgoing, CITES, from Paper)
-│   └── ...
-├── adj_in_CITES_Paper/           # Adjacency (incoming, CITES, to Paper)
-│   └── ...
-├── indexes/
-│   ├── vector_paper_embedding/   # Vector index
-│   └── scalar_author_name/       # Scalar index
-└── delta_CITES_out/              # LSM-style delta (L1)
-    └── ...
+<db>/
+├── catalog/
+│   └── schema.json                   # Schema definition
+├── id_allocator.json                 # VID/EID allocator state
+├── wal/                              # Write-ahead log segments
+└── storage/
+    ├── catalog/
+    │   ├── latest                    # Id of the latest snapshot manifest
+    │   └── manifests/<uuid>.json     # Snapshot manifests (the read cut)
+    ├── vertices.lance/               # Main vertex table (all labels)
+    ├── vertices_Paper.lance/         # Per-label vertex dataset
+    │   ├── data/
+    │   ├── _indices/                 # Lance vector/scalar/FTS indexes
+    │   └── _versions/
+    ├── vertices_Author.lance/
+    ├── edges.lance/                  # Main edge table (all types)
+    ├── deltas_CITES_fwd.lance/       # LSM-style edge delta (L1), outgoing
+    ├── deltas_CITES_bwd.lance/       # LSM-style edge delta (L1), incoming
+    ├── adjacency_CITES_fwd.lance/    # Adjacency (outgoing CITES), written by compaction
+    ├── adjacency_CITES_bwd.lance/    # Adjacency (incoming CITES)
+    └── indexes/
+        └── uni_id_to_vid/Paper/index.lance   # UID → VID index
 ```
 
 ### Vertex Dataset Schema
@@ -382,7 +381,7 @@ storage/
 ├──────────────┬────────────────────────────────────────────────────────────── │
 │ Column       │ Description                                                  │
 ├──────────────┼──────────────────────────────────────────────────────────────┤
-│ _vid         │ u64 - Internal vertex ID (label_id << 48 | offset)           │
+│ _vid         │ u64 - Internal vertex ID                                     │
 │ _uid         │ [u8; 32] - UniId (SHA3-256 content hash)                     │
 │ _deleted     │ bool - Soft delete flag                                      │
 │ _version     │ u64 - Last modification version                              │
@@ -394,14 +393,14 @@ storage/
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         EdgeDataset (per type)                              │
+│              Edge delta dataset (per type and direction)                    │
 ├──────────────┬──────────────────────────────────────────────────────────────┤
 │ Column       │ Description                                                  │
 ├──────────────┼──────────────────────────────────────────────────────────────┤
-│ eid          │ u64 - Internal edge ID (type_id << 48 | offset)              │
 │ src_vid      │ u64 - Source vertex VID                                      │
 │ dst_vid      │ u64 - Destination vertex VID                                 │
-│ _deleted     │ bool - Soft delete flag                                      │
+│ eid          │ u64 - Internal edge ID                                       │
+│ op           │ u8 - 0 = insert, 1 = delete                                  │
 │ _version     │ u64 - Last modification version                              │
 │ <properties> │ User-defined columns per schema                              │
 └──────────────┴──────────────────────────────────────────────────────────────┘
@@ -466,7 +465,7 @@ flowchart TB
     C["CREATE (n:Paper {title: 'New Paper', year: 2024})"]
 
     subgraph Allocate["1. ALLOCATE ID"]
-        A1["IdAllocator.allocate_vid(label_id=1)"]
+        A1["IdAllocator.allocate_vid()"]
     end
 
     subgraph WAL["2. WRITE TO WAL"]

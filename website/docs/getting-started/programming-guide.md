@@ -12,7 +12,7 @@ Before starting, ensure you have Uni installed for your language:
 
     ```toml
     [dependencies]
-    uni-db = { git = "https://github.com/rustic-ai/uni" }
+    uni-db = "6"
     tokio = { version = "1", features = ["full"] }
     ```
 
@@ -495,7 +495,7 @@ Execute Cypher queries to read and write data.
     // Simple query
     let results = session.query("MATCH (p:Person) RETURN p.name, p.age").await?;
 
-    for row in &results {
+    for row in results.rows() {
         let name: String = row.get("p.name")?;
         let age: i32 = row.get("p.age")?;
         println!("{} is {} years old", name, age);
@@ -510,7 +510,7 @@ Execute Cypher queries to read and write data.
         LIMIT 10
     "#).await?;
 
-    for row in &results {
+    for row in results.rows() {
         println!("{}: {}", row.get::<String>("name")?, row.get::<i32>("age")?);
     }
     ```
@@ -984,8 +984,8 @@ For large datasets, use the bulk writer for efficient loading.
     // Insert edges in bulk (src_vid, dst_vid, properties)
     let edges: Vec<EdgeData> = vids.windows(2)
         .map(|pair| EdgeData {
-            src: pair[0],
-            dst: pair[1],
+            src_vid: pair[0],
+            dst_vid: pair[1],
             properties: hashmap! { "since" => 2024.into() },
         })
         .collect();
@@ -1050,17 +1050,17 @@ Sessions provide scoped context for multi-tenant queries and are the primary sco
     session.params().set("tenant_id", "acme-corp");
     session.params().set("user_id", "user-123");
 
-    // All queries have access to session parameters
+    // All queries see session parameters as $session.<key>
     let results = session.query(r#"
         MATCH (d:Document)
-        WHERE d.tenant_id = $tenant_id
+        WHERE d.tenant_id = $session.tenant_id
         RETURN d.title AS title
     "#).await?;
 
     // Query with additional parameters
     let results = session.query_with(r#"
         MATCH (d:Document)
-        WHERE d.tenant_id = $tenant_id
+        WHERE d.tenant_id = $session.tenant_id
           AND d.status = $status
         RETURN d.title AS title
     "#)
@@ -1080,10 +1080,10 @@ Sessions provide scoped context for multi-tenant queries and are the primary sco
     session.params().set("tenant_id", "acme-corp")
     session.params().set("user_id", "user-123")
 
-    # Execute queries with session context
+    # Queries see session parameters as $session.<key>
     results = session.query("""
         MATCH (d:Document)
-        WHERE d.tenant_id = $tenant_id
+        WHERE d.tenant_id = $session.tenant_id
         RETURN d.title AS title
     """)
 
@@ -1121,13 +1121,13 @@ Analyze query execution plans.
 
     # Get query plan without executing
     plan = session.query_with("MATCH (p:Person) WHERE p.age > 25 RETURN p.name AS name").explain()
-    print(f"Plan:\n{plan['plan_text']}")
-    print(f"Estimated cost: {plan['cost_estimates']}")
+    print(f"Plan:\n{plan.plan_text}")
+    print(f"Estimated cost: {plan.cost_estimates['estimated_cost']}")
 
     # Execute with profiling
     results, profile = session.query_with("MATCH (p:Person) WHERE p.age > 25 RETURN p.name AS name").profile()
-    print(f"Total time: {profile['total_time_ms']}ms")
-    print(f"Peak memory: {profile['peak_memory_bytes']} bytes")
+    print(f"Total time: {profile.total_time_ms}ms")
+    print(f"Peak memory: {profile.peak_memory_bytes} bytes")
     ```
 
 ---
@@ -1325,15 +1325,19 @@ Handle errors appropriately in your application.
 === "Python"
 
     ```python
+    import uni_db
+
     session = db.session()
     try:
         results = session.query("INVALID CYPHER")
-    except RuntimeError as e:
-        print(f"Query error: {e}")
-    except ValueError as e:
-        print(f"Invalid parameter: {e}")
-    except OSError as e:
-        print(f"Database I/O error: {e}")
+    except uni_db.UniParseError as e:
+        print(f"Syntax error: {e}")
+    except uni_db.UniQueryError as e:
+        print(f"Query execution error: {e}")
+    except uni_db.UniTimeoutError as e:
+        print(f"Query timed out: {e}")
+    except uni_db.UniError as e:
+        print(f"Error: {e}")
     ```
 
 ---
@@ -1412,7 +1416,7 @@ Here's a complete example building a simple social network application.
             .await?;
 
         println!("Alice's Feed:");
-        for row in &feed {
+        for row in feed.rows() {
             println!("  @{}: {}",
                 row.get::<String>("author")?,
                 row.get::<String>("content")?
@@ -1433,7 +1437,7 @@ Here's a complete example building a simple social network application.
             .await?;
 
         println!("\nFriend Suggestions:");
-        for row in &suggestions {
+        for row in suggestions.rows() {
             println!("  @{} ({} mutual)",
                 row.get::<String>("username")?,
                 row.get::<i64>("mutual")?
@@ -1451,7 +1455,7 @@ Here's a complete example building a simple social network application.
         "#).await?;
 
         println!("\nMost Influential Users:");
-        for row in &influential {
+        for row in influential.rows() {
             println!("  @{}: {:.4}",
                 row.get::<String>("username")?,
                 row.get::<f64>("score")?

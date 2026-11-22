@@ -5,11 +5,13 @@
 
 Uni includes a built-in graph algorithm library exposed through Cypher procedures. Use it to compute centrality, clustering, paths, and connectivity without exporting data.
 
+Built-in algorithms run over a projection of declared labels and edge types: declare them with `db.schema()` first. Procedures take positional arguments, starting with the list of node labels and the list of edge types to project.
+
 ## What It Provides
 
 - Centrality: PageRank, betweenness, closeness, eigenvector, Katz.
 - Connectivity: WCC, SCC, bridges, articulation points.
-- Paths: shortest paths, k-shortest, A*, BFS/DFS.
+- Paths: Dijkstra, bidirectional Dijkstra, Bellman-Ford, A*, k-shortest, all simple paths, all-pairs shortest paths.
 - Community detection: Louvain, label propagation.
 
 ## Example
@@ -23,7 +25,7 @@ Uni includes a built-in graph algorithm library exposed through Cypher procedure
     let session = db.session();
 
     let rows = session.query(
-        "CALL uni.algo.pageRank() YIELD nodeId, score RETURN nodeId, score ORDER BY score DESC LIMIT 10"
+        "CALL uni.algo.pageRank(['Person'], ['KNOWS']) YIELD nodeId, score RETURN nodeId, score ORDER BY score DESC LIMIT 10"
     ).await?;
 
     println!("{:?}", rows);
@@ -38,7 +40,7 @@ Uni includes a built-in graph algorithm library exposed through Cypher procedure
     db = uni_db.Uni.open("./my_db")
     session = db.session()
     rows = session.query(
-        "CALL uni.algo.pageRank() YIELD nodeId, score RETURN nodeId, score ORDER BY score DESC LIMIT 10"
+        "CALL uni.algo.pageRank(['Person'], ['KNOWS']) YIELD nodeId, score RETURN nodeId, score ORDER BY score DESC LIMIT 10"
     )
     print(rows)
     ```
@@ -73,14 +75,16 @@ Ten of these algorithms are also callable as Locy feature expressions inside `CR
 | `eigenvector_centrality(n)` | Float64 |
 | `harmonic_centrality(n)` | Float64 |
 | `katz_centrality(n)` | Float64 |
-| `avg_neighbor(n, 'prop')` | Float64 — mean of `prop` over neighbors |
-| `max_neighbor(n, 'prop')` | Float64 |
-| `sum_neighbor(n, 'prop')` | Float64 |
+| `avg_neighbor(n, 'REL', 'prop' [, direction])` | Float64 — mean of `prop` over one-hop `REL` neighbors |
+| `max_neighbor(n, 'REL', 'prop' [, direction])` | Float64 |
+| `sum_neighbor(n, 'REL', 'prop' [, direction])` | Float64 |
+
+`direction` is `'OUTGOING'` (default), `'INCOMING'` or `'BOTH'`.
 
 ```locy
 CREATE MODEL risk_scorer AS
   INPUT (n)
-  FEATURES degree_centrality(n), pagerank_score(n), avg_neighbor(n, 'risk')
+  FEATURES degree_centrality(n), pagerank_score(n), avg_neighbor(n, 'KNOWS', 'risk')
   OUTPUT PROB risk
   USING xervo('classify/risk-v1')
 ```

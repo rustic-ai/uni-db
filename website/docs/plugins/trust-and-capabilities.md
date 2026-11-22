@@ -173,9 +173,10 @@ Two classes of capability are deliberately unreachable through the `grants` list
   `PluginDeclare`) are never granted to a guest; only host code constructs them.
 
 Grant names are case- and separator-insensitive: `HostQuery` and `host-query`
-resolve identically. The strict load paths (Rhai, and the source-string Python
-plugin loader) raise on an unknown, quota, or internal name; the lenient
-decorator / WASM paths drop it. Adding a new `Capability` variant is caught by
+resolve identically. The strict load path (Rhai) raises on an unknown, quota, or
+internal name; the lenient paths (the WASM and Extism methods, the Python
+source-string loader `load_python_plugin`, the decorator surface, and the CLI)
+drop it. Adding a new `Capability` variant is caught by
 the `every_variant_classified_exactly_once` test in `uni-plugin`, which forces it
 to be classified as grantable, quota, or internal before it can ship — the
 mechanism that keeps this surface from drifting.
@@ -192,8 +193,10 @@ mechanism that keeps this surface from drifting.
   `host-net` import (HTTP GET/POST) is added to the linker only when `Network` is
   granted — a plugin importing it without the grant fails at link time. The
   always-available `host-log` and `host-trace-context` imports are linked
-  unconditionally. (`host-fs` is not yet exposed on the Component Model; on Extism
-  filesystem/query/KMS/secret host functions are wired — see below.)
+  unconditionally. (`host-fs` is not yet exposed on the Component Model. Extism
+  wires `uni_http_get`, `uni_http_post`, `uni_kms_sign`, `uni_kms_verify`,
+  `uni_secret_acquire` and `uni_graph_call`; neither ABI has filesystem or
+  host-query functions.)
 
 === "Python"
 
@@ -209,6 +212,9 @@ mechanism that keeps this surface from drifting.
     with open("geo_extism.wasm", "rb") as f:
         outcome = db.load_wasm_extism(f.read(), grants=["ScalarFn"])
     ```
+
+    Both methods exist only in a build with the `wasm-plugins` /
+    `extism-plugins` features; the published wheels omit them.
 
     Passing `grants=["ScalarFn"]` grants exactly the scalar-function surface and
     nothing else — no network, filesystem, or host-query host imports are linked.
@@ -242,8 +248,9 @@ struct — per-load grants and limits are the only knobs.
     The sandboxed loader manifest formats — `ComponentManifest` for WASM Component
     Model and `ExtismPluginManifest` for Extism — **do not yet carry signature
     fields**. Until they do, signature enforcement on WASM, Extism, Rhai, and
-    Python *loads* is **deferred (Phase D)**, and sandboxed loads carry no
-    artifact-integrity check.
+    Python *loads* is **deferred (Phase D)**. Their artifact integrity is
+    checked only by the host's [artifact hash-pins](#artifact-hash-pinning),
+    which all four of those loaders enforce when `pinned_artifacts` is set.
 
     Capability *grants*, by contrast, take effect on the sandboxed load path
     today: registrar surfaces reject ungranted registrations, and the Extism

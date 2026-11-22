@@ -198,9 +198,7 @@ The `BulkWriter` API provides high-performance bulk loading with deferred index 
 ```rust
 use std::collections::HashMap;
 
-use serde_json::json;
-use uni_db::{Result, Uni};
-use uni_db::api::bulk::EdgeData;
+use uni_db::{EdgeData, Result, Uni, Value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -214,19 +212,19 @@ async fn main() -> Result<()> {
         .defer_scalar_indexes(true)   // Defer scalar index updates
         .batch_size(10_000)           // Flush every 10K records
         .on_progress(|progress| {
-            println!("{}: {} rows processed",
+            println!("{:?}: {} rows processed",
                 progress.phase, progress.rows_processed);
         })
         .build()?;
 
     // Bulk insert vertices
-    let vertices: Vec<HashMap<String, serde_json::Value>> = papers
+    let vertices: Vec<HashMap<String, Value>> = papers
         .iter()
         .map(|p| {
             let mut props = HashMap::new();
-            props.insert("title".to_string(), json!(p.title));
-            props.insert("year".to_string(), json!(p.year));
-            props.insert("embedding".to_string(), json!(p.embedding));
+            props.insert("title".to_string(), Value::from(p.title.clone()));
+            props.insert("year".to_string(), Value::from(p.year));
+            props.insert("embedding".to_string(), Value::from(p.embedding.clone())); // Vec<f32> → Value::Vector
             props
         })
         .collect();
@@ -393,12 +391,9 @@ including another bulk load, are kept. Several loads interrupted at once are
 each completed. User indexes on the load's labels are marked `Stale` and rebuilt
 by the background index rebuild.
 
-A successful `commit()` publishes one table at a time (one Lance commit each).
-While it runs, a concurrent reader can see the load in some tables and not yet
-in others: measured, a label scan (`MATCH (n:Label)`) seeing the new vertices
-while a label-less scan (`MATCH (n)`) did not, and edges traversable from the
-source side before the destination side. Reads are consistent again once
-`commit()` returns.
+A successful `commit()` publishes one table at a time (one Lance commit each),
+but readers never see part of it (see "What `commit()` Returning Means"): the load appears
+in every table at once.
 
 ### Triggers, CDC and the Enclosing Transaction
 

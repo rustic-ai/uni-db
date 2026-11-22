@@ -18,12 +18,14 @@ Example:
     ...     embedding: Vector[1536]
     ...     friends: list["Person"] = Relationship("FRIEND_OF", direction="both")
     >>>
-    >>> db = Uni("./my_graph")
+    >>> db = Uni.open("./my_graph")
     >>> session = UniSession(db)
     >>> session.register(Person)
     >>> session.sync_schema()
     >>>
-    >>> alice = Person(name="Alice", age=30, email="alice@example.com")
+    >>> alice = Person(
+    ...     name="Alice", age=30, email="alice@example.com", embedding=[0.0] * 1536
+    ... )
     >>> session.add(alice)
     >>> session.commit()
     >>>

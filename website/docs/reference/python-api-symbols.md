@@ -1169,7 +1169,7 @@ Result from a Locy EXPLAIN command.
 
 ## `ExplainOutput`
 
-Typed output from ``session.explain()``.
+Typed output from ``session.query_with(cypher).explain()``.
 
 **Attributes**
 
@@ -1690,7 +1690,7 @@ A fluent binder for executing a prepared Cypher query.
 
 ## `ProfileOutput`
 
-Typed output from ``session.profile()``.
+Typed output from ``session.query_with(cypher).profile()``.
 
 **Attributes**
 

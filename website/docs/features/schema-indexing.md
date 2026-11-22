@@ -5,7 +5,7 @@ Uni lets you define schema, constraints, and indexes to enforce correctness and 
 ## What It Provides
 
 - Typed properties and constraints (unique, exists, check).
-- Scalar indexes (BTree, Hash, Bitmap, LabelList), 8 single-vector ANN algorithms (with quantization options) plus MUVERA for multi-vector (ColBERT) columns, and full-text indexes.
+- Scalar indexes (BTree, Bitmap, LabelList, and Hash, which is stored as a BTree), 8 single-vector ANN algorithms (with quantization options) plus MUVERA for multi-vector (ColBERT) columns, and full-text indexes.
 - Fast predicate pushdown and index usage in the planner.
 
 ## Example

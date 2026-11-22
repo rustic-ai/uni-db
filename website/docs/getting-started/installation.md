@@ -7,6 +7,8 @@ This guide covers all methods for installing Uni.
 | Component | Requirement |
 |-----------|-------------|
 | **OS** | Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon) |
+| **Rust** (library and CLI) | 1.96 or newer (the workspace `rust-version`) |
+| **Python** (bindings) | 3.10 or newer |
 | **Memory** | 4 GB RAM minimum, 16 GB recommended for large graphs |
 | **Disk** | SSD recommended for optimal performance |
 
@@ -24,7 +26,7 @@ Or add it to your `Cargo.toml` directly:
 
 ```toml
 [dependencies]
-uni-db = "3"
+uni-db = "6"
 ```
 
 !!! tip "Enable mimalloc for ~3× throughput on mutation-heavy workloads"
@@ -32,7 +34,7 @@ uni-db = "3"
 
     ```toml
     [dependencies]
-    uni-db = { version = "*", features = ["mimalloc"] }
+    uni-db = { version = "6", features = ["mimalloc"] }
     ```
 
     ```rust
@@ -138,7 +140,7 @@ source $HOME/.cargo/env
 
 ```bash
 git clone https://github.com/rustic-ai/uni-db.git
-cd uni
+cd uni-db
 cargo build --release
 ```
 
@@ -158,13 +160,6 @@ cargo install --path crates/uni-cli
 
 After installation, verify Uni is working correctly:
 
-### Check Version
-
-```bash
-uni --version
-# Output: uni 2.0.0
-```
-
 ### Display Help
 
 ```bash
@@ -175,19 +170,19 @@ Expected output:
 ```
 Uni Graph Database
 
-Usage: uni <COMMAND>
+Usage: uni [OPTIONS] [COMMAND]
 
 Commands:
   import    Import data from JSONL
-  query     Execute a Cypher query
+  query     Run a query
   repl      Start the interactive REPL
   snapshot  Manage snapshots
   plugin    Manage runtime-loaded plugins
-  help    Print this message or the help of the given subcommand(s)
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+      --storage-option <KEY=VALUE>  Object-store option for a store opened at an `s3://`, `gs://` or `az://` path, as KEY=VALUE (for example `aws_endpoint=http://localhost:9000`). Repeatable. Overrides the environment (`AWS_*`, `GOOGLE_*`, `AZURE_*`)
+  -h, --help                        Print help
 ```
 
 ### Run a Simple Query
@@ -310,6 +305,12 @@ The previous nine `gpu-*` features (`gpu-tensorrt`, `gpu-rocm`, `gpu-coreml`, `g
 | Feature | Description | Default |
 |---|---|---|
 | `lance-backend` | Lance columnar storage backend. **Effectively mandatory** — Lance is currently the only `StorageBackend` implementation, and building without this feature does not compile. Keep it enabled; it is listed here for completeness, not as a supported toggle. | Enabled |
+| `apoc-core` | APOC-equivalent built-in procedures and scalar functions (`apoc.bitwise.*`, …) | Enabled |
+| `rhai-plugins` | `Uni::load_rhai_plugin`: load Rhai-script plugins at runtime | Enabled |
+| `extism-plugins` | `Uni::load_wasm_extism`: load Extism WASM plugins (pulls in wasmtime) | Disabled |
+| `wasm-plugins` | `Uni::load_wasm_component`: load WASM Component Model plugins (pulls in wasmtime) | Disabled |
+| `pyo3-plugins` | `Uni::load_python_plugin`: load Python plugins (links libpython) | Disabled |
+| `failpoints` | Commit-path fault injection for crash-recovery tests. Test-only | Disabled |
 | `mimalloc` | Re-export `mimalloc::MiMalloc` as `uni_db::MiMalloc` so consumers can install it as the global allocator (~3× throughput on mutation-heavy workloads). Setting `#[global_allocator]` is still the binary's job. | Disabled |
 | `snapshot-internals` | Expose snapshot internals (advanced) | Disabled |
 | `storage-internals` | Expose storage internals (advanced) | Disabled |
@@ -354,7 +355,7 @@ For contributing to Uni, set up the full development environment:
 ```bash
 # Clone with submodules
 git clone --recursive https://github.com/rustic-ai/uni-db.git
-cd uni
+cd uni-db
 
 # Install development tools
 cargo install cargo-watch cargo-nextest

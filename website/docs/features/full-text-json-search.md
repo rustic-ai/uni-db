@@ -90,7 +90,7 @@ ORDER BY score DESC
 
 ### Auto-Build on Index Creation
 
-When you run `CREATE FULLTEXT INDEX`, Uni automatically builds the FTS index over existing data. There is no need to call `rebuild_indexes()` manually — the index is ready to query immediately after creation.
+When you run `CREATE FULLTEXT INDEX`, Uni automatically builds the FTS index over existing data. There is no need to call `db.indexes().rebuild()` manually — the index is ready to query immediately after creation.
 
 ```cypher
 // This both creates AND builds the index in one step

@@ -12,8 +12,7 @@ let db = Uni::in_memory().build().await?;
 let session = db.session();
 
 let tx = session.tx().await?;
-tx.execute("CREATE (:Node {name: 'A'})-[:EDGE]->(:Node {name: 'B'})").await?;
-tx.execute("MATCH (b:Node {name:'B'}), (c:Node {name:'C'}) CREATE (b)-[:EDGE]->(c)").await?;
+tx.execute("CREATE (:Node {name: 'A'})-[:EDGE]->(:Node {name: 'B'})-[:EDGE]->(:Node {name: 'C'})").await?;
 tx.commit().await?;
 
 let program = r#"

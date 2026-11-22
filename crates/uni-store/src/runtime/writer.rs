@@ -523,7 +523,7 @@ pub struct Writer {
     /// Reading the actual `Dataset::manifest().fragments.len()` per
     /// flush would add a per-dataset object-store roundtrip on the hot
     /// commit path; the proxy keeps the guard rail purely observational
-    /// (Phase 5 introduces fork compaction proper). Only meaningful when
+    /// (forks are not compacted). Only meaningful when
     /// `fork_id.is_some()`. `Relaxed` is sufficient — observational only.
     fork_flush_count: Arc<AtomicU64>,
     /// Whether the fork-fragment warning has already fired at the
@@ -8096,8 +8096,8 @@ impl Writer {
     /// once if the threshold is crossed.
     ///
     /// Each flush typically appends ~1 fragment per touched dataset on
-    /// the fork's branches; without compaction (deferred to Phase 5)
-    /// long-lived heavy-write forks degrade. The flush count is a
+    /// the fork's branches; forks are not compacted, so long-lived
+    /// heavy-write forks degrade. The flush count is a
     /// proxy for actual fragment growth — reading
     /// `Dataset::manifest().fragments.len()` per dataset would add a
     /// per-flush object-store roundtrip on the hot commit path, which
@@ -8143,7 +8143,7 @@ impl Writer {
                 flush_count = new_count,
                 threshold,
                 "fork has exceeded the L1 flush-count threshold; \
-                 fork compaction is deferred to Phase 5 — consider \
+                 forks are not compacted — consider \
                  drop+recreate or promotion to bound fragment growth"
             );
         }

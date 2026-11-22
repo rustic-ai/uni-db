@@ -27,7 +27,7 @@ After strata converge, commands (`QUERY`, `DERIVE`, `ABDUCE`, `ASSUME`) execute 
 | Rule `ALONG / FOLD / REQUIRE / post-FOLD WHERE` | DataFusion | ✓ | ✓ | ✓ |
 | `DERIVE ... WHERE` | In-memory | ✓ | ✗ | ✗ |
 | `ABDUCE ... WHERE` | In-memory | ✓ | ✗ | ✗ |
-| `ASSUME ... WHERE` | In-memory | ✓ | ✗ | ✗ |
+| `QUERY ... WHERE` | In-memory | ✓ | ✗ | ✗ |
 
 ## Commands run in sequence
 

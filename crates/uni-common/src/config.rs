@@ -684,7 +684,7 @@ pub struct UniConfig {
     /// then spawn the streaming + finalize work on a background task.
     /// Concurrent committers no longer queue on the flush's long I/O.
     ///
-    /// When `false` (default for now), `check_flush` calls the original
+    /// Default `true` (`UNI_ASYNC_FLUSH` overrides). When `false`, `check_flush` calls the original
     /// synchronous `flush_to_l1` and holds `flush_lock` across the full
     /// L1-streaming write. This is the kill-switch.
     pub async_flush_enabled: bool,
@@ -707,9 +707,9 @@ pub struct UniConfig {
     /// Default: 60s. Override with `UNI_FLUSH_STREAM_TIMEOUT` (seconds).
     pub flush_stream_timeout: Duration,
 
-    /// Maximum time `drop_fork` will wait for pending async flushes on
-    /// that fork before failing with `PendingFlushTimeout`. Only meaningful
-    /// when `async_flush_enabled` is true. Default: 10s.
+    /// Maximum time `drop_fork` waits for the fork's live sessions to be
+    /// released, failing with `ForkInUse`, and for its pending async flushes
+    /// to drain, failing with `PendingFlushTimeout`. Default: 10s.
     pub drop_fork_drain_timeout: Duration,
 
     /// Maximum time `flush_to_l1` will wait **without progress** while draining

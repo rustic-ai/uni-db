@@ -30,7 +30,7 @@ Measured performance data for Uni across ingestion, querying, graph traversal, v
 
 ## Test Environment
 
-All benchmarks run on a single machine using Criterion 0.5 with `harness = false`. Each measurement uses 10 samples (comprehensive/mutation/algo suites) or 100 samples (micro suite). Datasets use in-memory or temp-dir storage with `auto_flush_threshold: 100_000`.
+All benchmarks run on a single machine using Criterion 0.8 with `harness = false`. Each measurement uses 10 samples (comprehensive/mutation/algo suites) or 100 samples (micro suite). Datasets use in-memory or temp-dir storage with `auto_flush_threshold: 100_000`.
 
 ### Benchmark Configurations
 

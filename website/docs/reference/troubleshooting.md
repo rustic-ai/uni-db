@@ -111,8 +111,8 @@ Error: Invalid manifest at version 42: CRC mismatch
 **Solution:**
 ```bash
 # Restore from snapshot (recommended)
-uni snapshot list --path ./storage
-uni snapshot restore <snapshot_id> --path ./storage
+uni snapshot --path ./storage list
+uni snapshot --path ./storage restore <snapshot_id>
 
 # Or via Cypher
 uni query "CALL uni.admin.snapshot.list()" --path ./storage
@@ -607,14 +607,11 @@ uni query "PROFILE MATCH (p:Paper) WHERE p.year > 2020 RETURN COUNT(p)" --path .
 ### Storage Inspection
 
 ```bash
-# List all datasets
-ls -la ./storage/vertices/
-ls -la ./storage/edges/
-ls -la ./storage/adjacency/
+# List all datasets (vertices*.lance, edges.lance, deltas_*.lance, adjacency_*.lance)
+ls -la <db>/storage/
 
-# Check Lance dataset info
 # View on-disk schema
-cat ./storage/catalog/schema.json | jq .
+cat <db>/catalog/schema.json | jq .
 ```
 
 ### Memory Profiling

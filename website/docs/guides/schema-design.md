@@ -344,7 +344,7 @@ When upgrading embedding models:
 
 ### Overview
 
-Uni supports **schemaless properties** - properties not defined in the schema that can still be stored and queried. These properties are automatically stored in an `overflow_json` column and are queryable via automatic query rewriting.
+Uni supports **schemaless properties** - properties not defined in the schema that can still be stored and queried. These properties are automatically stored in an `overflow_json` column and are queried by name like any other property.
 
 ### When to Use Schemaless Properties
 
@@ -381,7 +381,7 @@ tx.execute("CREATE (:Document {
 })").await?;
 tx.commit().await?;
 
-// Query works normally (automatic rewriting)
+// Query works normally
 let results = session.query("
     MATCH (d:Document)
     WHERE d.author = 'Alice' AND d.year > 2023
@@ -435,16 +435,15 @@ tx.commit().await?;
 │  ┌────────────────────────────────────────────────────────┐    │
 │  │ overflow_json (LargeBinary column)                      │    │
 │  │                                                         │    │
-│  │ JSONB binary blob:                                      │    │
+│  │ CypherValue binary blob:                                │    │
 │  │ {                                                       │    │
 │  │   "city": "NYC",                                        │    │
 │  │   "github": "bob123",                                   │    │
 │  │   "verified": true                                      │    │
 │  │ }                                                       │    │
 │  └────────────────────────────────────────────────────────┘    │
-│                   JSONB Binary Format                           │
-│                   - Queryable via rewriting                     │
-│                   - PostgreSQL-compatible                       │
+│                   CypherValue Binary Format                     │
+│                   - Queryable by property name                  │
 │                   - No schema migration needed                  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -454,32 +453,23 @@ tx.commit().await?;
 
 | Operation | Schema Properties | Overflow Properties |
 |-----------|------------------|---------------------|
-| **WHERE filtering** | ⚡ ~2-3ms (columnar) | 🟡 ~5-10ms (JSONB parse) |
+| **WHERE filtering** | ⚡ ~2-3ms (columnar) | 🟡 ~5-10ms (blob decode) |
 | **ORDER BY** | ⚡ Fast (native sort) | 🟡 Slower (extract + sort) |
 | **Aggregations** | ⚡ Fast (columnar) | 🟡 Slower (extract + aggregate) |
-| **Compression** | ⚡ 5-20x (type-specific) | 🔴 ~2x (JSONB binary) |
+| **Compression** | ⚡ 5-20x (type-specific) | 🔴 ~2x (binary blob) |
 | **Indexing** | ✅ Supported | ❌ Not supported |
 | **Schema changes** | ⚠️ Migration required | ✅ No migration |
 
-### Query Rewriting
+### Querying Overflow Properties
 
-Queries on overflow properties are automatically rewritten to use JSONB functions:
+Overflow properties are queried with the same syntax as schema properties. The scan
+reads each one out of the row's `overflow_json` blob (a binary-encoded `CypherValue`
+map) and the filter applies to it as to any other column; no query rewriting or
+extraction functions are involved:
 
 ```cypher
-// Original query
 MATCH (p:Person) WHERE p.city = 'NYC' RETURN p.github
-
-// Automatically rewritten to (transparent to user):
-MATCH (p:Person)
-WHERE json_get_string(p.overflow_json, 'city') = 'NYC'
-RETURN json_get_string(p.overflow_json, 'github')
 ```
-
-**Supported Functions:**
-- `json_get_string(overflow_json, 'key')` - Extract string
-- `json_get_int(overflow_json, 'key')` - Extract integer
-- `json_get_float(overflow_json, 'key')` - Extract float
-- `json_get_bool(overflow_json, 'key')` - Extract boolean
 
 ### A Declaration Applies Only to Its Own Label
 
@@ -561,7 +551,7 @@ tx.execute("CREATE (:Product {
 })").await?;
 tx.commit().await?;
 
-// This query will be slow (JSONB parsing for every row)
+// This query will be slow (blob decoding for every row)
 session.query("
     MATCH (p:Product)
     WHERE p.price < 50 AND p.category = 'electronics'

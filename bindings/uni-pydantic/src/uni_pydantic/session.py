@@ -211,7 +211,7 @@ class UniSession:
         >>> from uni_db import Uni
         >>> from uni_pydantic import UniSession
         >>>
-        >>> db = Uni("./my_graph")
+        >>> db = Uni.open("./my_graph")
         >>> session = UniSession(db)
         >>> session.register(Person, Company)
         >>> session.sync_schema()

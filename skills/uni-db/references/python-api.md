@@ -174,7 +174,7 @@ class Session:
     def refresh(self) -> None: ...
     def is_pinned(self) -> bool: ...
 
-    def add_hook(self, hook: Any) -> None: ...
+    def add_hook(self, name: str, hook: Any) -> None: ...   # also remove_hook(name) -> bool, list_hooks(), clear_hooks()
     def watch(self) -> CommitStream: ...
     def watch_with(self) -> WatchBuilder: ...
     def cancel(self) -> None: ...
@@ -185,7 +185,7 @@ class Session:
     # Context manager: __enter__ / __exit__
 ```
 
-> **AsyncSession:** `query/locy/explain/profile/tx/pin_*/prepare*/register_function/watch/cancel` are `async`. Builder factories (`query_with/locy_with/tx_with/rules`) stay sync.
+> **AsyncSession:** `query/run/locy/compile_locy/prepare*/tx/scratch/flush/pin_*/refresh/is_pinned/*_hook*/watch/watch_with/cancel/cancellation_token/id/capabilities/metrics/execute_with_retry` are `async`. Builder factories (`query_with/locy_with/tx_with/rules/fork/fork_schema`) stay sync.
 
 ---
 
@@ -411,7 +411,7 @@ Dict-like: `row["col"]`, `row[0]`, `"col" in row`, `row.to_dict()`, `row.get("co
 
 ### ExecuteResult
 
-`affected_rows`, `nodes_created`, `nodes_deleted`, `relationships_created`, `relationships_deleted`, `properties_set`, `labels_added`, `labels_removed`: all `int`. `metrics: dict[str, Any]`.
+`affected_rows`, `nodes_created`, `nodes_deleted`, `relationships_created`, `relationships_deleted`, `properties_set`, `properties_removed`, `labels_added`, `labels_removed`: all `int`. `metrics: dict[str, Any]`.
 
 ### CommitResult
 
@@ -423,7 +423,7 @@ Dict-like: `row["col"]`, `row[0]`, `"col" in row`, `row.to_dict()`, `row.get("co
 
 ### BulkStats
 
-`vertices_inserted`, `edges_inserted`, `indexes_rebuilt`: `int`. `duration_secs`, `index_build_duration_secs`: `float`. `index_task_ids: list[str]`, `indexes_pending: bool`.
+`vertices_inserted`, `edges_inserted`, `indexes_rebuilt`: `int`. `duration_secs`, `index_build_duration_secs`: `float`. `index_task_ids: list[str]`, `indexes_pending: bool`, `load_id: str` (pass to `db.bulk_load_applied(id)` after a crash or an ambiguous commit), `warnings: list[str]`.
 
 ### LocyResult
 
@@ -482,6 +482,7 @@ class LocyConfig:
         self,
         max_iterations: int | None = None,
         timeout_secs: float | None = None,
+        allow_partial: bool | None = None,
         max_explain_depth: int | None = None,
         max_slg_depth: int | None = None,
         max_abduce_candidates: int | None = None,
@@ -494,13 +495,18 @@ class LocyConfig:
         max_bdd_variables: int | None = None,
         top_k_proofs: int | None = None,
         top_k_proofs_training: int | None = None,
+        goal_directed: str | None = None,        # "auto" | "off" | "on" | "shadow"
+        semiring: str | dict[str, int] | None = None,  # e.g. {"top_k_proofs": 8}
+        neural_predicates_preview: bool | None = None,
+        classifier_cache_max: int | None = None,
+        returned_rules: str | list[str] | None = None,  # "all" | "none" | rule names
     ) -> None: ...
     # All params available as read-only properties
 ```
 
 ### DataType
 
-Simple: `STRING()`, `INT32()`, `INT64()`, `FLOAT32()`, `FLOAT64()`, `BOOL()`, `TIMESTAMP()`, `DATE()`, `TIME()`, `DATETIME()`, `DURATION()`, `JSON()`. Parameterized: `vector(dimensions)`, `list(element_type)`, `map(key_type, value_type)`, `crdt(crdt_type)`.
+Simple: `STRING()`, `INT32()`, `INT64()`, `FLOAT32()`, `FLOAT64()`, `BOOL()`, `TIMESTAMP()`, `DATE()`, `TIME()`, `DATETIME()`, `DURATION()`, `JSON()`, `BTIC()`, `BYTES()`. Parameterized: `vector(dimensions)`, `sparse_vector(dimensions)`, `list(element_type)`, `map(key_type, value_type)`, `crdt(crdt_type)`.
 
 ### CrdtType
 
@@ -546,7 +552,7 @@ class PreparedLocy:
 class SessionTemplateBuilder:
     def param(self, key: str, value: Any) -> SessionTemplateBuilder: ...
     def rules(self, program: str) -> SessionTemplateBuilder: ...
-    def hook(self, hook: Any) -> SessionTemplateBuilder: ...
+    def hook(self, name: str, hook: Any) -> SessionTemplateBuilder: ...
     def query_timeout(self, seconds: float) -> SessionTemplateBuilder: ...
     def transaction_timeout(self, seconds: float) -> SessionTemplateBuilder: ...
     def build(self) -> SessionTemplate: ...
@@ -559,7 +565,8 @@ class SessionTemplate:
 ```python
 class CommitNotification:
     version: int; mutation_count: int; labels_affected: list[str]
-    edge_types_affected: list[str]; timestamp: str; tx_id: str; session_id: str
+    edge_types_affected: list[str]; rules_promoted: int; timestamp: str
+    tx_id: str; session_id: str; causal_version: int; dropped_before: int
 class WatchBuilder:
     def labels(self, labels: list[str]) -> WatchBuilder: ...
     def edge_types(self, types: list[str]) -> WatchBuilder: ...
@@ -573,7 +580,7 @@ class CancellationToken:
 
 ### ID Types
 
-`Vid(id: int)` / `Eid(id: int)` -- `.as_int() -> int`, hashable, comparable.
+`Vid(id: int)` / `Eid(id: int)` -- `.as_int() -> int`, `int(vid)`; supports `==` and hashing, not ordering.
 
 ---
 
@@ -618,6 +625,8 @@ class TokenUsage:
 
 ## 15. Exception Hierarchy
 
+Every class below subclasses `UniError` (itself an `Exception`) directly, except the nested ones shown.
+
 ```
 UniError (base)
   +-- UniNotFoundError
@@ -626,22 +635,24 @@ UniError (base)
   +-- UniWriterFencedError     (this handle lost the store; .reason)
   +-- UniStaleWalError         (hybrid: an earlier writer's WAL; .store, .wal, .segments)
   +-- UniSchemaError
-  |     +-- UniLabelNotFoundError
-  |     +-- UniEdgeTypeNotFoundError
-  |     +-- UniPropertyNotFoundError
-  |     +-- UniIndexNotFoundError
-  |     +-- UniLabelAlreadyExistsError
-  |     +-- UniEdgeTypeAlreadyExistsError
-  |     +-- UniConstraintError
-  |     +-- UniInvalidIdentifierError
+  +-- UniLabelNotFoundError / UniEdgeTypeNotFoundError / UniPropertyNotFoundError / UniIndexNotFoundError
+  +-- UniLabelAlreadyExistsError / UniEdgeTypeAlreadyExistsError
+  +-- UniInvalidIdentifierError
+  +-- UniConstraintError                  (non-retriable violation)
+  |     +-- UniEdgeEndpointError          (endpoint lacks the edge type's declared labels)
+  |     +-- UniEdgeIdentityError          (SET/REMOVE named other endpoints or type)
+  +-- UniConstraintConflictError          (commit-time uniqueness race; retriable)
   +-- UniParseError
   +-- UniQueryError
+  |     +-- UniParameterMissingError      (a $param was not supplied)
   +-- UniTypeError
+  +-- UniRegexBacktrackLimitError
   +-- UniTransactionError
-  |     +-- UniTransactionConflictError
-  |     +-- UniTransactionAlreadyCompletedError
-  |     +-- UniTransactionExpiredError
-  |     +-- UniCommitTimeoutError
+  |     +-- UniUncommittedWritesError     (operation cannot run with uncommitted writes)
+  +-- UniTransactionConflictError / UniTransactionAlreadyCompletedError / UniTransactionExpiredError
+  +-- UniCommitTimeoutError
+  +-- UniLockTimeoutError                 (FOR UPDATE row lock wait; retriable)
+  +-- UniWriteStalledError                (write throttle hard limit with compaction disabled)
   +-- UniMemoryLimitExceededError
   +-- UniTimeoutError
   +-- UniReadOnlyError
@@ -652,12 +663,19 @@ UniError (base)
   +-- UniIOError
   +-- UniInternalError
   +-- UniSnapshotNotFoundError
+  +-- UniRestoreBlockedByForksError       (restore_snapshot refused while forks exist)
   +-- UniInvalidArgumentError
   +-- UniStaleDerivedFactsError
   +-- UniRuleConflictError
   +-- UniHookRejectedError
   +-- UniLocyCompileError
   +-- UniLocyRuntimeError
+  +-- UniLocyIncompleteError              (timeout or iteration/depth limit; .reason, ...)
+  +-- UniBulkCommitIncompleteError        (committed, publish finishing in background; do not retry)
+  +-- UniBulkCommitOutcomeUnknownError    (reopen, then check bulk_load_applied(load_id))
+  +-- UniForkNotFoundError / UniForkAlreadyExistsError / UniForkInUseError
+  +-- UniForkInflightTxError / UniForkHasChildrenError / UniForkSubtreeInUseError
+  +-- UniForkBudgetExceededError / UniForkLifecycleError (.name, .stage) / UniForkCorruptRegistryError
 ```
 
 ---
@@ -686,7 +704,7 @@ with session.tx() as tx:
 qe = xervo.embed("e5-small", ["How does Locy work?"])[0]
 result = session.query(
     """MATCH (d:Document)
-       WITH d, vector.cosine_similarity(d.embedding, $qe) AS score
+       WITH d, vector_similarity(d.embedding, $qe) AS score
        WHERE score > 0.5 RETURN d.text, score ORDER BY score DESC LIMIT 5""",
     {"qe": qe},
 )
@@ -729,9 +747,18 @@ for row in session.query("""
 ```python
 session = db.session()
 locy_result = session.locy("""
-    reachable(x, y) :- Person(x), KNOWS(x, y, _).
-    reachable(x, z) :- reachable(x, y), KNOWS(y, z, _).
-    QUERY reachable(x, y).
+    CREATE RULE reachable AS
+        MATCH (x:Person)-[:KNOWS]->(y:Person)
+        YIELD KEY x, KEY y
+    CREATE RULE reachable AS
+        MATCH (x:Person)-[:KNOWS]->(z:Person)
+        WHERE z IS reachable TO y
+        YIELD KEY x, KEY y
+    CREATE RULE link AS
+        MATCH (x:Person)
+        WHERE x IS reachable TO y
+        DERIVE (x)-[:REACHES]->(y)
+    DERIVE link
 """)
 
 derived = locy_result.derived_fact_set

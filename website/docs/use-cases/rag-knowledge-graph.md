@@ -116,7 +116,7 @@ CREATE (c:Chunk {id: 'c1', text: 'Function verify() checks signatures.'})
 Alternatively, you can pre-compute embeddings externally or via the Uni-Xervo runtime directly:
 
 ```rust
-let xervo = db.xervo()?;
+let xervo = db.xervo();
 let embeddings = xervo.embed("embed/default", &["Function verify() checks signatures."]).await?;
 ```
 
@@ -194,7 +194,8 @@ With Uni-Xervo's generation API, you can close the RAG loop entirely within Uni 
 use uni_db::xervo::{Message, GenerationOptions};
 
 // 1. Retrieve context (from the GraphRAG query above)
-let context_rows = db.query_with(
+let session = db.session();
+let context_rows = session.query_with(
     "CALL uni.vector.query('Chunk', 'embedding', $q, 5) YIELD node, distance
      MATCH (node)-[:MENTIONS]->(topic:Entity)
      RETURN node.text AS chunk, topic.name AS entity, distance"
@@ -223,5 +224,5 @@ println!("{}", result.text);
 ### Key Advantages
 
 *   **Speed**: No network round-trip between Vector DB and Graph DB. The join happens in-memory via the adjacency cache.
-*   **Simplicity**: Just one Docker container (or embedded binary) to manage.
+*   **Simplicity**: One embedded library inside your process; no separate servers to run.
 *   **Precision**: We filter vector noise using graph structure (only chunks related to specific entities).

@@ -10,8 +10,8 @@ Locy can invoke neural classifiers inline as part of a rule body. Declare a mode
     - **Embedding similarity** — `similar_to(s.profile, $query)` and `semantic_match(s, $query)`.
     - **Path-context features** — `FEATURES (subject, column) FROM source_rule` pulls a column from a prior rule's derivation, keyed by `subject`.
     - **Graph-structural features** — `degree_centrality(n)`, `pagerank_score(n)`, `closeness_centrality(n)`, `betweenness_centrality(n)`, `eigenvector_centrality(n)`, `harmonic_centrality(n)`, `katz_centrality(n)`, `avg_neighbor(n, 'prop')`, `max_neighbor(n, 'prop')`, `sum_neighbor(n, 'prop')`.
-- **`CALIBRATE rule USING method`** — fit a calibrator (Platt scaling, isotonic regression, temperature scaling, beta, Dirichlet) against held-out labels. Returns `CalibrationResult` with `raw_brier` / `raw_ece` / `calibrated_brier` / `calibrated_ece` so you can show the calibration delta.
-- **`VALIDATE rule USING brier, ece`** — score a rule's predictions against ground-truth labels. Returns `ValidationResult` with per-metric values.
+- **`CALIBRATE model ON MATCH pattern TARGET expr METHOD method [HOLDOUT n]`** — fit a calibrator (`platt_scaling`, `isotonic_regression`, `temperature_scaling`, `beta_calibration`, `dirichlet`, `conformal`) against ground-truth labels. Returns `CalibrationResult` with `raw_brier` / `raw_ece` / `calibrated_brier` / `calibrated_ece` so you can show the calibration delta, and `holdout_size`, the number of samples held out.
+- **`VALIDATE rule ON MATCH pattern TARGET expr METRICS metric, ...`** — score a rule's predictions against ground-truth labels (`brier_score`, `log_loss`, `ece`, `debiased_ece`, `accuracy`, `auc`). Returns `ValidationResult` with per-metric values.
 - **`EXPLAIN` with neural provenance** — every derivation that crossed a classifier carries a `NeuralProvenance` record with `model_name`, `raw_probability`, `calibrated_probability`, `confidence_band`, and `ConfidenceSource` so an auditor can reproduce the score.
 - **Three semirings** — `AddMultProb` (the default; noisy-OR / product), `MaxMinProb` (Viterbi-style fuzzy truth), `TopKProofs(k)` (each fact's `k` most probable proofs, evaluated exactly). Pick per-call via `LocyConfig`.
 
@@ -36,7 +36,8 @@ A model that scores assets for failure likelihood, invoked inside a rule:
 
     def failure_likelihood(rows):
         # rows is a list[dict[str, Any]] keyed by the INPUT binding name.
-        return [min(1.0, max(0.0, r["a"])) for r in rows]
+        # A feature value can be None, so treat it as 0.0.
+        return [min(1.0, max(0.0, r["a"] or 0.0)) for r in rows]
 
     config = uni_db.LocyConfig()
     config.register_classifier("failure_likelihood", failure_likelihood)
@@ -113,13 +114,15 @@ Two things worth knowing up front:
 
 ## Calibrate, Validate, Explain
 
-After registering and running a model, calibrate it against held-out labels, validate the calibration, and inspect the audit trail.
+After registering and running a model, calibrate it against ground-truth labels, validate the rule's predictions, and inspect the audit trail. Append the commands to the program; here `a.failed` holds the observed outcome (0.0 or 1.0):
 
 ```text
-CALIBRATE failure_likelihood USING platt_scaling
-VALIDATE  failure_likelihood USING brier, ece
+CALIBRATE failure_likelihood ON MATCH (a:Asset) TARGET a.failed METHOD platt_scaling HOLDOUT 0.2
+VALIDATE  at_risk ON MATCH (a:Asset) TARGET a.failed METRICS brier_score, ece
 EXPLAIN RULE at_risk
 ```
+
+`CALIBRATE` names the model, `VALIDATE` and `EXPLAIN RULE` name the rule. In Python the results are in `result.command_results`.
 
 `CalibrationResult` returns both raw and calibrated metrics so the improvement is concrete. `EXPLAIN` traces every derivation back through the classifier invocations, surfacing raw + calibrated probabilities and a confidence band per call — the artifact regulators ask for when a learned score drove a decision.
 

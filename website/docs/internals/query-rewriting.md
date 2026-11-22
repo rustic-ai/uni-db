@@ -19,7 +19,7 @@ RETURN c.name
 // Automatically rewritten to
 MATCH (p:Person)-[e:EMPLOYED_BY]->(c:Company)
 WHERE e.start <= datetime('2021-06-15')
-  AND (e.end IS NULL OR e.end >= datetime('2021-06-15'))
+  AND (e.end IS NULL OR e.end > datetime('2021-06-15'))
 RETURN c.name
 ```
 
@@ -98,14 +98,14 @@ Uni includes several temporal function rewrites that enable efficient time-based
 
 | Function | Transformation |
 |----------|---------------|
-| `uni.temporal.validAt(e, 'start', 'end', ts)` | `e.start <= ts AND (e.end IS NULL OR e.end >= ts)` |
-| `uni.temporal.overlaps(e, 'start', 'end', rs, re)` | `e.start <= re AND (e.end IS NULL OR e.end >= rs)` |
+| `uni.temporal.validAt(e, 'start', 'end', ts)` | `e.start <= ts AND (e.end IS NULL OR e.end > ts)` |
+| `uni.temporal.overlaps(e, 'start', 'end', rs, re)` | `e.start <= re AND (e.end IS NULL OR e.end > rs)` |
 | `uni.temporal.precedes(e, 'end', ts)` | `e.end < ts` |
 | `uni.temporal.succeeds(e, 'start', ts)` | `e.start > ts` |
 | `uni.temporal.isOngoing(e, 'end')` | `e.end IS NULL` |
 | `uni.temporal.hasClosed(e, 'end')` | `e.end IS NOT NULL` |
 
-All temporal rewrites preserve three-valued logic and handle null values correctly (treating null end dates as "ongoing").
+Intervals are half-open, `[start, end)`: the start is inclusive and the end exclusive. All temporal rewrites preserve three-valued logic and handle null values correctly (treating null end dates as "ongoing").
 
 ## Adding New Rewrite Rules
 
@@ -217,10 +217,10 @@ Example of correct null handling:
 
 ```rust
 // WRONG: Breaks when end is null
-// e.start <= ts AND e.end >= ts
+// e.start <= ts AND e.end > ts
 
 // CORRECT: Treats null end as "ongoing"
-// e.start <= ts AND (e.end IS NULL OR e.end >= ts)
+// e.start <= ts AND (e.end IS NULL OR e.end > ts)
 ```
 
 ### 2. Declarative Validation
@@ -288,7 +288,7 @@ RETURN count(*)
 ```cypher
 MATCH (p)-[e:EMPLOYED_BY]->()
 WHERE e.start <= datetime('2021-06-15')
-  AND (e.end IS NULL OR e.end >= datetime('2021-06-15'))
+  AND (e.end IS NULL OR e.end > datetime('2021-06-15'))
 RETURN count(*)
 ```
 
@@ -437,7 +437,7 @@ Always consider how nulls should be handled:
 ```rust
 // For temporal "valid at" queries:
 // null end date means "ongoing" - should match!
-e.start <= ts AND (e.end IS NULL OR e.end >= ts)
+e.start <= ts AND (e.end IS NULL OR e.end > ts)
 ```
 
 ### 3. Keep Rewrites Simple
@@ -469,7 +469,7 @@ Clearly document what each rule does:
 /// Rewrite rule for uni.temporal.validAt
 ///
 /// Transforms: uni.temporal.validAt(e, 'start', 'end', ts)
-/// Into: e.start <= ts AND (e.end IS NULL OR e.end >= ts)
+/// Into: e.start <= ts AND (e.end IS NULL OR e.end > ts)
 ///
 /// This preserves the semantics where a null end date means "ongoing".
 pub struct ValidAtRule;

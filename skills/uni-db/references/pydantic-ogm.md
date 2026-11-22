@@ -118,7 +118,7 @@ def Field(
 
 | Parameter | Type | Description |
 |---|---|---|
-| `index` | `"btree" \| "hash" \| "fulltext" \| "vector"` | Index type to create |
+| `index` | `"btree" \| "hash" \| "fulltext" \| "vector" \| "sparse"` | Index type to create |
 | `unique` | `bool` | Unique constraint (recorded, not yet enforced) |
 | `tokenizer` | `str` | Tokenizer for fulltext index |
 | `metric` | `"l2" \| "cosine" \| "dot"` | Distance metric for vector index |
@@ -127,7 +127,7 @@ def Field(
 ### Type Aliases
 
 ```python
-IndexType  = Literal["btree", "hash", "fulltext", "vector"]
+IndexType  = Literal["btree", "hash", "fulltext", "vector", "sparse"]
 Direction  = Literal["outgoing", "incoming", "both"]
 VectorMetric = Literal["l2", "cosine", "dot"]
 ```

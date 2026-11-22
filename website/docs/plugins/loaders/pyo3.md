@@ -1,7 +1,7 @@
 # PyO3 Plugins
 
 The PyO3 loader runs **trusted, in-process Python** functions as uni-db plugins:
-scalars, aggregates, and procedures authored in Python and called from the query
+scalars, aggregates, procedures and graph algorithms authored in Python and called from the query
 engine at native-ish speed. It is the only loader that can run a *vectorized*
 Python scalar — one call per RecordBatch over zero-copy PyArrow arrays — but it
 is also the only loader with **no sandbox**: the callable is a live Python object
@@ -106,40 +106,48 @@ PyArrow arrays. Aggregates are declared with `@db.aggregate_fn(...)` and supply
 
 ## Loading
 
-!!! note "Where the Python load path lives — `Session`, not `Uni`"
-    PyO3 plugins load on a **session**, not on the instance. The methods are
-    `Session.load_python_plugin(...)` (sync) and
+!!! note "Where the Python load path lives — `Uni` or `Session`"
+    PyO3 plugins load on the instance or on a session. `Uni.load_python_plugin(...)`
+    / `AsyncUni.load_python_plugin(...)` register the plugin for every session
+    of the database. `Session.load_python_plugin(...)` (sync) and
     `AsyncSession.load_python_plugin(...)` (async) — obtained via `db.session()`
     — plus the `@session.scalar_fn` / `aggregate_fn` / `procedure` decorator
-    surface finalized with `session.finalize_plugin(...)`. Registration is
-    **session-scoped**. This differs from the WASM loaders, which load on the
-    instance (`Uni` / `AsyncUni`) and register instance-wide. The Rust host API
-    exposes the same loader on the instance via `Uni::load_python_plugin`.
+    surface finalized with `session.finalize_plugin(...)`, register
+    **session-scoped**. The Rust host API exposes the same loader on the
+    instance via `Uni::load_python_plugin`.
 
 ### From Python
 
-Get a session, then load the module source. `load_python_plugin(module_src,
-module_name, grants=None)` returns a dict with `plugin_id`, `version`,
-`scalars_registered`, `aggregates_registered`, `procedures_registered`, and
-`denied_capabilities`. The plugin is registered for that session.
+Load the module source on the database (instance-wide) or on a session
+(session-scoped). `load_python_plugin(module_src, module_name, grants=None)`
+returns a dict with `plugin_id`, `version`, `scalars_registered`,
+`aggregates_registered`, `procedures_registered`, `algorithms_registered`, and
+`denied_capabilities`. Unknown, quota and internal grant names are dropped, not
+rejected.
 
 ```python
 from uni_db import Uni
 
 db = Uni.open("graph.uni")
-session = db.session()
 
 with open("geo.py") as f:
-    outcome = session.load_python_plugin(
-        f.read(),
-        "ai.dragonscale.geo",   # module name / default plugin id
-        grants=["ScalarFn"],
-    )
+    src = f.read()
+
+# Instance-wide: visible to every session of `db`.
+outcome = db.load_python_plugin(
+    src,
+    "ai.dragonscale.geo",   # module name / default plugin id
+    grants=["ScalarFn"],
+)
 print(outcome["plugin_id"], outcome["scalars_registered"])
+
+# Or session-scoped:
+session = db.session()
+outcome = session.load_python_plugin(src, "ai.dragonscale.geo", grants=["ScalarFn"])
 ```
 
-The async form is identical on an `AsyncSession` (`db.session()` on an
-`AsyncUni`), awaited: `outcome = await session.load_python_plugin(...)`.
+The async forms are identical on `AsyncUni` and `AsyncSession`, awaited:
+`outcome = await db.load_python_plugin(...)`.
 Alternatively, build the plugin with decorators and finalize it:
 
 ```python
@@ -199,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
 the decorator-built manifest, and commits the scalar / aggregate / procedure
 adapters onto the instance's `PluginRegistry` atomically. It returns a
 `LoadOutcome` carrying the resolved `plugin_id`, `version`, and the lists of
-registered scalar / aggregate / procedure names. Requires the `pyo3-plugins`
+registered scalar / aggregate / procedure / algorithm names. Requires the `pyo3-plugins`
 feature on `uni-db` (and `pyo3` on `uni-plugin-pyo3`). A capability the registrar
 was not given is silently skipped at registration: e.g. without
 `Capability::ScalarFn` the haversine scalar would not register.
@@ -218,19 +226,21 @@ cargo run --release
       embedded interpreter; capabilities are gating metadata, not isolation. Do
       not load untrusted Python — use a sandboxed loader for that. See
       [Trust & capabilities](../trust-and-capabilities.md).
-    - **Loadable from Python and Rust.** From Python, load on a session
-      (`Session.load_python_plugin(...)` / `AsyncSession.load_python_plugin(...)`,
-      or the `@session.scalar_fn` decorators + `finalize_plugin(...)`). From
-      Rust, the same loader is on the instance via `Uni::load_python_plugin`.
-      There is no `load_python_plugin` on the Python `Uni` / `AsyncUni` — it is a
-      session method.
-    - **Plugin kinds:** scalar, aggregate, and procedure (v1).
+    - **Loadable from Python and Rust.** From Python, load on the instance
+      (`Uni.load_python_plugin(...)` / `AsyncUni.load_python_plugin(...)`) or on a
+      session (`Session.load_python_plugin(...)` /
+      `AsyncSession.load_python_plugin(...)`, or the `@session.scalar_fn`
+      decorators + `finalize_plugin(...)`). From Rust, the same loader is on the
+      instance via `Uni::load_python_plugin`.
+    - **Plugin kinds:** scalar, aggregate, procedure, and graph algorithm
+      (`@db.algorithm(...)`; see [Graph Algorithms](../graph-algorithms.md)).
     - **GIL serialization.** Both vectorized and row-by-row modes hold the GIL
       across a batch, so concurrent partitions running a PyO3 UDF do not scale
       across cores. Sub-interpreter / free-threaded parallelism is deferred.
     - **Scope depends on the entry point.** The Python session methods register
-      **session-scoped**; the Rust `Uni::load_python_plugin` registers on the
-      instance registry (drop with `Uni::remove_plugin` for instance semantics).
+      **session-scoped**; `Uni.load_python_plugin` / `AsyncUni.load_python_plugin`
+      and the Rust `Uni::load_python_plugin` register on the instance registry
+      (drop with `Uni::remove_plugin` for instance semantics).
 
 ## See also
 

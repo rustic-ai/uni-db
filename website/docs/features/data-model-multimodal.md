@@ -22,7 +22,7 @@ Uni combines a property graph with vectors and JSON documents. You can model ent
         .label("Person")
             .property("name", DataType::String)
             .property("age", DataType::Int64)
-            .vector("embedding", 384)
+            .property_nullable("embedding", DataType::Vector { dimensions: 384 })
         .edge_type("KNOWS", &["Person"], &["Person"])
             .property("since", DataType::Date)
         .apply()
@@ -47,7 +47,7 @@ Uni combines a property graph with vectors and JSON documents. You can model ent
         .label("Person") \
             .property("name", "string") \
             .property("age", "int64") \
-            .vector("embedding", 384) \
+            .property_nullable("embedding", "vector:384") \
             .done() \
         .edge_type("KNOWS", ["Person"], ["Person"]) \
             .property("since", "date") \

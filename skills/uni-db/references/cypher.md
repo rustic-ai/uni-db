@@ -72,15 +72,15 @@ RETURN a.name, paper_count
 
 <!-- doctest: skip -->
 ```cypher
-WITH RECURSIVE reachable(vid, depth) AS (
-    MATCH (n:Person {name: 'Alice'}) RETURN id(n) AS vid, 0 AS depth
-    UNION ALL
-    MATCH (a)-[:KNOWS]->(b)
-    WHERE id(a) IN reachable.vid AND reachable.depth < 5
-    RETURN id(b) AS vid, reachable.depth + 1 AS depth
+WITH RECURSIVE reachable AS (
+    MATCH (n:Person {name: 'Alice'}) RETURN n
+    UNION
+    MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a IN reachable RETURN b
 )
-RETURN DISTINCT vid, min(depth) AS min_depth
+MATCH (m:Person) WHERE m IN reachable RETURN m.name AS name ORDER BY name
 ```
+
+The CTE name takes no column list (`WITH RECURSIVE name AS (anchor UNION recursive)`); refer to the CTE with `x IN name`.
 
 ### RETURN
 
@@ -251,7 +251,7 @@ RETURN n{.name, .age, city: n.address.city} AS person_data
 | **Comparison** | `=`, `<>`, `!=`, `<`, `<=`, `>`, `>=` |
 | **Logical** | `AND`, `OR`, `XOR`, `NOT` |
 | **String** | `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `=~` (regex) |
-| **List** | `IN`, `NOT IN` |
+| **List** | `IN`; negate with `NOT x IN [...]` (`x NOT IN` is not supported) |
 | **Null** | `IS NULL`, `IS NOT NULL` |
 
 ### CASE Expression
@@ -278,7 +278,7 @@ REDUCE(total = 0, x IN n.scores | total + x) AS sum
 
 ### Parameters
 
-`$name` syntax prevents injection and enables plan caching. Session variables: `$session.tenant_id` (set via `db.session().set("tenant_id", "val").build()`).
+`$name` syntax prevents injection and enables plan caching. Session variables: `$session.tenant_id` (set via `session.params().set("tenant_id", "val")`).
 
 ---
 
@@ -302,7 +302,7 @@ Non-aggregated columns in RETURN become implicit GROUP BY keys.
 
 | Function | Returns | Description |
 |---|---|---|
-| `id(node_or_rel)` | UInt64 | Internal VID or EID |
+| `id(node_or_rel)` | Integer (Int64) | Internal VID or EID |
 | `created_at(node_or_rel)` | DateTime (UTC, ns) | First-insert timestamp. Read-only, system-managed; never changes after creation. |
 | `updated_at(node_or_rel)` | DateTime (UTC, ns) | Most-recent write-touch timestamp. Bumps on any CREATE/SET/MERGE that targets the row, including same-value writes. |
 | `type(rel)` | String | Edge type name |
@@ -337,7 +337,7 @@ Non-aggregated columns in RETURN become implicit GROUP BY keys.
 |---|---|
 | `abs(x)`, `ceil(x)`, `floor(x)`, `round(x)` | Rounding / absolute |
 | `sqrt(x)`, `exp(x)`, `log(x)`, `log10(x)` | Roots and logarithms |
-| `pow(x, y)` / `power(x, y)` | Exponentiation |
+| `x ^ y`, `pow(x, y)` / `power(x, y)` | Exponentiation, e.g. `2 ^ 3`, `pow(2.0, 3.0)` |
 | `sign(x)` | -1, 0, or 1 |
 | `rand()` | Random float in [0, 1) |
 | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2` | Trigonometric |
@@ -427,7 +427,7 @@ Options: `method` (`'rrf'`|`'weighted'`), `weights` (list), `k` (RRF constant, d
 
 ### Bitwise Functions
 
-`bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, `shift_left`, `shift_right`
+`uni.bitwise.and(a, b)`, `uni.bitwise.or(a, b)`, `uni.bitwise.xor(a, b)`, `uni.bitwise.not(a)`
 
 ---
 
@@ -460,8 +460,6 @@ RETURN n.name, n.salary, n.department,
     ROW_NUMBER() OVER (PARTITION BY n.department ORDER BY n.salary DESC) AS rank,
     SUM(n.salary) OVER (PARTITION BY n.department) AS dept_total
 ```
-
-**Gotcha:** Queries that mix manual window functions (e.g. `ROW_NUMBER`) and aggregate window functions (e.g. `SUM OVER`) in the same RETURN clause are not yet supported.
 
 ---
 
@@ -515,7 +513,7 @@ CHECK is enforced by the bulk loader and the transactional path, which share one
 
 ### Admin Commands
 
-`VACUUM` (reclaim space), `CHECKPOINT` (force flush), `BACKUP '/path'`, `COPY (Label) TO/FROM '/path' FORMAT csv|parquet`
+`VACUUM` (reclaim space), `CHECKPOINT` (force flush), `BACKUP TO '/path' [WITH {...}]`, `COPY Label TO|FROM '/path' [WITH {format: 'csv'|'parquet', delimiter, header}]`
 
 ---
 
@@ -535,21 +533,21 @@ CALL uni.schema.constraints() YIELD name, type, enabled, properties, target
 
 <!-- doctest: skip -->
 ```cypher
-CALL uni.vector.query(label, property, query_vector, k [, filter] [, threshold])
-YIELD node, score, distance, vector_score, vid
+CALL uni.vector.query(label, property, query_vector, k [, filter] [, threshold] [, options])
+YIELD node, vid, distance, score, rerank_score
 ```
 
-`query_vector` can be a `List<Float>` or a `String` (auto-embedded when embedding config exists). Score is normalized to 0-1.
+`query_vector` can be a `List<Float>` or a `String` (auto-embedded when embedding config exists). Larger `score` is better; `threshold` is a minimum `score`.
 
 ### Full-Text Search
 
 <!-- doctest: skip -->
 ```cypher
-CALL uni.fts.query(label, property, search_term, k [, threshold])
-YIELD node, score, fts_score, vid
+CALL uni.fts.query(label, property, search_term, k [, filter] [, threshold] [, options])
+YIELD node, vid, score, rerank_score
 ```
 
-BM25-based. Scores normalized to 0-1 relative to top match.
+BM25-based. `score` is `bm25 / (bm25 + fts_k)` (`options.fts_k`, default 1.0), in `[0, 1)`; `threshold` is a minimum `score`. Terms are OR-ed; `NOT` and phrase queries are not supported.
 
 ### Hybrid Search
 
@@ -559,7 +557,7 @@ CALL uni.search(label, properties, query_text, query_vector, k [, filter] [, opt
 YIELD node, score, vector_score, fts_score, vid
 ```
 
-Options: `method` (`'rrf'`|`'weighted'`), `alpha` (vector vs FTS weight), `over_fetch` (default 2.0).
+Options: `method` (`'rrf'` default, `'weighted'`, `'relative_score'`/`'rsf'`, `'dbsf'`; an unknown method falls back to RRF), `alpha` (vector vs FTS weight for two-way `weighted`), `weights`, `over_fetch` (default 2.0).
 
 ### Snapshots
 
@@ -577,7 +575,7 @@ CALL uni.admin.snapshot.restore($snapshot_id) YIELD status
 
 ```cypher
 CALL uni.admin.compact() YIELD tables_optimized, fragments_removed, fragments_added, bytes_reclaimed, duration_ms
-CALL uni.admin.compactionStatus() YIELD l1_runs, l1_size_bytes, in_progress, pending
+CALL uni.admin.compactionStatus() YIELD l1_runs, l1_rows, l1_estimated_bytes, in_progress, pending, total_compactions, total_bytes_reclaimed, status_refreshes
 ```
 
 ---
@@ -588,19 +586,17 @@ Query historical data without restoring a snapshot.
 
 ```cypher
 // By snapshot ID
-MATCH (n:Person) VERSION AS OF 'snapshot-abc123'
-RETURN n.name, n.age
+MATCH (n:Person) RETURN n.name, n.age VERSION AS OF 'snapshot-abc123'
 
 // By timestamp
-MATCH (n:Person) TIMESTAMP AS OF '2025-01-15T12:00:00Z'
-RETURN n.name, n.age
+MATCH (n:Person) RETURN n.name, n.age TIMESTAMP AS OF '2025-01-15T12:00:00Z'
 ```
 
-The time-travel clause goes between the pattern and RETURN/WHERE.
+The time-travel clause follows the whole query.
 
 ---
 
-## 9. EXPLAIN and PROFILE
+## 9. EXPLAIN and Profiling
 
 ### EXPLAIN
 
@@ -613,17 +609,17 @@ RETURN cited.title, COUNT(*) AS citation_count
 ORDER BY citation_count DESC LIMIT 10
 ```
 
-Output: scan operations, filter/join/aggregation steps, index usage, estimated rows, cost.
+Output: one `plan` column holding the logical plan dump. For structured output (index usage, cost estimates, warnings, suggestions) use the API: `session.query_with(q).explain()` returns `ExplainOutput`.
 
 ### PROFILE
 
-Executes the query and returns per-operator runtime statistics.
+`PROFILE` is not a Cypher keyword; profile through the API. `session.query_with(q).profile()` executes the query and returns `(QueryResult, ProfileOutput)`.
 
-```cypher
-EXPLAIN MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m
+```python
+result, prof = session.query_with("MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m").profile()
 ```
 
-Output: `total_time_ms`, `rows_scanned`, `peak_memory_bytes`, per-operator `time_ms` and `rows_produced`.
+`ProfileOutput`: `total_time_ms`, `peak_memory_bytes`, the plan (Python `plan_text`, Rust `explain`), and per-operator stats `operator`, `actual_rows`, `time_ms` (Python `operators`, Rust `runtime_stats`).
 
 ---
 
@@ -680,9 +676,11 @@ RETURN a.name, papers_cited, total_citations
 Find the top 3 most-cited papers in each venue.
 
 ```cypher
-MATCH (p:Paper)
-WITH p, ROW_NUMBER() OVER (PARTITION BY p.venue ORDER BY p.citations DESC) AS rn
-WHERE rn <= 3
+CALL {
+  MATCH (p:Paper)
+  RETURN p, ROW_NUMBER() OVER (PARTITION BY p.venue ORDER BY p.citations DESC) AS rn
+}
+WITH p, rn WHERE rn <= 3
 RETURN p.venue, p.title, p.citations
 ORDER BY p.venue, p.citations DESC
 ```

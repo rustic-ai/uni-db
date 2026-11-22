@@ -457,30 +457,48 @@ Use EXPLAIN to view query plans:
 uni query "EXPLAIN MATCH (p:Paper) WHERE p.year > 2020 RETURN p.title" --path ./storage
 ```
 
-**Output:**
+`EXPLAIN` returns one row with a `plan` column holding the debug-formatted
+logical plan (it does not run the query):
+
 ```
-Query Plan:
-═══════════════════════════════════════════════════════════════════════════════
+Project {
+    input: Scan {
+        label_id: 1,
+        labels: [
+            "Paper",
+        ],
+        variable: "p",
+        filter: Some(
+            BinaryOp {
+                left: Property(Variable("p"), "year"),
+                op: Gt,
+                right: Literal(Integer(2020)),
+            },
+        ),
+        optional: false,
+    },
+    projections: [
+        (Property(Variable("p"), "title"), Some("p.title")),
+    ],
+}
+```
 
-Logical Plan:
-├── Project [p.title]
-│     └── Filter [p.year > 2020]
-│           └── Scan [:Paper AS p]
+(abridged: the real dump puts every nested value on its own line).
 
-Physical Plan:
-├── VectorizedProject [p.title]
-│     └── LateMaterialize [title]
-│           └── LanceScan [:Paper]
-│                 ├── Projection: [_vid, year]
-│                 ├── Pushdown: year > 2020
-│                 └── Index: paper_year (BTree)
+From Rust, `session.query_with(cypher).explain()` returns an `ExplainOutput`
+with the same plan text plus index and cost information:
 
-Statistics:
-├── Estimated rows: 5,000 (50% selectivity)
-├── Estimated I/O: 2.5 MB
-└── Index usage: paper_year
-
-═══════════════════════════════════════════════════════════════════════════════
+```rust
+let explain = session
+    .query_with("MATCH (p:Paper) WHERE p.year > 2020 RETURN p.title")
+    .explain()
+    .await?;
+println!("{}", explain.plan_text);        // debug-formatted logical plan
+for usage in &explain.index_usage {       // label_or_type, property, index_type, used, reason
+    println!("{usage:?}");
+}
+println!("{:?}", explain.cost_estimates); // estimated_rows, estimated_cost
+// explain.warnings, explain.suggestions: planner warnings and suggested indexes
 ```
 
 ---

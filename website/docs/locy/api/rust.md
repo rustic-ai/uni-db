@@ -51,10 +51,13 @@ Builder methods:
 | `.params(map)` | Add multiple parameters |
 | `.timeout(duration)` | Set evaluation timeout (`std::time::Duration`). Replaces the database `query_timeout` for this evaluation, above or below it |
 | `.max_iterations(n)` | Set recursion iteration cap |
+| `.max_memory(bytes)` | Cap the memory this evaluation may use |
+| `.allow_partial(bool)` | Return the partial `LocyResult` (with its `incomplete` diagnostics) instead of `UniError::LocyIncomplete` when the evaluation exceeds its `timeout` or `max_iterations` |
 | `.with_config(cfg)` | Set full `LocyConfig` options (taken by value) |
 | `.cancellation_token(token)` | Attach a cancellation token; cancelling it aborts the evaluation with `UniError::Cancelled` |
 | `.run()` | Execute and return `LocyResult` |
 | `.explain()` | Compile and return `LocyExplainOutput` without evaluating |
+| `.profile()` | Execute and return `(LocyResult, LocyProfileOutput)` |
 
 ## Config (`LocyConfig`)
 
@@ -152,8 +155,9 @@ let explain = session.locy_with(program).explain()?;
 
 ```rust
 let compiled = session.compile_locy(program)?;
-println!("strata: {}, rules: {}", compiled.num_strata(), compiled.num_rules());
-println!("rule names: {:?}", compiled.rule_names());
+println!("strata: {}, rules: {}", compiled.strata.len(), compiled.rule_catalog.len());
+let rule_names: Vec<&String> = compiled.rule_catalog.keys().collect();
+println!("rule names: {rule_names:?}");
 ```
 
 Validates the program structure and returns metadata without evaluation.

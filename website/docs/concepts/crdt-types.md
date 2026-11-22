@@ -498,8 +498,8 @@ r2.set("B".to_string(), "node2");  // {node1: 1, node2: 1}
 let result = r1.merge_register(&r2);
 assert_eq!(result, MergeResult::Concurrent);
 
-// On conflict: keeps self's value, merges clocks
-assert_eq!(r1.get(), "A");
+// On conflict: the larger serialized value wins on both sides, clocks merge
+assert_eq!(r1.get(), "B");
 assert_eq!(r1.clock().get("node1"), 2);
 assert_eq!(r1.clock().get("node2"), 1);
 ```
@@ -510,7 +510,7 @@ assert_eq!(r1.clock().get("node2"), 1);
 |--------|---------|
 | `KeptSelf` | Self was causally newer or equal |
 | `TookOther` | Other was causally newer |
-| `Concurrent` | Updates were concurrent; kept self's value, merged clocks |
+| `Concurrent` | Updates were concurrent; the value with the larger serialized form wins (so every replica converges on the same value) and the clocks merge |
 
 ---
 
@@ -548,6 +548,11 @@ a.merge(&b);
 | `Crdt::LWWRegister` | `LWWRegister<serde_json::Value>` | Last-writer-wins register |
 | `Crdt::LWWMap` | `LWWMap<String, serde_json::Value>` | Last-writer-wins map |
 | `Crdt::Rga` | `Rga<String>` | Replicated growable array |
+| `Crdt::VectorClock` | `VectorClock` | Causal-ordering clock |
+| `Crdt::VCRegister` | `VCRegister<serde_json::Value>` | Vector-clock register |
+
+In Cypher DDL the CRDT property types are `GCOUNTER` and `LWWREGISTER`
+(`CREATE LABEL Page (views GCOUNTER)`); declare other kinds through the schema builder.
 
 ---
 
@@ -601,7 +606,7 @@ register.set(value, hlc_timestamp);
 
 ```rust
 // Need "add wins"? Use ORSet
-// Need "remove wins"? Use 2P-Set or LWW with remove timestamp
+// Need "remove wins"? Use LWWMap, where a later remove timestamp wins
 // Need both? Consider custom CRDT composition
 ```
 

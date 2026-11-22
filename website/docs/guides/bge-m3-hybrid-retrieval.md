@@ -8,7 +8,7 @@
 
 This guide shows the headline pattern: configure **one** `EmbedHybrid` alias, point three index columns at it, and let a single model pass fill all three. Then run a 3-way `uni.search` that fuses dense + full-text + sparse and (optionally) re-ranks with MaxSim.
 
-The schema and DDL below mirror the working integration test at `crates/uni/tests/bge_m3_hybrid_3way.rs` (mock model) and `crates/uni/tests/bge_m3_real_onnx.rs` (the real `aapot/bge-m3-onnx` model).
+The schema and DDL below mirror the working integration test at `crates/uni/tests/common/bge_m3_hybrid_3way.rs` (mock model) and `crates/uni/tests/common/bge_m3_real_onnx.rs` (the real `aapot/bge-m3-onnx` model).
 
 ---
 

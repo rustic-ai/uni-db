@@ -762,7 +762,7 @@ class QueryResult:
     def __bool__(self) -> bool: ...
 
 class ExplainOutput:
-    """Typed output from ``session.explain()``."""
+    """Typed output from ``session.query_with(cypher).explain()``."""
 
     plan_text: str
     warnings: list[str]
@@ -771,7 +771,10 @@ class ExplainOutput:
     suggestions: Any
 
 class ProfileOutput:
-    """Typed output from ``session.profile()``."""
+    """Typed output from ``session.query_with(cypher).profile()``.
+
+    The transaction query and execute builders' ``profile()`` return it too.
+    """
 
     total_time_ms: int
     peak_memory_bytes: int
@@ -1889,8 +1892,10 @@ class Session:
     Example::
 
         session = db.session()
-        session.set("threshold", 0.5)
-        results = session.query("MATCH (n) WHERE n.score > $threshold RETURN n")
+        session.params().set("threshold", 0.5)
+        results = session.query(
+            "MATCH (n) WHERE n.score > $session.threshold RETURN n"
+        )
     """
 
     # --- Parameters ---
@@ -2310,7 +2315,9 @@ class Uni:
         db = Uni.temporary()
         db.schema().label("Person").property("name", "String").apply()
         session = db.session()
-        session.execute("CREATE (n:Person {name: 'Alice'})")
+        with session.tx() as tx:
+            tx.execute("CREATE (n:Person {name: 'Alice'})")
+            tx.commit()
         results = session.query("MATCH (n:Person) RETURN n.name AS name")
     """
 
@@ -2468,7 +2475,9 @@ class AsyncUni:
         db = await AsyncUni.temporary()
         await db.schema().label("Person").property("name", "String").apply()
         session = db.session()
-        await session.execute("CREATE (n:Person {name: 'Alice'})")
+        tx = await session.tx()
+        await tx.execute("CREATE (n:Person {name: 'Alice'})")
+        await tx.commit()
         results = await session.query("MATCH (n:Person) RETURN n.name AS name")
     """
 

@@ -58,10 +58,10 @@ Same dense `u64` auto-increment shape as VID; neither encodes a label or edge-ty
 | Uni Type | Arrow Type | Cypher DDL | Python Factory | Rust Enum |
 |----------|-----------|------------|----------------|-----------|
 | `String` | `Utf8` | `STRING` | `DataType.STRING()` | `DataType::String` |
-| `Int32` | `Int32` | `INTEGER` | `DataType.INT32()` | `DataType::Int32` |
-| `Int64` (alias: `Int`) | `Int64` | `INTEGER` | `DataType.INT64()` | `DataType::Int64` |
-| `Float32` | `Float32` | `FLOAT` | `DataType.FLOAT32()` | `DataType::Float32` |
-| `Float64` (alias: `Float`) | `Float64` | `FLOAT` | `DataType.FLOAT64()` | `DataType::Float64` |
+| `Int32` | `Int32` | `INT32` | `DataType.INT32()` | `DataType::Int32` |
+| `Int64` (alias: `Int`) | `Int64` | `INTEGER`, `INT`, `INT64` | `DataType.INT64()` | `DataType::Int64` |
+| `Float32` | `Float32` | `FLOAT32` | `DataType.FLOAT32()` | `DataType::Float32` |
+| `Float64` (alias: `Float`) | `Float64` | `FLOAT`, `FLOAT64`, `DOUBLE` | `DataType.FLOAT64()` | `DataType::Float64` |
 | `Bool` | `Boolean` | `BOOLEAN` | `DataType.BOOL()` | `DataType::Bool` |
 
 ### Temporal Types
@@ -82,18 +82,18 @@ Same dense `u64` auto-increment shape as VID; neither encodes a label or edge-ty
 | Uni Type | Arrow Type | Cypher DDL | Rust Enum |
 |----------|-----------|------------|-----------|
 | `Vector { dimensions }` | `FixedSizeList(Float32, N)` | `VECTOR(N)` | `DataType::Vector { dimensions: N }` |
-| `List(T)` | `List(T)` | `LIST(T)` | `DataType::List(Box<DataType>)` |
-| `Map(K, V)` | `List(Struct(key, value))` | `MAP(K, V)` | `DataType::Map(Box<DataType>, Box<DataType>)` |
-| `CypherValue` | `LargeBinary` | -- | `DataType::CypherValue` |
+| `List(T)` | `List(T)` | `LIST<T>` | `DataType::List(Box<DataType>)` |
+| `Map(K, V)` | `List(Struct(key, value))` | `MAP<STRING, V>` | `DataType::Map(Box<DataType>, Box<DataType>)` |
+| `CypherValue` | `LargeBinary` | `JSON` | `DataType::CypherValue` |
 | `Bytes` | `LargeBinary` | `BYTES` (also `BLOB`, `BINARY`) | `DataType::Bytes` |
 
 ### Spatial Types
 
 | Uni Type | Arrow Type | Rust Enum |
 |----------|-----------|-----------|
-| `Point(Geographic)` | Struct(latitude, longitude, crs: Float64) | `DataType::Point(Geographic)` |
-| `Point(Cartesian2D)` | Struct(x, y, crs: Float64) | `DataType::Point(Cartesian2D)` |
-| `Point(Cartesian3D)` | Struct(x, y, z, crs: Float64) | `DataType::Point(Cartesian3D)` |
+| `Point(Geographic)` | Struct(latitude, longitude, crs: Utf8) | `DataType::Point(Geographic)` |
+| `Point(Cartesian2D)` | Struct(x, y, crs: Utf8) | `DataType::Point(Cartesian2D)` |
+| `Point(Cartesian3D)` | Struct(x, y, z, crs: Utf8) | `DataType::Point(Cartesian3D)` |
 
 ### CRDT Types
 
@@ -221,12 +221,12 @@ All CRDTs implement `CrdtMerge` (commutative, associative, idempotent). Serializ
 | Type | Best For | Query Pattern | Creation |
 |------|----------|---------------|----------|
 | **BTree** | Range queries, ordering, prefix | `WHERE x > 5`, `STARTS WITH` | Default. `CREATE INDEX idx ON Label (prop)` |
-| **Hash** | Exact match lookups | `WHERE x = 123` | Rust: `ScalarType::Hash` |
-| **Bitmap** | Low-cardinality columns (< 1000 distinct values) | `WHERE status = 'active'` | DDL: `"BITMAP"`, Rust: `ScalarType::Bitmap` |
+| **Hash** | Exact match lookups | `WHERE x = 123` | Rust: `ScalarType::Hash` (stored as BTree; the procedure rejects `HASH`) |
+| **Bitmap** | Low-cardinality columns (< 1000 distinct values) | `WHERE status = 'active'` | Procedure: `"BITMAP"`, Rust: `ScalarType::Bitmap` |
 | **LabelList** | List columns with containment queries | `array_contains_any`, `array_contains_all` | DDL: `"LABEL_LIST"`, Rust: `ScalarType::LabelList` |
 
 ```cypher
-CREATE INDEX idx_name FOR (p:Person) ON (p.name)          // Default: BTree
+CREATE INDEX idx_name FOR (p:Person) ON (p.name)          // Always BTree (OPTIONS {type} is ignored)
 
 // Via procedure API
 CALL uni.schema.createIndex('Event', 'status', {"type": "BITMAP"})
@@ -249,32 +249,36 @@ db.schema().label("User")
 | **Flat** | None | < 10k vectors, exact search | — |
 | **IVF-Flat** | None | Medium datasets, exact within partitions | `partitions` |
 | **IVF-SQ** | Scalar (int8) | Large datasets, good recall/memory tradeoff | `partitions` |
-| **IVF-PQ** | Product | Very large datasets, minimum memory | `partitions`, `sub_vectors`, `num_bits` |
+| **IVF-PQ** | Product | Default. Very large datasets, minimum memory | `partitions` (default 256), `sub_vectors` (default derived from the dimension), `num_bits` (default 8) |
 | **IVF-RQ** | RaBitQ | Better accuracy than PQ at similar compression | `partitions`, `num_bits` |
 | **HNSW-Flat** | None | Exact graph search, no compression loss | `m`, `ef_construction`, `partitions` |
-| **HNSW-SQ** | Scalar (int8) | Default. Best recall-latency tradeoff | `m`, `ef_construction`, `partitions` |
+| **HNSW-SQ** | Scalar (int8) | Best recall-latency tradeoff | `m`, `ef_construction`, `partitions` |
 | **HNSW-PQ** | Product | Large datasets with graph speed + compression | `m`, `ef_construction`, `sub_vectors`, `partitions` |
 
 ```cypher
-// HNSW-SQ (default if no type specified)
+// IVF-PQ is the default when no type is given
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw_sq' }
+  OPTIONS { metric: 'cosine' }
+
+// HNSW-SQ
+CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
+  OPTIONS { metric: 'cosine', type: 'hnsw_sq' }
 
 // HNSW-Flat (no quantization, exact graph search)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw_flat' }
+  OPTIONS { metric: 'cosine', type: 'hnsw_flat' }
 
 // HNSW-SQ with IVF partitions for very large datasets
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw_sq', partitions: 32 }
+  OPTIONS { metric: 'cosine', type: 'hnsw_sq', partitions: 32 }
 
 // IVF-RQ (RaBitQ, 1-bit per dimension by default)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'ivf_rq', partitions: 256 }
+  OPTIONS { metric: 'cosine', type: 'ivf_rq', partitions: 256 }
 
 // IVF-PQ for memory-constrained large datasets
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'l2', type: 'ivf_pq', partitions: 256, sub_vectors: 16 }
+  OPTIONS { metric: 'l2', type: 'ivf_pq', partitions: 256, sub_vectors: 16 }
 ```
 
 **Distance Metrics:**
@@ -304,7 +308,7 @@ CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
 
 ### Inverted Index
 
-Term-to-VID mapping for list containment queries (`ANY(x IN list WHERE x IN allowed)`). Memory guard: 256 MB default.
+Term-to-VID mapping for list columns, created with `uni.schema.createIndex(label, prop, {type: 'INVERTED'})`. The query planner does not use inverted indexes yet, so list containment queries (`ANY(x IN list WHERE x IN allowed)`) scan.
 
 ---
 
@@ -473,7 +477,7 @@ YIELD name, type, enabled, properties, target
 ### SHOW Commands
 
 ```cypher
-SHOW INDEXES        // All indexes with status
+SHOW INDEXES        // All indexes: name, type, details
 SHOW CONSTRAINTS    // All constraints
 SHOW DATABASE       // Database metadata
 ```
@@ -496,6 +500,8 @@ db.indexes().rebuild("Person", background=True)
 **PropertyInfo fields:** `name`, `data_type`, `nullable`, `is_indexed`
 
 **IndexInfo fields:** `name`, `index_type`, `properties: list[str]`, `status`
+
+During a rebuild an index is `Building`, `Stale` or `Failed`; the planner uses only `Online` indexes, so queries fall back to a scan meanwhile.
 
 ---
 

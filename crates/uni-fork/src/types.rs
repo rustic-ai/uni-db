@@ -144,8 +144,9 @@ impl EdgeDiff {
 pub struct DiffVertex {
     /// The vertex's label.
     pub label: String,
-    /// Content-addressed identity (`compute_vertex_uid(label, None,
-    /// properties)`). This is the bucketing key during diff.
+    /// Content-addressed identity (`compute_vertex_uid(label, ext_id,
+    /// properties)`, with the stored `ext_id` folded in). This is the
+    /// bucketing key during diff.
     pub uid: UniId,
     /// Informational: which VID this row carried on the side it was
     /// scanned from. `None` if the per-side scan returned a node

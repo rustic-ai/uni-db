@@ -5,15 +5,17 @@ Complete reference for the `uni` command-line interface. The CLI provides tools 
 ## Synopsis
 
 ```bash
-uni <COMMAND> [OPTIONS]
+uni [OPTIONS] [COMMAND]
 ```
+
+With no command, `uni` starts the REPL on `./storage`.
 
 ## Global Options
 
 | Option | Description |
 |--------|-------------|
 | `-h, --help` | Print help information |
-| `-V, --version` | Print version information |
+| `--storage-option KEY=VALUE` | Object-store option for a store opened at an `s3://`, `gs://` or `az://` path (for example `aws_endpoint=http://localhost:9000`). Repeatable; overrides the environment. Accepted before or after the command. Prefer the environment for secrets, which would otherwise land in shell history |
 
 ### Environment Variables
 
@@ -68,9 +70,9 @@ uni import semantic-scholar \
 
 ---
 
-### `query` — Execute Queries
+### `query` — Run a Query
 
-Run OpenCypher queries against a database.
+Run an OpenCypher query against a database.
 
 #### Synopsis
 
@@ -83,7 +85,6 @@ uni query <STATEMENT> [--path <PATH>]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--path <PATH>` | Local directory or object-store URI (`s3://`, `gs://`, `az://`, `file://`) | `./storage` |
-| `--storage-option KEY=VALUE` | Object-store option, repeatable; overrides the environment. Prefer the environment for secrets, which would otherwise land in shell history | — |
 
 #### Example
 
@@ -110,7 +111,6 @@ uni
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--path <PATH>` | Local directory or object-store URI (`s3://`, `gs://`, `az://`, `file://`) | `./storage` |
-| `--storage-option KEY=VALUE` | Object-store option, repeatable; overrides the environment. Prefer the environment for secrets, which would otherwise land in shell history | — |
 
 #### Shell Commands
 
@@ -130,26 +130,28 @@ Create, list, and restore database snapshots.
 #### Synopsis
 
 ```bash
-uni snapshot <SUBCOMMAND> [--path <PATH>]
+uni snapshot [--path <PATH>] <SUBCOMMAND>
 ```
+
+`--path` belongs to `snapshot`, so it goes before the subcommand.
 
 #### Subcommands
 
 **`list`** — List all available snapshots.
 ```bash
-uni snapshot list --path ./storage
+uni snapshot --path ./storage list
 ```
 
 **`create`** — Create a new named snapshot. The `<NAME>` argument is required.
 ```bash
-uni snapshot create <NAME> --path ./storage
+uni snapshot --path ./storage create <NAME>
 # e.g.
-uni snapshot create "nightly" --path ./storage
+uni snapshot --path ./storage create "nightly"
 ```
 
 **`restore`** — Restore the database to a specific snapshot ID.
 ```bash
-uni snapshot restore <ID> --path ./storage
+uni snapshot --path ./storage restore <ID>
 ```
 
 ---
@@ -161,30 +163,32 @@ Install runtime-loaded plugins into a database.
 #### Synopsis
 
 ```bash
-uni plugin <SUBCOMMAND> [--path <PATH>]
+uni plugin [--path <PATH>] <SUBCOMMAND>
 ```
+
+`--path` belongs to `plugin`, so it goes before the subcommand.
 
 #### Subcommands
 
-**`install`** — Install a plugin from a local file or URL.
+**`install`** — Install a plugin from a local file.
 
 ```bash
-uni plugin install <SOURCE> [--grants <NAMES>] --path ./storage
+uni plugin --path ./storage install <SOURCE> [--grants <NAMES>]
 ```
 
 | Argument / Option | Description | Default |
 |-------------------|-------------|---------|
-| `<SOURCE>` | Local path or URL to install from. Dispatched by extension: `*.rhai` is loaded today; `*.wasm`, `oci://…`, and `extism://…` are reserved for a later milestone. | — |
+| `<SOURCE>` | Local path to install from. Dispatched by extension: `*.rhai` is loaded today. `*.wasm`, `http://`, `https://`, `oci://…` and `extism://…` sources are refused as not yet supported. | — |
 | `--grants <NAMES>` | Comma-separated capability grant names (e.g. `ScalarFn,Filesystem,Network`). | `ScalarFn,AggregateFn,Procedure` |
 
 Available grant names include `ScalarFn`, `AggregateFn`, `Procedure`, `Filesystem`, `Network`, `HostQuery`, `Kms`, and `Secret`.
 
 ```bash
 # Install a Rhai plugin with the default scalar/aggregate/procedure grants
-uni plugin install ./my_plugin.rhai --path ./storage
+uni plugin --path ./storage install ./my_plugin.rhai
 
 # Grant filesystem and network access as well
-uni plugin install ./my_plugin.rhai --grants "ScalarFn,Filesystem,Network" --path ./storage
+uni plugin --path ./storage install ./my_plugin.rhai --grants "ScalarFn,Filesystem,Network"
 ```
 
 ---

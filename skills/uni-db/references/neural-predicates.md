@@ -28,7 +28,7 @@ CREATE MODEL model_name AS
   [VERSION 'string']
 ```
 
-`output_type` ∈ `PROB | SCORE | LABEL | VECTOR`. `method` ∈ `platt_scaling | isotonic_regression | temperature_scaling | beta_calibration | dirichlet_calibration`.
+`output_type` ∈ `PROB | SCORE | LABEL | VECTOR`. `method` ∈ `platt_scaling | isotonic_regression | temperature_scaling | beta_calibration | conformal | conformal(alpha) | dirichlet | none`.
 
 **Important** — the **classifier-registry key is `model_name`** (the `CREATE MODEL <name>`), NOT the `USING xervo('alias')` string. The xervo alias is a provider hint surfaced to EXPLAIN; registry lookup happens by model name.
 
@@ -127,17 +127,23 @@ impl NeuralClassifier for MyClassifier {
 ## 7. CALIBRATE
 
 ```text
-CALIBRATE model_name USING method
+CALIBRATE model_name ON MATCH pattern [WHERE expr] TARGET expr METHOD method [HOLDOUT fraction]
 ```
+
+```text
+CALIBRATE scorer ON MATCH (s:Sample) TARGET s.label METHOD platt_scaling HOLDOUT 0.25
+```
+
+`method` takes the same names as `CALIBRATION` in `CREATE MODEL`. `HOLDOUT` is the fraction held out (default 0.2).
 
 Returns `CalibrateCommandResult`:
 
 | Field | Type | Notes |
 |---|---|---|
 | `model_name` | str | |
-| `method` | str | `platt_scaling`, `isotonic_regression`, etc. |
-| `n_samples` | int | Held-out samples used |
-| `holdout_size` | float | Fraction reserved (0.0–1.0) |
+| `method` | str | Debug name of the fitted method: `Platt`, `Isotonic`, `Temperature`, `Beta`, `Conformal`, ... |
+| `n_samples` | int | Samples collected (training + holdout) |
+| `holdout_size` | int | Number of samples held out |
 | `raw_brier` | float | Pre-calibration Brier |
 | `calibrated_brier` | float | Post-calibration Brier |
 | `raw_ece` | float | Pre-calibration ECE |
@@ -147,7 +153,11 @@ Returns `CalibrateCommandResult`:
 ## 8. VALIDATE
 
 ```text
-VALIDATE model_name USING brier, ece
+VALIDATE rule_name ON MATCH pattern [WHERE expr] TARGET expr METRICS metric (, metric)*
+```
+
+```text
+VALIDATE risk ON MATCH (s:Item) TARGET s.label METRICS brier_score, debiased_ece, auc
 ```
 
 Returns `ValidateCommandResult`:
@@ -159,7 +169,7 @@ Returns `ValidateCommandResult`:
 | `n_samples` | int |
 | `metrics` | dict[str, float] |
 
-Supported metrics: `brier`, `ece`, `accuracy`, `log_loss`, `auroc`.
+Supported metrics: `brier_score`, `log_loss`, `ece`, `debiased_ece`, `accuracy`, `auc`. In Python `metrics` is keyed by the metric's Rust name (`BrierScore`, `LogLoss`, `Ece`, `DebiasedEce`, `Accuracy`, `Auc`).
 
 ## 9. EXPLAIN with NeuralProvenance
 

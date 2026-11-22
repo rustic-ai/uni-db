@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Xervo is uni-db's built-in ML runtime for embeddings, reranking, text generation and structured NLP (entity and fact extraction). It supports local inference (Candle, ONNX Runtime — embed, rerank, raw, nlp), a self-hosted llama.cpp server, and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
+Xervo is uni-db's built-in ML runtime for embeddings (dense, sparse, multi-vector, hybrid, image), reranking, text generation, raw tensor models, structured NLP (entity and fact extraction) and document extraction. It supports local inference (Candle — embed; ONNX Runtime — embed incl. sparse/multi-vector/hybrid/image, rerank, raw, nlp, OCR/document extract), a self-hosted llama.cpp server, and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
 
 **Key concepts:**
 - **Alias**: human-readable model identifier in `task/name` format (e.g., `embed/default`, `llm/gpt4`)
@@ -20,9 +20,9 @@ Run inference on the host machine. No API keys needed.
 
 | Provider ID | Engine | Tasks | Best For |
 |---|---|---|---|
-| `remote/llamacpp` | llama.cpp server (`llama-server` you run) | Embed, Rerank, Generate, Document extract | Private local generation (text + vision), GGUF models, GPU via llama.cpp; one server per model, so one alias per task |
+| `remote/llamacpp` | llama.cpp server (`llama-server` you run) | Embed, EmbedImage, Rerank, Generate, Raw, DocumentExtract | Private local generation (text + vision), GGUF models, GPU via llama.cpp; one server per model, so one alias per task |
 | `local/candle` | HuggingFace Candle | Embed | Lightweight CPU embeddings (Bert, JinaBert, Gemma) |
-| `local/onnx` | ONNX Runtime | Embed, Rerank, Raw, Nlp | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), raw tensor execution, and kniv v7 entity/fact extraction (`uni.nlp.*`) |
+| `local/onnx` | ONNX Runtime | Embed, EmbedSparse, EmbedMultiVector, EmbedHybrid, EmbedImage, Rerank, Raw, Nlp, DocumentExtract, Ocr | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), raw tensor execution, and kniv v7 entity/fact extraction (`uni.nlp.*`) |
 
 **Local provider options:**
 
@@ -49,11 +49,11 @@ Call external APIs. Require API keys via environment variables.
 |---|---|---|---|
 | `remote/openai` | Embed, Generate | `OPENAI_API_KEY` | `Authorization: Bearer` |
 | `remote/anthropic` | Generate only | `ANTHROPIC_API_KEY` | `x-api-key` |
-| `remote/gemini` | Embed, Generate | `GEMINI_API_KEY` | Query parameter |
-| `remote/vertexai` | Embed, Generate | `VERTEXAI_API_TOKEN` | `Authorization: Bearer` |
+| `remote/gemini` | Embed, EmbedMultimodal, Generate | `GEMINI_API_KEY` | Query parameter |
+| `remote/vertexai` | Embed, Generate | `VERTEX_AI_TOKEN` (project: `project_id` option or `VERTEX_AI_PROJECT`) | `Authorization: Bearer` |
 | `remote/mistral` | Embed, Generate | `MISTRAL_API_KEY` | `Authorization: Bearer` |
-| `remote/voyageai` | Embed, Rerank | `VOYAGEAI_API_KEY` | `Authorization: Bearer` |
-| `remote/cohere` | Embed, Rerank, Generate | `CO_API_KEY` | `Authorization: Bearer` |
+| `remote/voyageai` | Embed, Rerank | `VOYAGE_API_KEY` | `Authorization: Bearer` |
+| `remote/cohere` | Embed, EmbedMultimodal, Rerank, Generate | `CO_API_KEY` | `Authorization: Bearer` |
 | `remote/azure-openai` | Embed, Generate | `AZURE_OPENAI_API_KEY` | `api-key` header |
 
 **Provider-specific options:**
@@ -194,15 +194,15 @@ let db = Uni::open("./my_db")
     .build()
     .await?;
 
-// From JSON file
+// From JSON file (free functions returning Vec<ModelAliasSpec>)
 let db = Uni::open("./my_db")
-    .xervo_catalog_from_file("./catalog.json")?
+    .xervo_catalog(uni_db::xervo_catalog_from_file("./catalog.json")?)
     .build()
     .await?;
 
 // From JSON string
 let db = Uni::open("./my_db")
-    .xervo_catalog_from_str(&json_string)?
+    .xervo_catalog(uni_db::xervo_catalog_from_str(&json_string)?)
     .build()
     .await?;
 ```

@@ -165,9 +165,8 @@ impl Session {
     pub async fn prepare(&self, cypher: &str) -> Result<PreparedQuery>;
     pub async fn prepare_locy(&self, program: &str) -> Result<PreparedLocy>;
 
-    // Hooks (add_hook, remove_hook, list_hooks, clear_hooks)
-    pub fn add_hook(&mut self, name: impl Into<String>, hook: impl SessionHook + 'static);
-    pub fn remove_hook(&mut self, name: &str) -> bool;
+    // Hooks: add_hook / remove_hook / list_hooks / clear_hooks are deprecated.
+    // Install hooks with db.add_plugin(BuiltinHookPlugin::new(name, Arc::new(hook))).
 
     // Commit notifications
     pub fn watch(&self) -> CommitStream;           // all commits
@@ -312,11 +311,13 @@ pub enum DataType {
 
 ```rust
 pub enum IndexType {
-    Vector(VectorIndexCfg),  FullText,  Scalar(ScalarType),  Inverted(InvertedIndexConfig),
+    Vector(VectorIndexCfg),  FullText,  FullTextWithAnalyzer(AnalyzerConfig),
+    Scalar(ScalarType),  Inverted(InvertedIndexConfig),
+    Sparse { dimensions: usize, quantize: bool, embedding: Option<EmbeddingCfg>, idf: bool },
 }
 pub struct VectorIndexCfg {
-    pub algorithm: VectorAlgo,  // Flat | IvfFlat | IvfPq | IvfSq | IvfRq | HnswFlat | Hnsw | HnswSq | HnswPq
-    pub metric: VectorMetric,   // Cosine | L2 | Dot
+    pub algorithm: VectorAlgo,  // Flat | IvfFlat | IvfPq | IvfSq | IvfRq | HnswFlat | Hnsw | HnswSq | HnswPq | Muvera
+    pub metric: VectorMetric,   // Cosine | L2 | Dot | L1
     pub embedding: Option<EmbeddingCfg>,
 }
 pub enum ScalarType { BTree, Hash, Bitmap, LabelList }
@@ -326,10 +327,10 @@ pub enum ScalarType { BTree, Hash, Bitmap, LabelList }
 
 ```rust
 pub enum SchemaChange {
-    AddLabel { name },
-    AddProperty { label_or_type, name, data_type: DataType, nullable: bool },
+    AddLabel { name, description: Option<String> },
+    AddProperty { label_or_type, name, data_type: DataType, nullable: bool, description: Option<String> },
     AddIndex(IndexDefinition),
-    AddEdgeType { name, from_labels: Vec<String>, to_labels: Vec<String> },
+    AddEdgeType { name, from_labels: Vec<String>, to_labels: Vec<String>, description: Option<String> },
 }
 ```
 
@@ -357,14 +358,14 @@ impl BulkWriterBuilder {
 ```rust
 impl BulkWriter {
     pub async fn insert_vertices(&mut self, label: &str, vertices: impl IntoArrow) -> Result<Vec<Vid>>;
-    pub async fn insert_edges(&mut self, edge_type: &str, edges: Vec<EdgeData>) -> Result<()>;
+    pub async fn insert_edges(&mut self, edge_type: &str, edges: Vec<EdgeData>) -> Result<Vec<Eid>>;
     pub async fn commit(mut self) -> Result<BulkStats>;
     pub async fn abort(mut self) -> Result<()>;
     pub fn stats(&self) -> &BulkStats;
 }
 ```
 
-**Gotcha:** BulkWriter bypasses normal isolation. Already-flushed batches cannot be rolled back.
+**Gotcha:** BulkWriter rows are staged and become visible only at `commit()`; `abort()` discards everything the load wrote. `load_id()` names the load; after a crash or an ambiguous commit, `db.bulk_load_applied(id)` says whether it was applied.
 
 ### StreamingAppender (`tx.appender(label)`)
 
@@ -379,12 +380,12 @@ impl StreamingAppender {
     pub async fn append(&mut self, properties: impl Into<HashMap<String, Value>>) -> Result<()>;
     pub async fn write_batch(&mut self, batch: &RecordBatch) -> Result<()>;
     pub async fn finish(mut self) -> Result<BulkStats>;
-    pub fn abort(mut self);
+    pub async fn abort(mut self) -> Result<()>;
     pub fn buffered_count(&self) -> usize;
 }
 ```
 
-**Supporting types:** `EdgeData { src_vid, dst_vid, properties }`, `BulkStats { vertices_inserted, edges_inserted, indexes_rebuilt, duration, index_build_duration, indexes_pending }`.
+**Supporting types:** `EdgeData { src_vid, dst_vid, properties }`, `BulkStats { vertices_inserted, edges_inserted, indexes_rebuilt, duration, index_build_duration, index_task_ids, indexes_pending, load_id, warnings }`.
 
 ---
 
@@ -407,11 +408,11 @@ impl<'a> Params<'a> {
 
 ```rust
 impl<'a> RuleRegistry<'a> {
-    pub fn register(&self, program: &str) -> Result<()>;
-    pub fn remove(&self, name: &str) -> Result<bool>;
+    pub async fn register(&self, program: &str) -> Result<()>;
+    pub async fn remove(&self, name: &str) -> Result<bool>;
     pub fn list(&self) -> Vec<String>;
     pub fn get(&self, name: &str) -> Option<RuleInfo>;   // { name, clause_count, is_recursive }
-    pub fn clear(&self);
+    pub async fn clear(&self) -> Result<()>;
     pub fn count(&self) -> usize;
 }
 ```
@@ -481,7 +482,7 @@ impl ExecuteResult {
     pub fn affected_rows(&self) -> usize;
     pub fn nodes_created(&self) -> usize;       pub fn nodes_deleted(&self) -> usize;
     pub fn relationships_created(&self) -> usize;  pub fn relationships_deleted(&self) -> usize;
-    pub fn properties_set(&self) -> usize;
+    pub fn properties_set(&self) -> usize;     pub fn properties_removed(&self) -> usize;
     pub fn labels_added(&self) -> usize;        pub fn labels_removed(&self) -> usize;
     pub fn metrics(&self) -> &QueryMetrics;
 }
@@ -736,16 +737,17 @@ let stats = writer.commit().await?;
 println!("Inserted {} vertices in {:?}", stats.vertices_inserted, stats.duration);
 ```
 
-### Locy with session parameters
+### Locy with parameters
+
+Locy does not read session params; pass them on the builder.
 
 ```rust
-session.params().set("threshold", 0.8);
 let result = session.locy_with(r#"
     CREATE RULE high_score AS
         MATCH (n:Product) WHERE n.score > $threshold
         YIELD KEY n
     QUERY high_score RETURN n
-"#).timeout(Duration::from_secs(30)).max_iterations(100).run().await?;
+"#).param("threshold", 0.8).timeout(Duration::from_secs(30)).max_iterations(100).run().await?;
 for fact in result.rows().unwrap_or(&vec![]) {
     println!("{:?}", fact["n"]);
 }

@@ -201,7 +201,7 @@ History: until 2026-10 the mixed case was handled by wrapping both sides in `toI
 
 **Decode failures surface.** `arrow_to_json_value` (`df_graph/unwind.rs`), which decodes values for `UNWIND`, correlated-subquery parameters (`extract_row_params`, used by Apply, `EXISTS`/`COUNT`/`COLLECT` bodies and pattern comprehensions), `COLLECT { }` results and recursive CTEs, returns `Result`: a column whose type the canonical `arrow_to_value` cannot decode, or a typed payload that fails, is a query error rather than `NULL`. An untyped `LargeBinary` that is neither CypherValue nor JSON is returned as `Value::Bytes`, matching `arrow_to_value`'s contract, instead of `NULL`. `typed_large_list_to_cv_array` decodes element types it has no fast arm for (the `Null` type of `[]`, `Date32`) through `arrow_to_value` instead of rejecting them, so `c.v = []` and `c.v = [date(…)]` with `c.v` a CypherValue run.
 
-### Graph Runtime (`uni-common` + `uni-algo` + `uni`)
+### Graph Runtime (`uni-store` runtime + `uni`)
 
 The runtime manages in-memory graph state and write coordination:
 
@@ -215,7 +215,7 @@ The runtime manages in-memory graph state and write coordination:
 Persistent storage using Lance (Arrow-native columnar format):
 
 - **VertexDataset**: Per-label Lance tables (`vertices_{label}`) with schema-defined columns plus JSONB overflow.
-- **EdgeDataset**: Per-type Lance tables (`edges_{type}`) with endpoint VIDs and properties.
+- **EdgeDataset**: The main `edges` Lance table with endpoint VIDs and properties; per-type L1 runs live in the delta tables.
 - **AdjacencyDataset**: Chunked CSR format for O(1) neighbor lookups.
 - **DeltaDataset**: LSM-style L1 sorted runs with Insert/Delete operations.
 - **Indexes**: UID (SHA3-256), scalar (BTree/Hash/Bitmap), vector (HNSW/IVF-PQ), full-text (BM25), inverted, JSON FTS.
@@ -228,12 +228,19 @@ crates/
 ├── uni/            # Main library crate — public API, Session, Transaction, UniBuilder
 ├── uni-common/     # Identity (Vid/Eid/UniId), Schema, DataType, Config, Snapshots, SimpleGraph
 ├── uni-store/      # Lance datasets, CSR adjacency, L0Buffer, Writer, WAL, Indexes
-├── uni-algo/       # 42 graph algorithms, GraphProjection
-├── uni-query/      # Query executor, DataFusion integration, pushdown, UDFs
+├── uni-algo/       # 37 native graph algorithms, GraphProjection
+├── uni-query/      # Query executor, DataFusion integration, pushdown, Locy runtime
+├── uni-query-functions/ # Leaf modules split from uni-query: UDFs, datetime/spatial, expression eval
 ├── uni-cypher/     # Cypher parser (pest-based), Locy parser
 ├── uni-crdt/       # 8 CRDT types with merge semantics
 ├── uni-locy/       # Locy compiler (stratify, wardedness, typecheck, orchestrator)
-├── uni-cli/        # CLI (import, query, repl, snapshot)
+├── uni-locy-oracle/ # Naive-Datalog reference oracle for differential-testing Locy
+├── uni-btic/       # Binary Temporal Interval Codec
+├── uni-sparse-vector/ # Learned-sparse vector type, codec and dot-product kernel
+├── uni-bulk/       # Bulk ingestion (BulkWriter, StreamingAppender, deferred index rebuild)
+├── uni-fork/       # Fork diff/promote engine and background fork maintenance
+├── uni-sidecar/    # Atomic JSON sidecar for _system/ state files
+├── uni-cli/        # CLI (import, query, repl, snapshot, plugin)
 ├── uni-tck/        # OpenCypher TCK compliance tests
 ├── uni-locy-tck/   # Locy TCK tests
 ├── uni-plugin/             # Plugin framework foundation — traits, manifest, capability, registry, lifecycle
@@ -249,6 +256,7 @@ crates/
 └── uni-plugin-conformance/ # 6-probe loader conformance suite
 bindings/
 ├── uni-db/         # PyO3 Python bindings (sync + async)
+├── uni-db-{cuda,metal,onnx,onnx-cuda,onnx-metal}/ # Feature-variant wheels sharing uni-db's source
 └── uni-pydantic/   # Pydantic OGM layer
 ```
 
@@ -261,20 +269,35 @@ graph TB
     uni --> uni-algo
     uni --> uni-locy
     uni --> uni-common
+    uni --> uni-fork
+    uni --> uni-bulk
+    uni --> uni-query-functions
+
+    uni-fork[uni-fork<br/>Fork Diff + Promote] --> uni-query
+    uni-fork --> uni-store
+    uni-bulk[uni-bulk<br/>Bulk Ingest] --> uni-store
 
     uni-query[uni-query<br/>Query Executor] --> uni-cypher
+    uni-query --> uni-query-functions
+    uni-query-functions[uni-query-functions<br/>UDFs + Expression Eval] --> uni-store
+    uni-query-functions --> uni-cypher
     uni-query --> uni-store
     uni-query --> uni-common
     uni-query --> uni-algo
     uni-query --> uni-locy
 
     uni-store[uni-store<br/>Storage Layer] --> uni-common
-    uni-algo[uni-algo<br/>Algorithms] --> uni-common
+    uni-store --> uni-crdt
+    uni-algo[uni-algo<br/>Algorithms] --> uni-store
+    uni-algo --> uni-common
     uni-locy[uni-locy<br/>Locy Compiler] --> uni-cypher
     uni-locy --> uni-common
     uni-cypher[uni-cypher<br/>Cypher Parser] --> uni-common
-    uni-crdt[uni-crdt<br/>CRDT Types]
-    uni-common[uni-common<br/>Identity + Schema + Config]
+    uni-crdt[uni-crdt<br/>CRDT Types] --> uni-plugin
+    uni-common[uni-common<br/>Identity + Schema + Config] --> uni-btic
+    uni-common --> uni-sparse-vector
+    uni-btic[uni-btic<br/>Temporal Intervals]
+    uni-sparse-vector[uni-sparse-vector<br/>Sparse Vectors]
 
     uni-db[uni-db<br/>Python PyO3] --> uni
     uni-pydantic[uni-pydantic<br/>Pydantic OGM] --> uni-db
@@ -283,14 +306,14 @@ graph TB
     uni --> uni-plugin
     uni-query --> uni-plugin
     uni-plugin[uni-plugin<br/>Plugin Framework Foundation] --> uni-common
-    uni-plugin-builtin[uni-plugin-builtin + 8 loader/source crates] --> uni-plugin
+    uni-plugin-builtin[uni-plugin-builtin + 9 loader/host crates] --> uni-plugin
 ```
 
 ## Key Dependencies
 
 | Crate | Purpose |
 |---|---|
-| `lance` | Columnar storage with versioning, vector indexes, full-text search. Pinned at `13.0.0` in the root `Cargo.toml`. **`lancedb` is not a dependency** — it was dropped; only the `lance` core crate is used |
+| `lance` | Columnar storage with versioning, vector indexes, full-text search. Pinned at `14.0.2` in the root `Cargo.toml`. **`lancedb` is not a dependency** — it was dropped; only the `lance` core crate is used |
 | `arrow` / `arrow-array` | In-memory columnar data format (RecordBatch, Array types) |
 | `datafusion` | Query engine — physical planning, expression evaluation, aggregation |
 | `pest` / `pest_derive` | PEG parser generator powering `uni-cypher`'s Cypher and Locy grammars |
@@ -342,7 +365,7 @@ sequenceDiagram
     Writer->>L0: complete_flush (remove from pending)
     Writer->>WAL: truncate (LSN ≤ flushed)
 
-    Note over L1,L2: Background compaction when L1 runs ≥ 4
+    Note over L1,L2: Background compaction when L1 runs ≥ 8
 
     L1->>L2: merge sorted runs → base tables
     L1->>CSR: rebuild adjacency CSR
@@ -638,9 +661,9 @@ Uni supports a rich type system mapped to Apache Arrow types for columnar storag
 
 | Uni Type | Arrow Type | Description |
 |---|---|---|
-| `Point(Geographic)` | Struct(`latitude`, `longitude`, `crs`: Float64) | WGS84 geographic coordinates |
-| `Point(Cartesian2D)` | Struct(`x`, `y`, `crs`: Float64) | 2D Cartesian point |
-| `Point(Cartesian3D)` | Struct(`x`, `y`, `z`, `crs`: Float64) | 3D Cartesian point |
+| `Point(Geographic)` | Struct(`latitude`, `longitude`: Float64, `crs`: Utf8) | WGS84 geographic coordinates |
+| `Point(Cartesian2D)` | Struct(`x`, `y`: Float64, `crs`: Utf8) | 2D Cartesian point |
+| `Point(Cartesian3D)` | Struct(`x`, `y`, `z`: Float64, `crs`: Utf8) | 3D Cartesian point |
 
 ### CRDT Types
 
@@ -1137,11 +1160,11 @@ db.schema() \
         .property("name", DataType.STRING()) \
         .property("age", DataType.INT64()) \
         .property_nullable("email", DataType.STRING()) \
-        .vector("embedding", 384) \
+        .property_nullable("embedding", DataType.vector(384)) \
     .done() \
     .edge_type("KNOWS", ["Person"], ["Person"]) \
         .property("since", DataType.DATE()) \
-        .property("weight", DataType.FLOAT64()) \
+        .property_nullable("weight", DataType.FLOAT64()) \
     .apply()
 ```
 
@@ -1183,7 +1206,7 @@ CREATE EDGE TYPE MANAGES FROM Person TO Person
 CREATE EDGE TYPE PURCHASED (quantity INTEGER) FROM Customer TO Product
 
 // BAD: Ambiguous direction
-CREATE EDGE TYPE RELATED_TO  // Which direction means what?
+CREATE EDGE TYPE RELATED_TO FROM Entity TO Entity  // Which direction means what?
 ```
 
 ### Property Type Selection
@@ -1249,48 +1272,53 @@ Use multi-labels when an entity naturally belongs to multiple categories. Avoid 
 When you open or create a Uni database at a path (e.g., `./my-graph`), the following directory tree is created on disk (or in the object store):
 
 ```
-my-graph/                                   # Database root (the URI you pass to Uni::open)
-├── schema.json                             # Legacy schema location (may exist in older DBs)
+my-graph/                                   # Database root R (the URI you pass to Uni::open)
+├── catalog/                                # Store metadata
+│   ├── schema.json                         # Authoritative schema definition
+│   ├── layout.json                         # Layout marker (standard / flat)
+│   └── ...                                 # locy_rules.json, fork_registry.json, fork_schemas/, ...
 │
-└── storage/                                # All persistent data lives here
+├── wal/                                    # Write-Ahead Log segments
+│   ├── 00000000000000000001_<uuid>.wal     # WAL segment (JSON-serialized mutations)
+│   ├── 00000000000000000002_<uuid>.wal     # LSN zero-padded to 20 digits
+│   └── ...                                 # Lexicographic ordering = LSN ordering
+│
+├── id_allocator.json                       # Reserved VID/EID ranges
+├── writer.lock                             # One-writer OS lock (local stores)
+│
+└── storage/                                # Tables and indexes
     │
-    ├── catalog/                            # Metadata & snapshot management
-    │   ├── schema.json                     # Authoritative schema definition
+    ├── catalog/                            # Snapshot management
     │   ├── latest                          # File containing current snapshot UUID
     │   ├── named_snapshots.json            # { "name" → "snapshot_id" } mapping
     │   └── manifests/                      # One JSON file per snapshot
     │       ├── a1b2c3d4-....json           # SnapshotManifest (versions, counts, etc.)
     │       └── e5f6g7h8-....json
     │
-    ├── wal/                                # Write-Ahead Log segments
-    │   ├── 00000000000000000001_<uuid>.wal  # WAL segment (JSON-serialized mutations)
-    │   ├── 00000000000000000002_<uuid>.wal  # LSN zero-padded to 20 digits
-    │   └── ...                              # Lexicographic ordering = LSN ordering
-    │
-    ├── vertices_Person/                    # Lance table: per-label vertex data
+    ├── vertices_Person.lance/              # Lance table: per-label vertex data
     │   ├── _versions/                      # Lance versioning metadata
-    │   ├── data/                           # Arrow IPC data files (*.lance)
+    │   ├── data/                           # Data files (*.lance)
     │   └── _indices/                       # Lance-managed indexes
     │
-    ├── vertices_Document/                  # Another per-label table
+    ├── vertices_Document.lance/            # Another per-label table
     │   └── ...
     │
-    ├── vertices/                           # Lance table: unified main vertex table
+    ├── vertices.lance/                     # Lance table: unified main vertex table
     │   └── ...                             # (all vertices regardless of label)
     │
-    ├── edges/                              # Lance table: unified main edge table
+    ├── edges.lance/                        # Lance table: unified main edge table
     │   └── ...                             # (all edges regardless of type)
     │
-    ├── deltas_KNOWS_fwd/                   # Lance table: forward edge deltas
+    ├── deltas_KNOWS_fwd.lance/             # Lance table: forward edge deltas
     │   └── ...                             # (sorted by src_vid)
     │
-    ├── deltas_KNOWS_bwd/                   # Lance table: backward edge deltas
+    ├── deltas_KNOWS_bwd.lance/             # Lance table: backward edge deltas
     │   └── ...                             # (sorted by dst_vid)
     │
-    ├── adjacency_KNOWS_fwd/                # Lance table: forward CSR adjacency
+    ├── adjacency_KNOWS_fwd.lance/          # Lance table: forward CSR adjacency
     │   └── ...                             # (row-per-vertex with neighbor lists)
     │
-    ├── adjacency_KNOWS_bwd/                # Lance table: backward CSR adjacency
+    ├── adjacency_KNOWS_bwd.lance/          # Lance table: backward CSR adjacency
     │   └── ...
     │
     └── indexes/                            # Secondary indexes
@@ -1300,30 +1328,33 @@ my-graph/                                   # Database root (the URI you pass to
         │   └── Document/
         │       └── index.lance/
         │
-        ├── idx_Person___email/             # JSON path index (label___path)
-        │   └── ...                         # Special chars → underscore
+        ├── idx_Person___email/             # JSON path index for $.email
+        │   └── ...                         # (idx_{label}_{path}, special chars → _)
         │
-        └── Person_tags_inverted/           # Inverted index (label_property_inverted)
-            └── ...                         # Term → VID postings
+        └── Person/
+            └── tags_inverted/              # Inverted index ({label}/{property}_inverted)
+                └── ...                     # Term → VID postings
 ```
 
 ### Path Construction Patterns
 
-Table names are constructed by `LanceDbStore` methods:
+Table names are constructed by free functions in `crates/uni-store/src/backend/table_names.rs`
+(Lance adds the `.lance` suffix on disk):
 
 ```rust
-LanceDbStore::vertex_table_name("Person")          // → "vertices_Person"
-LanceDbStore::delta_table_name("KNOWS", "fwd")     // → "deltas_KNOWS_fwd"
-LanceDbStore::delta_table_name("KNOWS", "bwd")     // → "deltas_KNOWS_bwd"
-LanceDbStore::adjacency_table_name("KNOWS", "fwd") // → "adjacency_KNOWS_fwd"
+table_names::vertex_table_name("Person")          // → "vertices_Person"
+table_names::delta_table_name("KNOWS", "fwd")     // → "deltas_KNOWS_fwd"
+table_names::delta_table_name("KNOWS", "bwd")     // → "deltas_KNOWS_bwd"
+table_names::adjacency_table_name("KNOWS", "fwd") // → "adjacency_KNOWS_fwd"
 ```
 
 Index paths:
 
 ```
 UID Index:      storage/indexes/uni_id_to_vid/{label}/index.lance
-JSON Path:      storage/indexes/idx_{label}___{safe_path}
-Inverted:       storage/indexes/{label}_{property}_inverted
+JSON Path:      storage/indexes/idx_{label}_{safe_path}
+Inverted:       storage/indexes/{label}/{property}_inverted
+Sparse:         storage/indexes/{label}/{property}_sparse
 ```
 
 ### Storage Modes
@@ -1534,7 +1565,7 @@ graph TB
     L0B -->|"Flush"| MT
     WAL -.->|"Durability"| L0B
 
-    VT -->|"Compact<br/>(≥4 L1 runs)"| BT
+    VT -->|"Compact<br/>(≥8 L1 runs)"| BT
     DT -->|"Compact"| CSR
     DT -->|"Compact"| BT
 
@@ -1615,16 +1646,14 @@ into a `Utf8` child, and the read failed against the declared type.
 
 ### Overflow Properties (Schemaless)
 
-Properties not defined in the schema are stored in the `overflow_json` column as JSONB binary. Queries against overflow properties are automatically rewritten to use Lance JSONB functions (`json_get_string`, `json_get_int`, etc.).
+Properties not defined in the schema are stored in the `overflow_json` column as JSONB binary. When a query reads or filters on a property the label does not declare, the planner adds `overflow_json` to the scan's projection and the property is extracted from it during execution; the filter is not rewritten into Lance JSONB functions.
 
 Read-your-writes semantics apply to schemaless properties too: direct property access and `properties(node)` consult the L0 overlay before storage, so `SET n.extra = 42` is visible immediately without an explicit flush. The same overflow properties are preserved through flush and later compaction cycles.
 
 ```cypher
-// This property is in overflow_json if not in schema
+// This property is in overflow_json if not in schema;
+// the scan projects overflow_json and the filter reads n.nickname from it
 MATCH (n:Person) WHERE n.nickname = 'Bob' RETURN n
-
-// Internally rewritten to:
-// ... WHERE json_get_string(overflow_json, 'nickname') = 'Bob'
 ```
 
 ### A declaration types a property only on its own label
@@ -2003,7 +2032,7 @@ of these caches.
 
 ### L0 → L1 Flush
 
-Triggered when `mutation_count >= auto_flush_threshold` (default: 10,000) or `auto_flush_interval` (default: 5s) elapses with `auto_flush_min_mutations` (default: 100) met:
+Triggered when `mutation_count >= auto_flush_threshold` (default: 10,000) or `auto_flush_interval` (default: 5s) elapses with `auto_flush_min_mutations` (default: 1) met:
 
 1. Flush WAL to durable storage → capture LSN
 2. Rotate L0: old → `pending_flush` list, new empty L0 → `current`
@@ -2017,7 +2046,7 @@ Triggered when `mutation_count >= auto_flush_threshold` (default: 10,000) or `au
 
 Two refinements to this sequence:
 
-- **Async flush** (`UniConfig.async_flush`): the L1 streaming phase (steps
+- **Async flush** (`UniConfig.async_flush_enabled`): the L1 streaming phase (steps
   3–7) runs off the commit path through a `FlushCoordinator` that bounds
   in-flight flushes with a semaphore and finalizes them in rotate order, so
   the snapshot-manifest chain stays linear even when flushes complete out of
@@ -2030,7 +2059,7 @@ Two refinements to this sequence:
 - **`flush_to_l1` is a synchronization barrier.** Fork setup, shutdown and test
   fixtures rely on it meaning *all writes are now durably in Lance*. With async
   flush on it first drains in-flight streams, bounded by `flush_drain_timeout`
-  (default 120s). **A drain that does not finish is an error**, never a silent
+  (default 900s). **A drain that does not finish is an error**, never a silent
   partial flush.
 
   This was a live defect: the drain was previously bounded by
@@ -2496,7 +2525,7 @@ Step 4 spans two tiers, and both conjoin `_version <= hwm` when the `PropertyMan
 | **Cloud Config** | Set appropriate timeouts per provider (S3: higher read timeout, GCS: higher connect timeout) |
 | **Flush Tuning** | Write-heavy: raise `auto_flush_threshold` to 50k+. Read-heavy: lower to 5k for fresher reads |
 | **BulkWriter for Imports** | Always use BulkWriter for initial data loading — bypasses WAL, defers indexes, 10-100x faster |
-| **Monitor L1 Runs** | If L1 run count grows above `max_l1_runs` (4), compaction may be falling behind |
+| **Monitor L1 Runs** | If L1 run count grows above `max_l1_runs` (8), compaction may be falling behind |
 
 ## Storage Anti-Patterns
 
@@ -2545,10 +2574,10 @@ graph TB
 
 | Trigger | Condition | When |
 |---|---|---|
-| **Growth** | Row count increased by 20-50% since last build | After flush |
-| **Churn** | Update/delete ratio exceeds threshold | After compaction |
-| **Bulk** | Always after bulk ingest commit | After BulkWriter.commit() |
-| **Time** | Optional periodic maintenance window | Configurable |
+| **Growth** | Row count grew by `growth_trigger_ratio` (default 0.5) since last build | After flush, when `auto_rebuild_enabled` |
+| **Age** | Index older than `max_index_age` (default off) | After flush, when `auto_rebuild_enabled` |
+
+Bulk loads rebuild their deferred indexes at commit (`BulkWriter`), outside these triggers.
 
 ## Index Types
 
@@ -2590,7 +2619,7 @@ For approximate nearest neighbor (ANN) search on embedding vectors:
 
 | Type | Best For | Build Parameters | Query Knobs |
 |---|---|---|---|
-| **IVF-PQ** | the default; best recall/QPS with `refine_factor` | `num_partitions`, `num_sub_vectors`, `bits` | `nprobes`, **`refine_factor`** |
+| **IVF-PQ** | the default; best recall/QPS with `refine_factor` | `partitions`, `sub_vectors`, `num_bits` | `nprobes`, **`refine_factor`** |
 | **HNSW** | high recall without a refine pass | `m`, `ef_construction`, `partitions` | `ef_search` |
 | **Flat** | small corpora, exact search | None (brute force) | None |
 
@@ -2635,11 +2664,11 @@ Three things this replaces earlier guidance with:
 ```cypher
 // Create vector index with HNSW
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw' }
+  OPTIONS { metric: 'cosine', type: 'hnsw' }
 
 // Create vector index with IVF-PQ for large datasets
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'l2', type: 'ivf_pq', num_partitions: 256 }
+  OPTIONS { metric: 'l2', type: 'ivf_pq', partitions: 256 }
 ```
 
 **Distance Metrics:**
@@ -2650,7 +2679,7 @@ CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
 | `L2` | Squared Euclidean distance | `1.0 / (1.0 + d)` | (0, 1] | Raw embeddings, spatial data |
 | `Dot` | Negative dot product | Pass-through | Unbounded | Maximum inner product search |
 
-Score conversion is **metric-aware**: `uni.vector.query`, `uni.search`, and `similar_to()` all use the same `calculate_score(distance, metric)` function to normalize raw Lance distances into similarity scores, regardless of which metric the vector index was created with.
+Score conversion is **metric-aware**: `uni.vector.query` and `uni.search` use the same `calculate_score(distance, metric)` function to normalize raw Lance distances into similarity scores, regardless of which metric the vector index was created with. `similar_to()` on two vectors (`score_vectors`) differs for cosine: it returns the raw cosine similarity in [-1, 1], not `(2 - d) / 2`; L2 uses `calculate_score` and dot the raw dot product.
 
 **Sparse (learned-sparse / SPLADE) index kind.** Beyond the dense ANN families above, a vector index may be created with `type: 'sparse'` to index high-dimensional, mostly-zero `SparseVector` columns (SPLADE-style term-weight vectors). It is backed by an inverted term→(VID, weight) structure rather than HNSW/IVF graphs, and scores by sparse dot product. One knob is specific to it:
 
@@ -2687,7 +2716,7 @@ CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
 
 ### Inverted Indexes
 
-Term-to-VID mapping for `ANY(x IN list WHERE x IN allowed)` query patterns:
+Term-to-VID mapping intended for `ANY(x IN list WHERE x IN allowed)` query patterns. Currently the planner never emits an inverted-index lookup (`LogicalPlan::InvertedIndexLookup` is not constructed), so these patterns run as scans; and `CREATE FULLTEXT INDEX ... OPTIONS {normalize, max_terms_per_doc}` builds a FULLTEXT index and ignores those options.
 
 ```rust
 InvertedIndex {
@@ -2743,24 +2772,24 @@ stateDiagram-v2
     end note
 
     note right of BUILDING
-        Invisible until committed
-        Old ONLINE still serves queries
+        Not used by queries
+        Queries fall back to a scan
     end note
 
     note right of FAILED
-        Never replaces current ONLINE
+        Not used by queries
         Retry with backoff
     end note
 ```
 
-**Index Status Gating**: The query planner only uses indexes with `Online` status. Indexes in `Building`, `Stale`, or `Failed` states are invisible to queries — the old `Online` version continues serving until a rebuild succeeds. This means index rebuilds are zero-downtime: the new index is built in the background and atomically swapped in on success.
+**Index Status Gating**: The query planner only uses indexes with `Online` status. A rebuild sets the label's index definitions to `Building` (then `Stale` on a retryable failure, `Failed` once retries are exhausted), so while it runs, queries that would use the index fall back to a scan; results stay correct, only slower. The index is used again once the rebuild succeeds and marks it `Online`.
 
 | Status | Query Visible | Writes Trigger Rebuild | Description |
 |---|---|---|---|
 | `Online` | Yes | No | Up-to-date and serving queries |
-| `Building` | No (old Online serves) | Queued | Rebuild in progress |
-| `Stale` | No (old Online serves) | Queued | Scheduled for rebuild after transient failure |
-| `Failed` | No (old Online serves) | Retry if under max_retries | Exhausted retry attempts |
+| `Building` | No (scan fallback) | Queued | Rebuild in progress |
+| `Stale` | No (scan fallback) | Queued | Scheduled for rebuild after transient failure |
+| `Failed` | No (scan fallback) | Retry if under max_retries | Exhausted retry attempts |
 
 **An index declared before the label has data is built at its first flush.**
 With no table to build against, `create_scalar_index`, `create_fts_index` and
@@ -3041,8 +3070,7 @@ graph TB
     RNG -->|No| VEC{Vector Similarity?}
     VEC -->|Yes| SIZE{Dataset Size?}
     SIZE -->|"< 10k"| FLAT[Flat Index]
-    SIZE -->|"< 1M"| HNSW[HNSW Index]
-    SIZE -->|"> 1M"| IVFPQ[IVF-PQ Index]
+    SIZE -->|"larger"| IVFPQ[IVF-PQ Index<br/>default, refine_factor<br/>or HNSW]
     VEC -->|No| TXT{Text Search?}
     TXT -->|Yes| BM25[Full-Text BM25]
     TXT -->|No| LOW{Low Cardinality?}
@@ -3055,8 +3083,8 @@ graph TB
 | Practice | Details |
 |---|---|
 | **Index every WHERE property** | Properties used in WHERE clauses should have scalar indexes |
-| **HNSW for < 1M vectors** | Best recall-latency trade-off for moderate datasets |
-| **IVF-PQ for > 1M vectors** | Memory-efficient with acceptable recall |
+| **IVF-PQ (the default) with `refine_factor`** | Beat HNSW on recall and throughput at 1M in the SIFT measurement above; the size-based "HNSW < 1M, IVF-PQ > 1M" rule does not hold |
+| **HNSW when no refine pass is wanted** | High recall from `ef_search` 25–50 alone |
 | **Match metric to model** | Use Cosine for models with normalized output (most), L2 for raw |
 | **BTree for range queries** | ORDER BY, >, <, >=, <=, STARTS WITH |
 
@@ -3254,18 +3282,19 @@ membership in the CTE frontier in leading MATCH clauses is planned as a
 parameterized VID restriction, allowing the existing scan to visit only frontier
 nodes rather than rescanning the label each round.
 
-Recursive common table expressions:
+Recursive common table expressions (`WITH RECURSIVE name AS (...)`, no column list; the name is the set of values the single returned column produces):
 
 <!-- doctest: skip -->
 ```cypher
-WITH RECURSIVE reachable(vid, depth) AS (
-    MATCH (n:Person {name: 'Alice'}) RETURN id(n) AS vid, 0 AS depth
-    UNION ALL
-    MATCH (a)-[:KNOWS]->(b)
-    WHERE id(a) IN reachable.vid AND reachable.depth < 5
-    RETURN id(b) AS vid, reachable.depth + 1 AS depth
+WITH RECURSIVE reachable AS (
+    MATCH (n:Person {name: 'Alice'}) RETURN n
+    UNION
+    MATCH (a:Person)-[:KNOWS]->(b:Person)
+    WHERE a IN reachable
+    RETURN b
 )
-RETURN DISTINCT vid, min(depth) AS min_depth
+MATCH (p:Person) WHERE p IN reachable
+RETURN p.name
 ```
 
 ### RETURN
@@ -3541,7 +3570,7 @@ RETURN n.name, n.salary, n.department,
 
 | Function | Returns | Description |
 |---|---|---|
-| `id(node)` | UInt64 | Internal VID or EID |
+| `id(node)` | Int64 | Internal VID or EID (signed bit representation of the stored UInt64) |
 | `created_at(node_or_rel)` | DateTime (UTC, ns) | Wall-clock time when the row was first inserted. Read-only, system-managed. |
 | `updated_at(node_or_rel)` | DateTime (UTC, ns) | Most-recent write-touch time. Advances on any CREATE/SET/MERGE that targets the row, including same-value writes. |
 | `type(rel)` | String | Edge type name |
@@ -3626,7 +3655,7 @@ ORDER BY last_touched DESC LIMIT 10
 | `tail(list)` | List | All except first |
 | `reverse(list)` | List | Reverse order |
 | `range(start, end, step?)` | List | Integer range; null if any argument is null (all four evaluators: UDF, UNWIND, fallback, Locy) |
-| `index(list, elem)` | Integer | Position of element |
+| `index(list, i)` | Value | Element at index `i` (as `list[i]`) |
 | `coalesce(a, b, ...)` | Value | First non-null |
 
 ### Temporal Functions
@@ -3635,13 +3664,15 @@ ORDER BY last_touched DESC LIMIT 10
 
 | Function | Returns |
 |---|---|
-| `date(year, month, day)` / `date(string)` | Date |
-| `time(hour, min, sec, tz?)` | Time |
-| `localtime(hour, min, sec)` | LocalTime |
-| `datetime(year, month, day, hour, min, sec, tz)` | DateTime |
-| `localdatetime(year, month, day, hour, min, sec)` | LocalDateTime |
-| `duration(months, days, seconds, nanos)` | Duration |
+| `date(string)` / `date({year, month, day})` | Date |
+| `time(string)` / `time({hour, minute, second, timezone})` | Time |
+| `localtime(string)` / `localtime({hour, minute, second})` | LocalTime |
+| `datetime(string)` / `datetime({year, month, day, hour, minute, second, timezone})` | DateTime |
+| `localdatetime(string)` / `localdatetime({year, month, day, hour, minute, second})` | LocalDateTime |
+| `duration(string)` / `duration({months, days, seconds, nanoseconds})` | Duration |
 | `btic(literal)` | Btic — temporal interval from ISO 8601 string |
+
+Constructors take a string or a map; positional arguments are rejected.
 
 **BTIC literal formats:** `btic('1985')` (year), `btic('1985-03')` (month), `btic('1939/1945')` (range), `btic('~1985')` (approximate), `btic('2020-03/')` (ongoing), `btic('/')` (unbounded).
 
@@ -3650,9 +3681,9 @@ ORDER BY last_touched DESC LIMIT 10
 | Function | Returns |
 |---|---|
 | `duration.between(start, end)` | Duration |
-| `duration.inMonths()` | Integer |
-| `duration.inDays()` | Integer |
-| `duration.inSeconds()` | Float |
+| `duration.inMonths(start, end)` | Duration (whole months) |
+| `duration.inDays(start, end)` | Duration (whole days) |
+| `duration.inSeconds(start, end)` | Duration (seconds) |
 | `datetime.fromepoch(seconds)` | DateTime |
 | `datetime.fromepochmillis(millis)` | DateTime |
 
@@ -3741,12 +3772,10 @@ RETURN btic_span_agg(e.period) AS total_span
 
 | Function | Returns | Description |
 |---|---|---|
-| `bitwise_and(x, y)` | Integer | Bitwise AND |
-| `bitwise_or(x, y)` | Integer | Bitwise OR |
-| `bitwise_xor(x, y)` | Integer | Bitwise XOR |
-| `bitwise_not(x)` | Integer | Bitwise NOT |
-| `shift_left(x, n)` | Integer | Left shift |
-| `shift_right(x, n)` | Integer | Right shift |
+| `uni.bitwise.and(x, y)` | Integer | Bitwise AND |
+| `uni.bitwise.or(x, y)` | Integer | Bitwise OR |
+| `uni.bitwise.xor(x, y)` | Integer | Bitwise XOR |
+| `uni.bitwise.not(x)` | Integer | Bitwise NOT |
 
 ## Relationship Property Maps
 
@@ -4706,7 +4735,7 @@ receive the requested distance metric explicitly, including on flat scans.
 <!-- doctest: skip -->
 ```cypher
 CALL uni.vector.query(label, property, query_vector, k [, filter] [, threshold] [, options])
-YIELD node, score, distance, vector_score, rerank_score, vid
+YIELD node, vid, distance, score, rerank_score
 ```
 
 | Parameter | Type | Description |
@@ -4860,7 +4889,7 @@ type it does not decode itself now goes to the storage layer's
 
 | Source Type | Query Type | Mode | Behavior |
 |---|---|---|---|
-| Vector property | Vector literal | **Vector** | Metric-aware similarity per row (cosine, L2, or dot — resolved from vector index) |
+| Vector property | Vector literal | **Vector** | Metric-aware similarity per row (metric resolved from the vector index): raw cosine in [-1, 1], `1 / (1 + d)` for L2, raw dot product |
 | Vector property (with embedding config) | String literal | **AutoEmbed** | Auto-embeds query string once, then metric-aware similarity per row |
 | String property (with FTS index) | String literal | **FTS** | BM25 full-text search, normalized via `score / (score + fts_k)` saturation to [0, 1] |
 
@@ -5011,15 +5040,15 @@ The `GraphExecutionContext` and `SessionContext` are available in `NativeExecuti
 
 Uni supports **learned-sparse retrieval** (SPLADE-style): instead of a dense embedding, a model emits a high-dimensional, mostly-zero weight vector over a term vocabulary. Each non-zero entry is a `(term_id, weight)` pair, and relevance is the **sparse dot product** of query and document vectors. Sparse vectors complement dense vectors — they capture exact-term signal (lexical match) that dense embeddings tend to smear away — and are a first-class arm of [Hybrid Search](#hybrid-search).
 
-### The `sparse_vector(N)` Type
+### The `SPARSE_VECTOR(N)` Type
 
-A sparse-vector property is declared with the Cypher type `sparse_vector(N)` (Rust: `DataType::SparseVector { dimensions: N }`), where `N` is the **term-space cardinality** — the size of the vocabulary, i.e. `max_term_id + 1`. It bounds the index space; the value itself stores only its non-zero entries.
+A sparse-vector property is declared with the DDL type `SPARSE_VECTOR(N)` (Rust: `DataType::SparseVector { dimensions: N }`), where `N` is the **term-space cardinality** — the size of the vocabulary, i.e. `max_term_id + 1`. It bounds the index space; the value itself stores only its non-zero entries.
 
 ```cypher
-CREATE (:Doc {
-  content: 'graph databases for beginners',
-  emb: sparse_vector(30522)        // 30 522-term vocabulary (e.g. BERT WordPiece)
-})
+CREATE LABEL Doc (
+  content STRING,
+  emb SPARSE_VECTOR(30522)         // 30 522-term vocabulary (e.g. BERT WordPiece)
+)
 ```
 
 In the Rust schema builder:
@@ -5038,8 +5067,9 @@ db.schema()
 A sparse-vector value is a `{indices, values}` map: `indices` is the list of non-zero term ids, `values` the parallel list of their weights. The two lists must be the same length; `indices` are term ids in `[0, N)`.
 
 ```cypher
-// Literal write of a 3-term sparse vector
-CREATE (:Doc {emb: {indices: [12, 884, 9001], values: [0.71, 0.33, 1.20]}})
+// Write a 3-term sparse vector passed as a SparseVector parameter
+// (Python: uni_db.SparseVector([12, 884, 9001], [0.71, 0.33, 1.20]))
+CREATE (:Doc {emb: $emb})
 ```
 
 The same `{indices, values}` shape is accepted as the query value for `uni.sparse.query` (a native sparse vector is also accepted directly).
@@ -5080,9 +5110,9 @@ YIELD vid, score, rerank_score
 | `k` | Integer | Number of results |
 | `filter` | String (optional) | WHERE predicate string |
 | `threshold` | Float (optional) | Minimum score |
-| `options` | Map (optional) | Reranker configuration (see [Cross-Encoder Reranking](#cross-encoder-reranking)) |
+| `options` | Map (optional) | `over_fetch`: candidate multiplier for the exact rescore. A `reranker` option is not applied |
 
-The YIELD columns are exactly **`vid`, `score`, `rerank_score`** — there is no `sparse_score` or `distance` column here (those names belong to the hybrid `uni.search` YIELD). **`score` is the raw sparse dot product** of the query and stored vectors (not a normalized [0, 1] similarity), with larger meaning more relevant. `rerank_score` is populated only when a cross-encoder reranker is configured in `options`.
+The YIELD columns are exactly **`vid`, `score`, `rerank_score`** — there is no `sparse_score` or `distance` column here (those names belong to the hybrid `uni.search` YIELD). **`score` is the raw sparse dot product** of the query and stored vectors (not a normalized [0, 1] similarity), with larger meaning more relevant. `rerank_score` carries the same exact dot product as `score`.
 
 ```cypher
 // Sparse retrieval over a SPLADE column, top 10
@@ -5114,10 +5144,10 @@ The query is **MVCC- and L0-aware**: candidates retrieved from the index are exa
 <!-- doctest: skip -->
 ```cypher
 CALL uni.fts.query(label, property, search_term, k [, filter] [, threshold] [, options])
-YIELD node, score, fts_score, rerank_score, vid
+YIELD node, vid, score, rerank_score
 ```
 
-BM25-based full-text search. Scores are normalized to 0-1 relative to the top match. Supports optional cross-encoder reranking via the `options` map.
+BM25-based full-text search. `score` is BM25 squashed to [0, 1) as `bm25 / (bm25 + fts_k)` (`fts_k` defaults to 1.0 and is set with `options.fts_k`); `threshold` is a minimum on that scale. Supports optional cross-encoder reranking via the `options` map; without a reranker `rerank_score` is NULL. Query terms are combined with OR; currently `NOT` and phrase queries have no effect.
 
 ```cypher
 CALL uni.fts.query('Article', 'content', 'distributed graph database', 10)
@@ -5129,13 +5159,13 @@ RETURN node.title, score
 
 ```cypher
 CREATE FULLTEXT INDEX article_fts FOR (a:Article) ON EACH [a.content] OPTIONS {
-  analyzer: 'standard', language: 'English', stemmer: 'english',
-  stopwords: 'english', ascii_folding: true, lower_case: true,
+  analyzer: 'standard', language: 'English', stemmer: true,
+  stopwords: true, ascii_folding: true, lower_case: true,
   max_token_length: 40, ngram_min: 2, ngram_max: 3
 }
 ```
 
-18-language stemming and stop-words plus ngram tokenization are supported (`TokenizerConfig::Analyzer`); CJK requires dictionary files under `LANCE_LANGUAGE_MODEL_HOME`.
+`stemmer` is a bool and `stopwords` a bool or a list of stop words; the language comes from `language`. 18-language stemming and stop-words plus ngram tokenization (default `ngram_min` 3) are supported (`TokenizerConfig::Analyzer`); CJK requires dictionary files under `LANCE_LANGUAGE_MODEL_HOME`.
 
 ### Unflushed rows in a search
 
@@ -5307,7 +5337,7 @@ The `properties` argument is a map `{vector, fts, sparse}` selecting which prope
 | `over_fetch` | Float (default: 2.0) | Over-fetch factor for pagination |
 | `sparse_query` | Map or SparseVector | Query vector for the sparse arm (`{indices, values}` or native) |
 | `reranker` | String | Cross-encoder alias, **or** `'maxsim'` for multi-vector/ColBERT late-interaction rerank |
-| `reranker_property` | String | Node text property for cross-encoder document input |
+| `reranker_property` | String | Node text property for cross-encoder document input; for `'maxsim'`, the `List<Vector>` property (defaults to the FTS property otherwise) |
 | `reranker_k` | Integer (default: k×3) | Over-fetch for reranking (clamped to [k, 1000]) |
 | `reranker_query` | String | Override query text for cross-encoder |
 | `maxsim_query` | List\<Vector\> | Query token vectors for `reranker: 'maxsim'` |
@@ -5348,6 +5378,7 @@ CALL uni.search(
       weights: [0.5, 0.2, 0.3],   // [vector, fts, sparse]
       sparse_query: {indices: [12, 884, 9001], values: [0.71, 0.33, 1.20]},
       reranker: 'maxsim',         // multi-vector / ColBERT late interaction
+      reranker_property: 'tokens', // the List<Vector> column MaxSim reads
       maxsim_query: $query_token_vectors
     })
 YIELD node, score, vector_score, fts_score, sparse_score, rerank_score, distance
@@ -5359,12 +5390,12 @@ Here the full YIELD surface is available: `vector_score`, `fts_score`, and `spar
 
 ### Single-Pass BGE-M3 Hybrid (`EmbedHybrid`)
 
-The cleanest way to feed a 3-way hybrid is one model that emits all three representations at once. **BGE-M3** does exactly this: a single forward pass yields a dense embedding, a learned-sparse vector, and a multi-vector / ColBERT token matrix. Uni models this as **one catalog alias** with task `EmbedHybrid` (provider `local/onnx`, model `aapot/bge-m3-onnx`).
+The cleanest way to feed a 3-way hybrid is one model that emits all three representations at once. **BGE-M3** does exactly this: a single forward pass yields a dense embedding, a learned-sparse vector, and a multi-vector / ColBERT token matrix. Uni models this as **one catalog alias** with task `embed_hybrid` (`ModelTask::EmbedHybrid`; provider `local/onnx`, model `aapot/bge-m3-onnx`).
 
 ```json
 {
   "alias": "embed/bge-m3",
-  "task": "EmbedHybrid",
+  "task": "embed_hybrid",
   "provider_id": "local/onnx",
   "model_id": "aapot/bge-m3-onnx"
 }
@@ -5382,11 +5413,23 @@ Because the alias and source match, the engine treats the three configs as **one
 
 ```rust
 // One EmbedHybrid alias + one source ("content") → three columns, one pass.
-let hybrid = EmbeddingCfg {
-    alias: "embed/bge-m3".into(),
-    source_properties: vec!["content".into()],
-    ..Default::default()
-};
+// EmbeddingCfg derives neither Clone nor Default, so build one per index.
+fn hybrid() -> EmbeddingCfg {
+    EmbeddingCfg {
+        alias: "embed/bge-m3".into(),
+        source_properties: vec!["content".into()],
+        batch_size: 16,
+        document_prefix: None,
+        query_prefix: None,
+    }
+}
+fn dense_index() -> IndexType {
+    IndexType::Vector(VectorIndexCfg {
+        algorithm: VectorAlgo::Flat,
+        metric: VectorMetric::Cosine,
+        embedding: Some(hybrid()),
+    })
+}
 
 db.schema()
     .label("Doc")
@@ -5394,14 +5437,14 @@ db.schema()
     .property_nullable("embedding", DataType::Vector { dimensions: 1024 })
     .property_nullable("emb", DataType::SparseVector { dimensions: 250002 })
     .property_nullable("tokens", DataType::List(Box::new(DataType::Vector { dimensions: 1024 })))
-    .index("embedding", dense_index_with(hybrid.clone()))         // → dense head
-    .index("emb", IndexType::sparse_with_embedding(250002, hybrid.clone())) // → sparse head
-    .index("tokens", dense_index_with(hybrid.clone()))            // → multi-vector head
+    .index("embedding", dense_index())                                 // → dense head
+    .index("emb", IndexType::sparse_with_embedding(250002, hybrid()))  // → sparse head
+    .index("tokens", dense_index())                                    // → multi-vector head
     .apply()
     .await?;
 ```
 
-> A passing end-to-end test of this exact pattern (mock 3-head hybrid model, all three columns round-tripping post-flush, pre-flush L0, deferred-batch, and Cypher literal) lives at `crates/uni/tests/bge_m3_hybrid_3way.rs`.
+> A passing end-to-end test of this exact pattern (mock 3-head hybrid model, all three columns round-tripping post-flush, pre-flush L0, deferred-batch, and Cypher literal) lives at `crates/uni/tests/common/bge_m3_hybrid_3way.rs`.
 
 The `EmbedHybrid` alias is dispatched through the same host-side model runtime as every other embedding — see [Host-Side Model Runtime (Uni-Xervo)](#host-side-model-runtime-uni-xervo) for catalog configuration, prefetch, and the `uni-xervo` types (`HybridEmbeddingModel`, `HeadSet`) that back it.
 
@@ -5471,7 +5514,7 @@ xervo.prefetch(&["embed/default", "llm/default"]).await?;
 // All subsequent embed/generate calls skip cold-start latency
 ```
 
-Both `prefetch` methods are awaitable and fail-fast. Use them instead of relying on first-call lazy loading, especially in latency-sensitive pipelines. For models that must be available at startup, prefer `warmup: "Eager"` in the catalog with `required: true`.
+Both `prefetch` methods are awaitable and fail-fast. Use them instead of relying on first-call lazy loading, especially in latency-sensitive pipelines. For models that must be available at startup, prefer `warmup: "eager"` in the catalog with `required: true`.
 
 This is the same runtime used by vector-index auto-embedding on writes, by text-query auto-embedding in `uni.vector.query(...)` / `similar_to(...)`, and by cross-encoder reranking in search procedures.
 
@@ -5507,7 +5550,7 @@ When reranking is active, `score` reflects the reranker score and `rerank_score`
 ```json
 {
   "alias": "rerank/minilm",
-  "task": "Rerank",
+  "task": "rerank",
   "provider_id": "local/onnx",
   "model_id": "cross-encoder/ms-marco-MiniLM-L6-v2"
 }
@@ -5805,7 +5848,8 @@ CALL uni.plugin.declareProcedure('myco.reindex', '...', 'cypher', '...')
 CALL uni.plugin.declareAggregate('myco.wmean', ...)
 // 3.0.0: declareTrigger installs a REAL firing TriggerPlugin (was a no-op procedure).
 // Event filter: CREATE|UPDATE|DELETE [ON :Label | -[:Type]-] [WHEN pred] [ASYNC]; binds $vid/$label/$event_kind.
-CALL uni.plugin.declareTrigger('myco.audit', 'Account', 'AfterCommit', ...)
+CALL uni.plugin.declareTrigger('myco.audit', 'CREATE ON :Account',
+  'CREATE (:AuditLog {vid: $vid})')        // (qname, event_filter, body[, deps_json])
 CALL uni.plugin.listDeclared()              // enumerate declared extensions
 CALL uni.plugin.dropDeclared('myco.discount')
 ```
@@ -5946,13 +5990,15 @@ in `executor/read.rs` (`Expr::ArrayIndex`) still has no `Vector` arm.
 Query historical data using snapshots or timestamps:
 
 ```cypher
-// By snapshot ID
-MATCH (n:Person) VERSION AS OF 'snapshot-abc123'
+// By snapshot ID (the clause follows the whole query)
+MATCH (n:Person)
 RETURN n.name, n.age
+VERSION AS OF 'snapshot-abc123'
 
 // By timestamp
-MATCH (n:Person) TIMESTAMP AS OF '2025-01-15T12:00:00Z'
+MATCH (n:Person)
 RETURN n.name, n.age
+TIMESTAMP AS OF '2025-01-15T12:00:00Z'
 ```
 
 ## EXPLAIN and PROFILE
@@ -6027,21 +6073,21 @@ each `ScanRequest`.
 
 # Part IX: Graph Algorithms
 
-Uni includes **42 graph algorithms** organized by category, accessible as procedures via `CALL algo.*`.
+Uni includes **37 native graph algorithms** (the `uni-algo` registry) organized by category, plus six built-ins authored as algorithm providers, all called as procedures via `CALL uni.algo.*` (the `uni.` prefix may be omitted). Arguments are positional: every native algorithm takes `(nodeLabels, relationshipTypes, ...)` first, then its own arguments in order; a map argument is not read as named options.
 
 ## Algorithm Catalog
 
 ```mermaid
 graph TB
     subgraph "Algorithm Categories"
-        PATH[Path Finding<br/>7 algorithms]
+        PATH[Path Finding<br/>8 algorithms]
         CENT[Centrality<br/>7 algorithms]
         COMM[Community Detection<br/>4 algorithms]
         SIM[Similarity<br/>1 algorithm]
         STRUCT[Structural<br/>4 algorithms]
         CONN[Connectivity<br/>3 algorithms]
         FLOW[Flow & Matching<br/>3 algorithms]
-        MISC[Miscellaneous<br/>9 algorithms]
+        MISC[Miscellaneous<br/>7 algorithms]
     end
 ```
 
@@ -6049,76 +6095,91 @@ graph TB
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.dijkstra` | Single-source shortest path (weighted) | Navigation, routing |
-| `algo.bidirectionalDijkstra` | Bidirectional shortest path | Faster point-to-point |
-| `algo.bellmanFord` | Shortest path with negative weights | Financial arbitrage |
-| `algo.astar` | A* with heuristic guidance | Spatial routing |
-| `algo.kShortestPaths` | K distinct shortest paths | Alternative routes |
-| `algo.allSimplePaths` | All simple paths between nodes | Dependency analysis |
-| `algo.allPairsShortestPath` | Floyd-Warshall for all pairs | Network diameter |
+| `uni.algo.dijkstra` | Single-source shortest path (weighted); yields `nodeId, distance, path` | Navigation, routing |
+| `uni.algo.shortestPath` | Unweighted shortest path (BFS) | Hop distance |
+| `uni.algo.bidirectionalDijkstra` | Bidirectional shortest path | Faster point-to-point |
+| `uni.algo.bellmanFord` | Shortest path with negative weights | Financial arbitrage |
+| `uni.algo.astar` | A* with heuristic guidance | Spatial routing |
+| `uni.algo.kShortestPaths` | K distinct shortest paths | Alternative routes |
+| `uni.algo.allSimplePaths` | All simple paths between nodes | Dependency analysis |
+| `uni.algo.allPairsShortestPath` | Floyd-Warshall for all pairs | Network diameter |
 
 ### Centrality Algorithms
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.degreeCentrality` | Vertex degree (in/out/total) | Hub identification |
-| `algo.betweenness` | Shortest-path betweenness | Bridge nodes, bottlenecks |
-| `algo.closeness` | Average distance to all others | Information spread |
-| `algo.harmonic` | Harmonic centrality | Disconnected graphs |
-| `algo.eigenvector` | Eigenvector centrality (iterative) | Influence measurement |
-| `algo.katz` | Katz centrality | Status in social networks |
-| `algo.pagerank` | PageRank (iterative) | Web ranking, importance |
+| `uni.algo.degreeCentrality` | Vertex degree (in/out/total) | Hub identification |
+| `uni.algo.betweenness` | Shortest-path betweenness | Bridge nodes, bottlenecks |
+| `uni.algo.closeness` | Average distance to all others | Information spread |
+| `uni.algo.harmonicCentrality` | Harmonic centrality | Disconnected graphs |
+| `uni.algo.eigenvectorCentrality` | Eigenvector centrality (iterative) | Influence measurement |
+| `uni.algo.katzCentrality` | Katz centrality | Status in social networks |
+| `uni.algo.pageRank` | PageRank (iterative) | Web ranking, importance |
 
 ### Community Detection
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.wcc` | Weakly Connected Components (union-find) | Cluster identification |
-| `algo.scc` | Strongly Connected Components (Tarjan) | Cycle groups |
-| `algo.louvain` | Louvain modularity optimization | Community structure |
-| `algo.labelPropagation` | Label propagation (semi-synchronous) | Fast community detection |
+| `uni.algo.wcc` | Weakly Connected Components (union-find) | Cluster identification |
+| `uni.algo.scc` | Strongly Connected Components (Tarjan) | Cycle groups |
+| `uni.algo.louvain` | Louvain modularity optimization | Community structure |
+| `uni.algo.labelPropagation` | Label propagation (semi-synchronous) | Fast community detection |
 
 ### Similarity
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.nodeSimilarity` | Jaccard neighborhood overlap | Similar users/items |
+| `uni.algo.nodeSimilarity` | Jaccard neighborhood overlap | Similar users/items |
 
 ### Structural
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.triangleCount` | Count triangles | Clustering coefficient |
-| `algo.topologicalSort` | DAG topological ordering | Build systems, dependencies |
-| `algo.cycleDetection` | Detect cycles | Deadlock detection |
-| `algo.bipartiteCheck` | Bipartite graph verification | Two-coloring |
+| `uni.algo.triangleCount` | Count triangles | Clustering coefficient |
+| `uni.algo.topoSort` | DAG topological ordering | Build systems, dependencies |
+| `uni.algo.hasCycle` | Detect cycles | Deadlock detection |
+| `uni.algo.isBipartite` | Bipartite graph verification | Two-coloring |
 
 ### Connectivity
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.bridges` | Bridge edge detection | Network reliability |
-| `algo.articulationPoints` | Cut vertex detection | Single points of failure |
-| `algo.kcore` | K-core decomposition | Dense subgraph discovery |
+| `uni.algo.bridges` | Bridge edge detection | Network reliability |
+| `uni.algo.articulationPoints` | Cut vertex detection | Single points of failure |
+| `uni.algo.kCore` | K-core decomposition | Dense subgraph discovery |
 
 ### Flow & Matching
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.fordFulkerson` | Maximum flow | Network capacity |
-| `algo.dinic` | Maximum flow (Dinic's) | Large flow networks |
-| `algo.maxMatching` | Maximum cardinality matching | Assignment problems |
+| `uni.algo.fordFulkerson` | Maximum flow | Network capacity |
+| `uni.algo.maxFlow` | Maximum flow (Dinic's) | Large flow networks |
+| `uni.algo.maxMatching` | Maximum cardinality matching | Assignment problems |
 
 ### Miscellaneous
 
 | Procedure | Description | Use Case |
 |---|---|---|
-| `algo.mst` | Minimum spanning tree (Kruskal) | Network design |
-| `algo.randomWalk` | Random walk sampling | Graph embedding, sampling |
-| `algo.elementaryCircuits` | All elementary cycles | Circuit analysis |
-| `algo.maximalCliques` | Maximal clique enumeration | Dense groups |
-| `algo.graphColoring` | Graph coloring | Scheduling, register allocation |
-| `algo.graphMetrics` | Global metrics (diameter, density, avg clustering) | Graph summary |
+| `uni.algo.mst` | Minimum spanning tree (Kruskal) | Network design |
+| `uni.algo.randomWalk` | Random walk sampling | Graph embedding, sampling |
+| `uni.algo.elementaryCircuits` | All elementary cycles | Circuit analysis |
+| `uni.algo.maximalCliques` | Maximal clique enumeration | Dense groups |
+| `uni.algo.graphColoring` | Graph coloring | Scheduling, register allocation |
+| `uni.algo.metrics` | Global metrics (diameter, radius, center, periphery) | Graph summary |
+| `uni.algo.diameter` | Graph diameter | Graph summary |
+
+### Provider-Authored Built-ins
+
+Registered through the `AlgorithmProvider` surface rather than the native registry (see [below](#extending-the-catalog--graphview--graphcompute)):
+
+| Procedure | Description |
+|---|---|
+| `uni.algo.reachability` | Reachability over a `GraphView` |
+| `uni.algo.pagerank` | Pregel-style PageRank over a `GraphView` |
+| `uni.algo.sssp` | Pregel-style single-source shortest paths |
+| `uni.algo.gcpagerank` | Personalized PageRank on the GraphCompute kernels |
+| `uni.algo.gcwalks` | node2vec/DeepWalk random walks on the GraphCompute kernels |
+| `uni.algo.gcoverlap` | All-pairs neighbourhood overlap on the GraphCompute kernels |
 
 ## Execution Modes
 
@@ -6129,7 +6190,7 @@ graph TB
     Q[Algorithm Request] --> LIGHT{Light Algorithm?<br/>Single path, reachability}
     LIGHT -->|Yes| DT[DirectTraversal<br/>Zero-copy BFS<br/>AdjacencyManager + L0]
     LIGHT -->|No| HEAVY{Heavy Algorithm?<br/>PageRank, WCC, Louvain}
-    HEAVY -->|Yes| GP[GraphProjection<br/>Materialized Dense CSR<br/>1 GB default, 100M vertex limit]
+    HEAVY -->|Yes| GP[GraphProjection<br/>Materialized Dense CSR]
 
     DT --> FAST[Fast Startup<br/>Streaming Results]
     GP --> BULK[Full Materialization<br/>Iterative Computation]
@@ -6147,20 +6208,15 @@ graph TB
 - **Materialized dense CSR** graph in memory
 - Used for: PageRank, WCC, Louvain, betweenness, eigenvector, etc.
 - **Configuration**: `ProjectionBuilder` with `node_labels()`, `edge_types()`, `include_reverse()`, `build()`
-- **Limits**: `max_projection_memory` (1 GB default), `max_vertices` (100M default)
+- **Size**: no projection-specific memory or vertex cap; the projection is built in full for the requested labels and edge types
 
 ## Running Algorithms
 
 ### Example: PageRank
 
 ```cypher
-CALL algo.pagerank({
-    nodeLabels: ['Person'],
-    edgeTypes: ['KNOWS'],
-    dampingFactor: 0.85,
-    maxIterations: 20,
-    tolerance: 0.0001
-})
+// (nodeLabels, relationshipTypes, dampingFactor, maxIterations, tolerance)
+CALL uni.algo.pageRank(['Person'], ['KNOWS'], 0.85, 20, 0.0001)
 YIELD nodeId, score
 RETURN nodeId, score
 ORDER BY score DESC
@@ -6170,24 +6226,17 @@ LIMIT 10
 ### Example: Shortest Path
 
 ```cypher
-CALL algo.dijkstra({
-    startNode: $start_vid,
-    endNode: $end_vid,
-    edgeTypes: ['ROAD'],
-    weightProperty: 'distance'
-})
-YIELD path, totalCost
-RETURN path, totalCost
+// (nodeLabels, relationshipTypes, startNode, endNode, weightProperty)
+CALL uni.algo.dijkstra(['City'], ['ROAD'], $start_vid, $end_vid, 'distance')
+YIELD nodeId, distance, path
+RETURN path, distance
 ```
 
 ### Example: Community Detection
 
 ```cypher
-CALL algo.louvain({
-    nodeLabels: ['Person'],
-    edgeTypes: ['KNOWS'],
-    maxIterations: 10
-})
+// (nodeLabels, relationshipTypes, resolution, maxIterations)
+CALL uni.algo.louvain(['Person'], ['KNOWS'], 1.0, 10)
 YIELD nodeId, communityId
 RETURN communityId, count(*) AS size
 ORDER BY size DESC
@@ -6196,22 +6245,19 @@ ORDER BY size DESC
 ### Example: Weakly Connected Components
 
 ```cypher
-CALL algo.wcc({
-    nodeLabels: ['Device'],
-    edgeTypes: ['CONNECTED_TO']
-})
+CALL uni.algo.wcc(['Device'], ['CONNECTED_TO'])
 YIELD nodeId, componentId
 RETURN componentId, collect(nodeId) AS members
 ```
 
 ## Extending the Catalog — GraphView & GraphCompute
 
-The tables above list a subset of the 42 native algorithms. **Custom** graph algorithms are authored through the plugin framework's `AlgorithmProvider` surface ([Part XVII](#part-xvii-plugin-framework)), which offers two paths:
+The tables above list the 37 native algorithms and the provider-authored built-ins. **Custom** graph algorithms are authored through the plugin framework's `AlgorithmProvider` surface ([Part XVII](#part-xvii-plugin-framework)), which offers two paths:
 
 - **In-process (`GraphView`)** — an algorithm authored in Rust obtains a read-only CSR topology snapshot via `AlgorithmHost::project(&GraphProjectionSpec) -> Arc<dyn GraphView>` and walks it with dense-slot accessors (`out_neighbors` / `out_degree` / `out_weight` / `to_vid` / …). First-party `uni.algo.reachability`, `uni.algo.pagerank`, `uni.algo.sssp`, and `uni.path.expand` are authored purely against this surface. Gated by `Capability::HostQuery`.
 - **Guest-authored (`GraphCompute`)** — the same graph algorithms can be authored in **Rhai, Python, WASM, or Extism**, driving coarse native kernels over opaque handles ("conductor, not worker"). First-party `uni.algo.gcpagerank` / `gcwalks` / `gcoverlap` dogfood it. See [§GraphCompute — Guest-Authorable Graph Algorithms](#graphcompute--guest-authorable-graph-algorithms) for the kernel catalog, determinism guarantees, and budgets.
 
-Both paths dispatch through `CALL` alongside the built-in `algo.*` procedures (miss-only, so a custom `uni.algo.*` never shadows a built-in).
+Both paths dispatch through `CALL` alongside the built-in `uni.algo.*` procedures (miss-only, so a custom `uni.algo.*` never shadows a built-in).
 
 ## Algorithm Best Practices
 
@@ -6271,7 +6317,7 @@ graph LR
 ```
 
 1. **Parse**: Pest grammar (`locy.pest` stacked on `cypher.pest`) produces `LocyProgram` AST with rules and commands
-2. **Module Resolution**: Resolve `USE module { rule1, rule2 }` imports
+2. **Module Resolution**: Resolve `USE module { rule1, rule2 }` imports. Not yet supported: every host passes an empty module map, so a `USE` fails with `ModuleNotFound`
 3. **Dependency Graph**: Build rule-to-rule reference graph
 4. **Stratify**: Detect strongly connected components (SCCs) — these are recursive rule groups
 5. **Wardedness Check**: Ensure negation is stratified (no recursive negation)
@@ -6332,11 +6378,17 @@ Accumulate values along traversal paths:
 CREATE RULE shortest_risk AS
     MATCH (a:Account)-[t:TRANSFER]->(b:Account)
     WHERE a IS flagged
-    ALONG cumulative_risk = prev.risk + t.amount * 0.01
+    ALONG cumulative_risk = t.amount * 0.01
+    YIELD KEY b, cumulative_risk
+
+CREATE RULE shortest_risk AS
+    MATCH (a:Account)-[t:TRANSFER]->(b:Account)
+    WHERE a IS shortest_risk
+    ALONG cumulative_risk = prev.cumulative_risk + t.amount * 0.01
     YIELD KEY b, cumulative_risk
 ```
 
-- `prev.fieldName` — access the accumulator from the previous hop
+- `prev.fieldName` — access the accumulator of the fact the clause's self-reference matched (the previous hop). It is only valid in a recursive clause, so a base clause sets the starting value; `prev` in a base clause is `PrevInBaseCase`
 - Supports full Cypher arithmetic: `+`, `-`, `*`, `/`, `%`, `^`
 - Supports logical operators: `AND`, `OR`, `XOR`
 
@@ -6346,7 +6398,7 @@ Aggregate across paths:
 
 ```locy
 CREATE RULE total_exposure AS
-    MATCH (a:Account)-[:TRANSFER*]->(b:Account)
+    MATCH (a:Account)-[t:TRANSFER]->(b:Account)
     WHERE b IS suspicious
     FOLD total = SUM(t.amount),
          path_count = COUNT(*)
@@ -6458,6 +6510,12 @@ In a **recursive** rule it filters the converged answer only. `apply_having_filt
 `REQUIRE` is the other reading of the same predicate (issue #265). It is part of the rule's *definition*, so it constrains what the recursion derives rather than what the answer displays:
 
 ```locy
+// seed: the sanctioned root
+CREATE RULE blocked AS
+    MATCH (e:Entity)
+    WHERE e.uid = 'root'
+    YIELD KEY e, 100.0 AS agg
+
 CREATE RULE blocked AS
     MATCH (o:Entity)-[s:OWNS]->(e:Entity)
     WHERE o IS blocked
@@ -6472,7 +6530,7 @@ CREATE RULE blocked AS
 
 This is a compile error rather than a warning because the runtime cannot recover. The change test (`prev_rows`) compares whole *contribution* rows, not the folded view, so a group leaving the snapshot is invisible to the producing rule's own convergence check and reaches consumers as a row set that flips back and forth — which `rows_now != prev_rows` reads as progress. A non-monotone `REQUIRE` would run to `max_iterations` and return partial results.
 
-**Direction is a `LocyAggregate` method, not `Semilattice` state.** `Semilattice::monotone_join` says *whether* an aggregate is monotone, never which way, and `MIN`/`MAX` share one `BOUNDED_MIN_MAX` constant. `LocyAggregate::direction()` defaults to `FoldDirection::Unknown`, so an aggregate that has not declared one declines `REQUIRE` and existing plugin implementors are unaffected. The enum lives in `uni-common` because `uni-locy` does not depend on `uni-plugin`, and is re-exported from `uni_plugin::traits::locy`. The registry-backed oracle mirrors `is_monotonic_aggregate` as `e.aggregate.direction()`; the registry-free fallback covers the same six `M*` names.
+**Direction is a `LocyAggregate` method, not `Semilattice` state.** `Semilattice::monotone_join` says *whether* an aggregate is monotone, never which way, and `MIN`/`MAX` share one `BOUNDED_MIN_MAX` constant. `LocyAggregate::direction()` defaults to `FoldDirection::Unknown`, so an aggregate that has not declared one declines `REQUIRE` and existing plugin implementors are unaffected. The enum lives in `uni-common` because `uni-locy` does not depend on `uni-plugin`, and is re-exported from `uni_plugin::traits::locy`. Currently `check_require_direction` is called only with the registry-free fallback (`default_direction_oracle`, the same six `M*` names), so the direction a registered aggregate declares is not consulted, and `REQUIRE` over `MAX`, `MIN` or `COUNT` in a recursive rule is rejected.
 
 Outside recursion the direction is not policed: there is one pass, nothing can flip, and `REQUIRE` means what the post-FOLD `WHERE` means. That keeps a rule refactor-safe — it holds the meaning its author wrote if a self-reference is added later.
 
@@ -6588,9 +6646,16 @@ Select optimal results:
 ```locy
 CREATE RULE best_route AS
     MATCH (a:City)-[r:ROAD]->(b:City)
+    ALONG distance = r.length
+    BEST BY distance ASC
+    YIELD KEY a, KEY b, distance
+
+CREATE RULE best_route AS
+    MATCH (a:City)-[r:ROAD]->(mid:City)
+    WHERE mid IS best_route TO b
     ALONG distance = prev.distance + r.length
     BEST BY distance ASC
-    YIELD KEY b, distance
+    YIELD KEY a, KEY b, distance
 ```
 
 Enables `LIMIT 1` optimization — the engine can prune suboptimal paths early during semi-naive evaluation.
@@ -6605,26 +6670,32 @@ Control result grouping:
 
 ```locy
 CREATE RULE risk_summary AS
-    MATCH (a:Account)-[:TRANSFER]->(b:Account)
+    MATCH (a:Account)-[t:TRANSFER]->(b:Account)
     WHERE b IS flagged
+    FOLD exposure_count = COUNT(*),
+         total_exposure = SUM(t.amount)
     YIELD KEY a,       // Group by source account
-          count(*) AS exposure_count,
-          sum(t.amount) AS total_exposure
+          exposure_count,
+          total_exposure
 ```
 
-`KEY` marks grouping dimensions (implicit GROUP BY). Unmarked outputs are regular value columns. `PROB` marks the clause's probability column when probabilistic semantics are required.
+`KEY` marks grouping dimensions (the GROUP BY of a `FOLD`; aggregates go in `FOLD`, not in `YIELD`). Unmarked outputs are regular value columns. `PROB` marks the clause's probability column when probabilistic semantics are required.
 
-### PRIORITY (Execution Ordering)
+### PRIORITY (Clause Precedence)
 
-Control evaluation order within a stratum:
+Choose between the clauses of one rule:
 
-```cypher
-CREATE RULE high_priority_rule PRIORITY 100 AS ...
-CREATE RULE normal_rule AS ...  // Default priority: 0
-CREATE RULE low_priority_rule [PRIORITY -10] AS ...
+```locy
+CREATE RULE access PRIORITY 2 AS
+    MATCH (u:User)-[:DENIED]->(r:Resource)
+    YIELD KEY u, KEY r, 'deny' AS decision
+
+CREATE RULE access PRIORITY 1 AS
+    MATCH (u:User)-[:ALLOWED]->(r:Resource)
+    YIELD KEY u, KEY r, 'allow' AS decision
 ```
 
-Higher priority values execute first.
+For each KEY group, only the rows from the clauses with the highest priority number are kept (`PriorityExec`), so a user both denied and allowed gets `deny`. Either every clause of a rule declares a `PRIORITY` or none does; mixing is `MixedPriority`.
 
 ### DERIVE (Graph Mutation)
 
@@ -6636,7 +6707,8 @@ CREATE RULE infer_risk AS
     WHERE a IS flagged
     DERIVE (b)-[:RISK_FROM]->(a)
 
-// MERGE combines paths
+// MERGE links two nodes as one entity: it emits a MERGED_WITH edge
+// between them and does not combine the nodes
 CREATE RULE merge_paths AS
     MATCH (a)-[r]->(b)
     DERIVE MERGE a, b
@@ -6644,14 +6716,22 @@ CREATE RULE merge_paths AS
 
 ### PREV (Previous Iteration Access)
 
-Access values from the previous fixpoint iteration:
+Access the value of the fact a recursive clause's self-reference matched:
 
 ```locy
-CREATE RULE converging_score AS
-    MATCH (n:Node)
-    ALONG score = (prev.score + neighbor_avg) / 2.0
-    YIELD KEY n, score
+CREATE RULE hop_score AS
+    MATCH (a:Node)-[e:LINK]->(b:Node)
+    ALONG score = e.weight
+    YIELD KEY a, KEY b, score
+
+CREATE RULE hop_score AS
+    MATCH (a:Node)-[e:LINK]->(mid:Node)
+    WHERE mid IS hop_score TO b
+    ALONG score = prev.score * 0.5 + e.weight
+    YIELD KEY a, KEY b, score
 ```
+
+`prev.<field>` is valid only as a direct operand of an `ALONG` expression in a recursive clause; in a base clause it is `PrevInBaseCase`.
 
 `prev.<field>` is rewritten to a bare column reference over the self-referential derived scan, so a clause carrying `ALONG` always reads the **`Contributions`** view — a per-KEY aggregate is not defined per path. See *What a self-reference reads* above.
 
@@ -6823,10 +6903,10 @@ holds for, and projects RETURN. It never derives a rule itself.
 ### DERIVE (Fact Derivation)
 
 ```locy
-DERIVE risk_propagation WHERE threshold > 0.5 RETURN flagged_nodes
+DERIVE risk_propagation WHERE a.risk_score > 0.5
 ```
 
-Iterates over the named rule's facts in the current state, applies the WHERE filter, and generates Cypher CREATE/MERGE mutations for each matching row. The mutations are executed via `NativeExecutionAdapter::execute_mutation()`.
+Iterates over the named rule's facts in the current state, applies the WHERE filter (which sees the rule body's variables; `DERIVE` has no `RETURN`), and generates Cypher CREATE/MERGE mutations for each matching row. The mutations are executed via `NativeExecutionAdapter::execute_mutation()`.
 
 ### ABDUCE (Abductive Reasoning)
 
@@ -6837,7 +6917,7 @@ ABDUCE compromised WHERE target.name = 'ServerA' RETURN assumptions
 ABDUCE NOT safe WHERE node.name = 'Gateway' RETURN required_conditions
 ```
 
-Three-phase pipeline: (1) build derivation tree via EXPLAIN, (2) extract candidate modifications (edge removals, property changes, edge additions), (3) validate each candidate by savepoint → mutate → re-evaluate the strata the candidate can affect (the rest reused, see *Incremental re-evaluation* under ASSUME) → check if conclusion holds → rollback. Returns the minimal set of changes that achieve (or prevent) the goal.
+Three-phase pipeline: (1) build derivation tree via EXPLAIN, (2) extract candidate modifications (edge removals, property changes, edge additions), (3) validate each candidate by savepoint → mutate → re-evaluate the strata the candidate can affect (the rest reused, see *Incremental re-evaluation* under ASSUME) → check if conclusion holds → rollback. Each candidate is a single modification; the result lists them validated first, then by ascending cost, truncated to `max_abduce_results`.
 
 **Anonymous body elements are bound for phase 1.** A removal candidate is proposed only when its edge is identified (bound `eid`, or both endpoint vids), and a derivation's evidence row (`execute_pattern` over the clause body) binds only named elements. So `locy_abduce::name_anonymous_elements` builds the tree over a program copy whose top-level body paths name every anonymous node and relationship (`abduce_anon_{n}`, skipping any name the clause's text already contains); naming changes a pattern's columns, not its rows. Generated names are reported as the empty variable (`anonymize`) and excluded from `ChangeProperty` candidates. Without it a body like `(l:Lot)-[:OBSERVED]->(:Feature)-[:ON]->(t:Tool)` proposed nothing. Guards: `locy_abduce_identity::abduce_through_anonymous_middle_node_proposes_both_edges`, the semiconductor flagship notebook.
 
@@ -6888,12 +6968,19 @@ The hypothetical state differs from the state before the block only by the block
 
 ## Module System
 
-Locy programs can be organized into modules:
+Locy programs can be organized into modules. `MODULE` names the program's rules (`QUERY acme.compliance.compliance_check` names one by its qualified name). Not yet supported: `USE other.module { rule, ... }` imports, which always fail with `ModuleNotFound`, so the rules a program references are defined in the same program.
 
 ```locy
 MODULE acme.compliance
-USE acme.common { reach, control }
-USE acme.security { threat_model }
+
+CREATE RULE reach AS
+    MATCH (system:System)-[:HOSTS]->(service:Service)
+    YIELD KEY system, KEY service
+
+CREATE RULE threat_model AS
+    MATCH (service:Service)
+    WHERE service.exposed = true
+    YIELD KEY service
 
 CREATE RULE compliance_check AS
     MATCH (system:System)-[:HOSTS]->(service:Service)
@@ -6902,19 +6989,19 @@ CREATE RULE compliance_check AS
     YIELD KEY system, KEY service, 'compliant' AS status
 ```
 
-> **Note the `KEY service` in the YIELD.** An `IS NOT` subject must appear as a
-> projected output column of the consuming rule — the anti-join resolves it by
-> name after projection. Being bound in `MATCH`, or being the `TO` target of a
-> positive `IS`, is *not* sufficient. Omitting `service` here would make the
-> negation unresolvable; the engine rejects that rather than silently returning
-> unfiltered rows (see issue #158).
+> An `IS NOT` subject only needs to be bound in the clause (by `MATCH` or a
+> positive `IS`); it does not have to be a projected output column. The
+> `KEY service` here is part of the rule's key, not a requirement of the
+> negation.
 
 ## Configuration
 
 ```rust
 LocyConfig {
     max_iterations: usize,          // Max fixpoint iterations per recursive stratum
-    timeout: Duration,              // Overall evaluation timeout
+    timeout: Option<Duration>,      // Overall evaluation budget (None: 300 s between strata,
+                                    //   operators keep the database's query_timeout)
+    allow_partial: bool,            // Return partial facts with `incomplete` set instead of LocyIncomplete
     max_explain_depth: usize,       // Max derivation tree depth
     max_slg_depth: usize,           // Deprecated: no effect
     goal_directed: GoalDirected,    // Auto (default) | Off | On | Shadow: magic-sets QUERY rewrite
@@ -6929,6 +7016,13 @@ LocyConfig {
     params: HashMap<String, Value>, // Parameters bound to $name references in rules/queries
     exact_probability: bool,        // Enable BDD-based exact evaluation for shared proofs
     max_bdd_variables: usize,       // Per-group BDD variable cap before fallback
+    semiring: SemiringKind,         // AddMultProb (default) | MaxMinProb | TopKProofs { k } | BddExact
+    neural_predicates_preview: bool, // Accept CREATE MODEL (default true)
+    classifier_registry: ClassifierRegistry,  // Model name → NeuralClassifier
+    classifier_cache: Option<Arc<ModelInvocationCache>>, // Shared classifier memo cache
+    classifier_cache_max: usize,    // Per-query memo cache entries (default 100,000)
+    classifier_provenance_store: Option<Arc<NeuralProvenanceStore>>, // Per-invocation records for EXPLAIN
+    returned_rules: ReturnedRules,  // All (default) | Nothing | Only(names): facts the result carries
 }
 ```
 
@@ -6952,11 +7046,18 @@ CREATE RULE flagged AS
     WHERE a.fraud_score > 0.8
     YIELD KEY a
 
-CREATE RULE risk_chain PRIORITY 10 AS
+CREATE RULE risk_chain AS
     MATCH (a:Account)-[t:TRANSFER]->(b:Account)
     WHERE a IS flagged
-    ALONG risk = prev.risk + t.amount * 0.01
-    BEST BY risk DESC
+    ALONG risk = t.amount * 0.01
+    BEST BY propagated_risk DESC
+    YIELD KEY b, risk AS propagated_risk
+
+CREATE RULE risk_chain AS
+    MATCH (a:Account)-[t:TRANSFER]->(b:Account)
+    WHERE a IS risk_chain
+    ALONG risk = prev.propagated_risk + t.amount * 0.01
+    BEST BY propagated_risk DESC
     YIELD KEY b, risk AS propagated_risk
 
 QUERY risk_chain
@@ -6970,15 +7071,14 @@ ORDER BY propagated_risk DESC
 ```locy
 MODULE rbac.resolver
 
-CREATE RULE effective_permission PRIORITY 100 AS
+// A direct grant takes precedence over an inherited one for the same (u, p)
+CREATE RULE effective_permission PRIORITY 2 AS
     MATCH (u:User)-[:HAS_ROLE]->(r:Role)-[:GRANTS]->(p:Permission)
     YIELD KEY u, KEY p, r.priority AS grant_priority
 
-CREATE RULE inherited_permission AS
-    MATCH (r:Role)-[:INHERITS]->(parent:Role)-[:GRANTS]->(p:Permission)
-    WHERE (u:User)-[:HAS_ROLE]->(r)
-    BEST BY grant_priority DESC
-    YIELD KEY u, KEY p
+CREATE RULE effective_permission PRIORITY 1 AS
+    MATCH (u:User)-[:HAS_ROLE]->(r:Role)-[:INHERITS]->(parent:Role)-[:GRANTS]->(p:Permission)
+    YIELD KEY u, KEY p, parent.priority AS grant_priority
 
 QUERY effective_permission
 WHERE u.name = 'alice'
@@ -6990,10 +7090,15 @@ RETURN p.resource, p.action, grant_priority
 ```locy
 MODULE supply.chain
 
+CREATE RULE sanctioned AS
+    MATCH (s:Supplier)
+    WHERE s.sanctioned = true
+    YIELD KEY s
+
 CREATE RULE provenance AS
     MATCH (part:Part)-[:MADE_FROM]->(material:Material)
-    ALONG chain = COLLECT(part.name)
-    YIELD KEY material, chain AS supply_path
+    FOLD supply_path = COLLECT(part.name)
+    YIELD KEY material, supply_path
 
 CREATE RULE risk_assessment AS
     MATCH (supplier:Supplier)-[:SUPPLIES]->(part:Part)
@@ -7341,12 +7446,12 @@ Sessions are the primary read scope. Create via `db.session()` (sync, infallible
 // Create a session
 let session = db.session();
 
-// Set scoped parameters (injected into every query as $key)
+// Set scoped parameters (injected into every query as $session.key)
 session.params().set("user_id", "alice-123");
 session.params().set("role", "admin");
 
 // Query using session parameters
-let result = session.query("MATCH (u:User {id: $user_id}) RETURN u").await?;
+let result = session.query("MATCH (u:User {id: $session.user_id}) RETURN u").await?;
 
 // Query builder with parameters, timeout, and terminal methods
 let result = session.query_with("MATCH (n:Person) WHERE n.age > $min_age RETURN n")
@@ -7664,6 +7769,11 @@ SnapshotManifest {
     wal_high_water_mark: u64,                    // Max WAL LSN in snapshot
     vertices: HashMap<String, LabelSnapshot>,    // Per-label metadata
     edges: HashMap<String, EdgeSnapshot>,        // Per-type metadata
+    writer_features: Vec<String>,                // Features of the binary that saved it
+    unpublished_bulk_versions: Vec<u64>,         // Bulk versions not visible at this cut
+    next_vid: Option<u64>,                       // ID floor: end of reserved VID range
+    next_eid: Option<u64>,                       // ID floor: end of reserved EID range
+    tables: BTreeMap<String, u64>,               // Read cut: Lance version per table/index
 }
 ```
 
@@ -7997,7 +8107,7 @@ Uni uses a **three-tier compaction** system that runs automatically in the backg
 graph TB
     subgraph "Tier 1: CSR Overlay (In-Memory)"
         T1[Merge frozen L0 CSR segments<br/>into main adjacency index]
-        T1T[Trigger: frozen_segments ≥ 4]
+        T1T[Trigger: frozen_segments ≥ 2<br/>background task]
     end
 
     subgraph "Tier 2: Semantic Compaction (Application-Level)"
@@ -8032,10 +8142,10 @@ The first matching trigger fires a compaction task. After semantic compaction co
 | Parameter | Default | Description |
 |---|---|---|
 | `compaction.enabled` | `true` | Enable background compaction |
-| `compaction.max_l1_runs` | `4` | L1 run count trigger (ByRunCount) |
+| `compaction.max_l1_runs` | `8` | L1 run count trigger (ByRunCount) |
 | `compaction.max_l1_size_bytes` | `256 MB` | L1 size trigger (BySize) |
 | `compaction.max_l1_age` | `1 hour` | L1 age trigger (ByAge) |
-| `compaction.check_interval` | `30s` | Background check frequency |
+| `compaction.check_interval` | `10s` | Background check frequency |
 | `compaction.worker_threads` | `1` | Compaction parallelism |
 | `max_compaction_rows` | `5,000,000` | OOM guard: max rows in memory |
 
@@ -8053,7 +8163,8 @@ The first matching trigger fires a compaction task. After semantic compaction co
   tables and would discard the new handle's first appends — the per-backend
   `lock_table_for_write` that serializes flush against the vertex overwrite
   within one handle does not reach across handles. Remote object stores have
-  no such lock and are not covered.
+  no such lock; there the writer lease gives the same exclusion, since it admits
+  one writable handle per store and read-only handles do not compact.
 - **Cancellation**: `StorageManager::cancel_compaction` (called by `Drop for
   Uni` and `shutdown_in_place`) stops a pass at its next safe point and ends
   the background loop. Safe points: before each label's vertex pass, before
@@ -8212,11 +8323,11 @@ db.schema() \
         .property("name", DataType.STRING()) \
         .property("age", DataType.INT64()) \
         .property_nullable("email", DataType.STRING()) \
-        .vector("embedding", 384) \
+        .property_nullable("embedding", DataType.vector(384)) \
     .done() \
     .edge_type("KNOWS", ["Person"], ["Person"]) \
         .property("since", DataType.DATE()) \
-        .property("weight", DataType.FLOAT64()) \
+        .property_nullable("weight", DataType.FLOAT64()) \
     .apply()
 
 # Introspection
@@ -8233,8 +8344,8 @@ session = db.session()
 session.params().set("user_id", "alice-123")
 session.params().set("role", "admin")
 
-# Query with session parameters (injected as $user_id, $role)
-result = session.query("MATCH (u:User {id: $user_id}) RETURN u")
+# Query with session parameters (injected as $session.user_id, $session.role)
+result = session.query("MATCH (u:User {id: $session.user_id}) RETURN u")
 
 # Get a parameter
 user_id = session.params().get("user_id")
@@ -8706,7 +8817,7 @@ schema = generate_schema(Person, Company, WorksAt)
 | `int` | `Int64` |
 | `float` | `Float64` |
 | `bool` | `Bool` |
-| `datetime` | `Timestamp` |
+| `datetime` | `DateTime` |
 | `date` | `Date` |
 | `list[str]` | `List(String)` |
 | `dict[str, float]` | `Map(String, Float64)` |
@@ -8745,7 +8856,7 @@ async def main():
     await session.sync_schema()
 
     alice = Person(name="Alice", age=30)
-    await session.add(alice)
+    session.add(alice)
     await session.commit()
 
     people = await session.query(Person).filter(Person.age > 25).all()
@@ -8828,6 +8939,9 @@ graph TB
 | `execution_batch_size` | `Option<usize>` | `None` (8,192) | DataFusion `batch_size`: rows per batch inside the engine. Result-neutral; smaller values bound per-batch memory and LIMIT granularity at some throughput cost |
 | `max_frontier_size` | `usize` | 1,000,000 | Max vertices in traversal frontier |
 | `query_timeout` | `Duration` | 30s | Per-query timeout |
+| `commit_timeout` | `Duration` | 5s | Max wall time of one commit before it aborts with `CommitTimeout` |
+| `ssi_enabled` | `bool` | `true` | Serializable snapshot isolation and OCC; `false` reverts to last-writer-wins |
+| `read_cut_refresh` | `Option<Duration>` | `None` (0 locally, 1s on an object store) | How often a read-only handle re-reads `catalog/latest` at query start |
 | `max_query_memory` | `usize` | 1 GB | Per-query memory limit |
 | `max_transaction_memory` | `usize` | 1 GB | Transaction buffer limit |
 | `max_compaction_rows` | `usize` | 5,000,000 | OOM guard for in-memory compaction |
@@ -9081,19 +9195,21 @@ Python: `UniBuilder.in_memory().strict_schema(True).build()` or `.config({"stric
 | `auto_flush_interval` | `Option<Duration>` | 5s | Time-based flush interval |
 | `auto_flush_min_mutations` | `usize` | 1 | Min mutations before time-based flush |
 | `wal_enabled` | `bool` | `true` | Write-ahead logging |
+| `async_flush_enabled` | `bool` | `true` (`UNI_ASYNC_FLUSH=0` disables) | Run the L1 streaming phase off the commit path |
+| `max_pending_flushes` | `usize` | 2 | Max async flushes in flight; the next rotate waits |
 | `flush_stream_timeout` | `Duration` | 60s | Max wall time one async L0→L1 stream phase may run before it becomes a flush *failure* |
-| `flush_drain_timeout` | `Duration` | 120s | Max time `flush_to_l1` waits for in-flight flushes to drain. Exceeding it is an **error**, not a silent partial flush |
-| `drop_fork_drain_timeout` | `Duration` | 10s | Max time `drop_fork` waits for that fork's pending flushes |
+| `flush_drain_timeout` | `Duration` | 900s | Max time `flush_to_l1` waits for in-flight flushes to drain. Exceeding it is an **error**, not a silent partial flush |
+| `drop_fork_drain_timeout` | `Duration` | 10s | Max time `drop_fork` waits for the fork's live sessions to be released (else `ForkInUse`) and its pending flushes to drain (else `PendingFlushTimeout`) |
 
 ### CompactionConfig
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | `bool` | `true` | Enable background compaction |
-| `max_l1_runs` | `usize` | 4 | L1 run count compaction trigger |
+| `max_l1_runs` | `usize` | 8 | L1 run count compaction trigger |
 | `max_l1_size_bytes` | `u64` | 256 MB | L1 aggregate size trigger |
-| `max_l1_age` | `Duration` | 1 hour | L1 age trigger (planned) |
-| `check_interval` | `Duration` | 30s | Background check frequency |
+| `max_l1_age` | `Duration` | 1 hour | L1 age trigger (ByAge) |
+| `check_interval` | `Duration` | 10s | Background check frequency |
 | `worker_threads` | `usize` | 1 | Compaction worker threads |
 | `frozen_segments_compact_threshold` | `usize` | 2 | Frozen overlay segments before CSR compact |
 
@@ -9142,6 +9258,15 @@ let config = UniConfig {
 | `max_retries` | `u32` | 3 | Retry count |
 | `retry_backoff_base` | `Duration` | 100ms | Exponential backoff base |
 | `retry_backoff_max` | `Duration` | 10s | Max backoff delay |
+
+### WriterLeaseConfig (`UniConfig.writer_lease`)
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `ttl` | `Duration` | 30s | Object-store lease lifetime without renewal |
+| `renew_interval` | `Duration` | 10s | Lease renewal (and custom provider heartbeat) interval |
+| `acquire_grace` | `Duration` | 5s | How long a writable open waits for a held store before `StoreLocked` |
+| `clock_skew` | `Duration` | 5s | Allowance for host clocks disagreeing when judging expiry |
 
 ### CloudStorageConfig
 
@@ -9356,7 +9481,7 @@ cache, including when refreshing the known empty view of an unmapped table.
 Forks unlock four broad use-cases the existing snapshot mechanism cannot cover, because snapshots are read-only:
 
 - **What-if analysis.** Materialize a counterfactual ("what if this loan defaults? what if this supplier fails?") in a writable sandbox that can be queried with the full Cypher/Locy surface and inspected after the fact.
-- **Write–audit–publish workflows.** Stage a bulk write into a fork, run validation queries and Locy rules against it, then either drop the fork (reject) or — in a future phase — promote it to primary (accept).
+- **Write–audit–publish workflows.** Stage a bulk write into a fork, run validation queries and Locy rules against it, then either drop the fork (reject) or promote it to primary with `Uni::promote_from_fork` (accept).
 - **Scenario exploration.** Run regulatory or compliance simulations on isolated copies of production data without coordinating maintenance windows.
 - **Long-lived sandboxes.** A pinned snapshot expires when its retention window passes; a fork persists until explicitly dropped, with its own session lifecycle.
 
@@ -9424,11 +9549,11 @@ through it fail. A simulation fork comes from a writable handle.
 
 1. Refuse if `holder_count > 0` (live forked sessions), `inflight_tx_count > 0` (open transactions), or `list_children(id)` is non-empty (Phase 3 nested-fork guard; surfaces `ForkHasChildren`).
 2. `ForkRegistryHandle::begin_drop(name)` writes `catalog/fork_tombstones/{id}.json` and flips the registry entry to `Tombstoned`.
-3. Walk the dataset→branch map and call `lance_branch::delete_branch(uri, branch)` for each. Delete errors are logged-and-swallowed — the registry transition is what's load-bearing; recovery handles any residue.
+3. Walk the dataset→branch map and call `lance_branch::delete_branch(uri, branch)` for each. If any delete fails, the drop returns `UniError::ForkLifecycle { stage: "delete_branch" }` and leaves the fork Tombstoned; recovery (`delete_all_branches` + `finish_drop` on the next open) completes it.
 4. `ForkRegistryHandle::finish_drop(&info)` removes the registry entry, deletes the tombstone, deletes the schema overlay.
 5. If a crash occurs between steps 2 and 4, `recover_forks` walks all `Tombstoned` entries on next open and finishes the drop.
 
-The recovery driver is idempotent — running it twice is a no-op the second time. Tests at `crates/uni-store/tests/recovery_fork_create_fault.rs` and `crates/uni/tests/fork_nested_recovery.rs` exercise both crash windows.
+The recovery driver is idempotent — running it twice is a no-op the second time. Tests at `crates/uni-store/tests/common/fork_recovery/recovery_fork_create_fault.rs` and `crates/uni/tests/common/fork/fork_nested_recovery.rs` exercise both crash windows.
 
 ## Reads and Writes
 
@@ -9446,11 +9571,11 @@ The `BranchedBackend` decorator does not stack across nesting levels. A nested c
 
 `Session::fork(name)` always parents the new fork on the *receiver* session — there is no API to override the parent. A primary session creates a child of primary; a forked session creates a nested child of that fork. The parent linkage is recorded in `ForkInfo.parent_fork_id: Option<ForkId>` (None ⇒ parent is primary).
 
-**Branch lineage in Lance.** At fork-creation time, `build_datasets_for_fork` consults the parent's `ForkScope.branch_for(dataset)` for every candidate dataset. If the parent has a branch, the child branches off it via `create_branch_from(uri, child_branch, parent_branch, parent_version)`. If the parent doesn't have a branch (e.g. a dataset the parent never wrote to), the child either skips branching at create-time (for nested-but-unbranched datasets — the parent's state for that dataset is empty by definition, so branching off main is semantically identical) or falls through to `BranchedBackend::ensure_branch_for_new` on its first write. Lance handles arbitrary-depth chains transparently — the cost is one extra commit lookup per level, which the Phase 3 perf-sanity test (`crates/uni/tests/fork_nested_perf.rs`) asserts stays within 5× the depth-1 baseline.
+**Branch lineage in Lance.** At fork-creation time, `build_datasets_for_fork` consults the parent's `ForkScope.branch_for(dataset)` for every candidate dataset. If the parent has a branch, the child branches off it via `create_branch_from(uri, child_branch, parent_branch, parent_version)`. If the parent doesn't have a branch (e.g. a dataset the parent never wrote to), the child either skips branching at create-time (for nested-but-unbranched datasets — the parent's state for that dataset is empty by definition, so branching off main is semantically identical) or falls through to `BranchedBackend::ensure_branch_for_new` on its first write. Lance handles arbitrary-depth chains transparently — the cost is one extra commit lookup per level, which the Phase 3 perf-sanity test (`crates/uni/tests/common/fork/fork_nested_perf.rs`) asserts stays within 5× the depth-1 baseline.
 
 **Auto-flush on create (materializing the fork point).** Inside `create_fork_2pc`, the parent's L0 buffer is flushed to L1 (`flush_to_l1`) *before* reading the parent branch's current version — for both primary-rooted and nested forks. A fork branches off concrete Lance dataset versions and resolves reads through `base_paths`; it never consults the parent's in-memory L0 buffer. Without the flush the child would branch off a stale (or, for an in-memory DB, empty) Lance tip and never see the parent's committed-but-unflushed writes through the chain. The flush is idempotent and a no-op when L0 is empty, so it is cheap; it only materializes writes the parent had *already committed* at fork time, so snapshot isolation is unaffected (post-fork writes are not flushed here and stay invisible to the fork). This means `db.flush()` before forking is **not** required for correctness. Earlier builds gated this flush on the parent being a fork and left primary-rooted forks to a `db.flush()`-before-fork convention; that gap was issue #97 (a fork on an in-memory DB read zero rows).
 
-**Snapshot isolation per level.** A descendant sees its ancestor's state *as of the descendant's creation time*. Writes on an ancestor after the descendant was created are invisible to that descendant. Sibling forks under the same parent are mutually isolated by construction — each carries its own branch from the parent's tip. Phase 3 integration tests (`crates/uni/tests/fork_nested.rs`) cover all three isolation contracts.
+**Snapshot isolation per level.** A descendant sees its ancestor's state *as of the descendant's creation time*. Writes on an ancestor after the descendant was created are invisible to that descendant. Sibling forks under the same parent are mutually isolated by construction — each carries its own branch from the parent's tip. Phase 3 integration tests (`crates/uni/tests/common/fork/fork_nested.rs`) cover all three isolation contracts.
 
 **Schema composition.** A nested child's effective schema is `primary ⊕ parent_overlay ⊕ child_overlay`. Composition is implicit through chained `SchemaManager::with_overlay`: each `at_fork` call clones the current manager (which for a nested child *is* the parent's already-merged manager) and merges its own overlay on top. The result is one frozen merged snapshot per level, computed at session open time only. Additions made to the parent's overlay after the child was created stay isolated from the child, matching the same fork-point snapshot semantics that apply to data.
 
@@ -9462,6 +9587,8 @@ The `BranchedBackend` decorator does not stack across nesting levels. A nested c
 - `ForkInUse { name, holder_count }` — forked sessions are still alive.
 - `ForkInflightTx { name }` — a `Transaction` is open on the fork's UniInner.
 - `ForkHasChildren { name, children }` — Phase 3 guard; refuses to orphan descendants.
+
+Before `ForkInUse`, the drop waits up to `UniConfig::drop_fork_drain_timeout` (default 10s) for the fork's live sessions to be released and its pending flushes to drain (`PendingFlushTimeout` otherwise). A failed branch delete returns `ForkLifecycle { stage: "delete_branch" }`.
 
 `Uni::drop_fork_cascade(name)` removes a fork and every descendant. It walks the subtree depth-first via `ForkRegistryHandle::list_children`, then pre-validates every node in one pass — every node must satisfy the `ForkInUse` and `ForkInflightTx` checks. Any blocker surfaces an aggregate `ForkSubtreeInUse { blockers: Vec<String> }` *before* tombstoning anything, so a partial cascade never leaves orphans. On a clean pre-validation pass, the cascade drops deepest-first via the single-fork `drop_fork` path; a crash mid-cascade resumes through existing tombstone recovery on the next process boot.
 
@@ -9477,7 +9604,7 @@ Phase 4a bolts a small operational layer onto the substrate so forks can be used
 
 **Budget.** `UniConfig::max_forks: Option<usize>` caps total fork count enforced at `ForkRegistryHandle::begin_create`. Counts include `Active + Pending + Tombstoned` — tombstoned forks still hold branch state on disk until recovery completes, so counting them prevents create/drop churn from slipping past the cap. Hitting the cap surfaces `UniError::ForkBudgetExceeded { current, max }` at the API layer.
 
-**Tags.** `Uni::tag_fork(name, tag)` walks the fork's `(dataset → branch)` map and creates one Lance tag per dataset, namespaced as `fork_{tag}_{dataset}`. Each tag pins the branch's *current* version — subsequent fork writes do not move the tag. This is the load-bearing property: Lance's compaction retention sweep preserves any version referenced by an active tag, so tagged-then-dropped forks safely retain their state on disk for audit hold or regulatory snapshots. `Uni::untag_fork` is idempotent per-dataset (missing tags are no-ops). `Uni::list_fork_tags` deduplicates the user-visible tag names by stripping the namespace prefix.
+**Tags.** `Uni::tag_fork(name, tag)` walks the fork's `(dataset → branch)` map and creates one Lance tag per dataset, namespaced as `fork_{tag}_{dataset}`. Each tag pins the branch's *current* version — subsequent fork writes do not move the tag. Lance's compaction retention sweep preserves any version referenced by an active tag, so a tag holds the fork's state while the fork exists. Currently a tagged branch cannot be deleted: `drop_fork` on a tagged fork fails at stage `delete_branch` and leaves it Tombstoned, so untag before dropping. `list_fork_tags` and `untag_fork` read the registry and raise `ForkNotFound` once a fork is dropped. `Uni::untag_fork` is idempotent per-dataset (missing tags are no-ops). `Uni::list_fork_tags` deduplicates the user-visible tag names by stripping the namespace prefix.
 
 **Cancellation parent → child.** `Session::new_forked` stores `parent_token.child_token()` instead of a fresh `CancellationToken`. Cancelling a parent session fires every descendant's token; cancelling a child does not affect the parent. Sibling forks under the same parent are independent. This matches spec §4.6.
 
@@ -9485,7 +9612,7 @@ A subtle interaction: `Session::cancel()` cancels the currently-held token *and 
 
 **Pin/refresh on forked sessions.** Phase 1 forbade `pin_to_version` on a forked session via a `debug_assert!` in `StorageManager::pinned()`. Phase 4a lifted the assertion: `pinned()` now preserves `fork_scope` so the resulting `StorageManager` reads through both the fork's branches (via `fork_scope`) and at the snapshot's HWM (via `pinned_snapshot`). Writes are gated separately at the session layer — `Session::tx()` rejects on a pinned session with `UniError::ReadOnly`.
 
-**Watch / hooks / params on forked sessions.** Each `UniInner` (primary or fork-scoped) owns its own `commit_tx: broadcast::Sender`, so `Session::watch` is fork-isolated by construction — a forked session's watch only sees that fork's commits, primary's watch never sees fork commits, and sibling forks don't bleed into each other. Hooks and params are per-session and start empty on a fork (no propagation in either direction). These contracts existed before Phase 4a; the phase added regression tests (`fork_watch.rs`, `fork_hooks.rs`, `fork_params.rs`) so the design is locked in.
+**Watch / hooks / params on forked sessions.** Each `UniInner` (primary or fork-scoped) owns its own `commit_tx: broadcast::Sender`, so `Session::watch` is fork-isolated by construction — a forked session's watch only sees that fork's commits, primary's watch never sees fork commits, and sibling forks don't bleed into each other. Hooks and params are per-session and start empty on a fork (no propagation in either direction). These contracts existed before Phase 4a; the phase added regression tests (`crates/uni/tests/common/fork/{fork_watch,fork_hooks,fork_params}.rs`) so the design is locked in.
 
 ## Fork-Local Index Fusion (Phase 5a-impl)
 
@@ -9493,7 +9620,7 @@ Phase 5a-impl adds the build pipeline and planner integration that turn fork-loc
 
 **Build trigger.** Two paths fire a fork-local index build:
 
-- **Automatic.** A background task spawned in `Uni::open` (`crates/uni/src/api/fork_index_builder.rs`) polls the fork registry every `UniConfig::fork_index_builder_interval` (default 30s). For each active fork whose `(label, column)` fragment count crosses `UniConfig::fork_index_build_threshold` (default 10k rows), if primary has a scalar index on that column, the auto-builder schedules a `ScalarBtree` build on the fork's branch.
+- **Automatic.** A background task spawned in `Uni::open` (`crates/uni-fork/src/maintenance.rs` for the scheduling, `crates/uni/src/api/fork_maintenance.rs` for the tick body) polls the fork registry every `UniConfig::fork_index_builder_interval` (default 30s). For each active fork whose `(label, column)` fragment count crosses `UniConfig::fork_index_build_threshold` (default 10k rows), if primary has a scalar index on that column, the auto-builder schedules a `ScalarBtree` build on the fork's branch.
 - **Manual.** `Session::build_fork_local_index(label, column, kind)` triggers the build immediately and bypasses the threshold. Tests use this for deterministic timing; power users use it to opt into `Sorted` or `VidUid` kinds the auto-builder doesn't dispatch.
 
 **Build path.** Confirmed by the Phase 5a spike at `crates/uni-store/src/backend/lance_branch.rs::tests::phase5a_spike_per_branch_index`: Lance writes per-branch indexes correctly. `create_index_builder` against a branch-checked-out dataset produces an index file scoped to that branch — main sees zero indexes after the build, the branch sees one. The fork's `drop_fork`/`drop_fork_cascade` cleans up the index files automatically because they live under the branch directory.
@@ -9506,7 +9633,7 @@ The build entry point is `uni_store::fork::index_builder::build_fork_local_index
 
 The rewrite is wired at every `planner.plan(ast)` site in `crates/uni/src/api/impl_query.rs` so all query paths (read, profile, explain) observe the same fusion-aware plan tree. The rewrite is a no-op on primary sessions and on forked sessions without registered indexes — fall-through correctness is preserved.
 
-**Physical operators (Phase 5a-impl decay).** `FusedIndexScan` decays to a regular `Scan` at the physical planner. This is intentional: Lance's per-branch index reads via `base_paths` produce correct fused results without bespoke physical operators for the lossless types. The planner-side variant carries observable signal (visible in `Session::query_with(...).explain().await?.plan_text`) without any runtime cost. Phase 5b will replace the decay with `FusedVectorSearchExec` (top-k merge + exact rerank) and `FusedFullTextSearchExec` (RRF) for the lossy types that genuinely need bespoke fusion.
+**Physical operators (Phase 5a-impl decay).** `FusedIndexScan` decays to a regular `Scan` at the physical planner. This is intentional: Lance's per-branch index reads via `base_paths` produce correct fused results without bespoke physical operators for the lossless types. The planner-side variant carries observable signal (visible in `Session::query_with(...).explain().await?.plan_text`) without any runtime cost. Phase 5b kept this design for the lossy types too (see below): no bespoke fused physical operators were added.
 
 **Read correctness.** End-to-end results on a forked session are correct *with or without* fork-local index registration — Lance's `base_paths` chain reads through both branches and the existing scan path produces the union. Phase 5a-impl's contribution is observability and the substrate for Phase 5b's lossy-type operators, not runtime behavior change for the lossless types.
 
@@ -9514,7 +9641,7 @@ The rewrite is wired at every `planner.plan(ast)` site in `crates/uni/src/api/im
 
 Phase 5b extends Phase 5a-impl to the two *lossy* fusion types: vector ANN and BM25 FTS. The build path mirrors 5a-impl (per-branch Lance index files; spike-confirmed at `crates/uni-store/src/backend/lance_branch.rs::tests::phase5b_spike_per_branch_vector`); the read path lifts the Phase 1 stubs in `BranchedBackend::vector_search` and `full_text_search` so they route through the fork's branch when one exists, exposing fused results from primary-inherited and fork-local rows in a single Lance call.
 
-**Build path.** `Session::build_fork_local_index(label, column, ForkLocalIndexKind::Vector)` builds a Lance native vector index (default IVF-Flat 1-partition L2) on the fork's branch via `lance_branch::create_vector_index_on_branch`. `ForkLocalIndexKind::FullText` builds via `IndexType::Inverted` + `InvertedIndexParams::default` (matching primary's `IndexManager::create_fts_index` — `ScalarIndexParams::for_builtin(Inverted)` is missing the required `base_tokenizer` and rejects the build). Both register in `ForkScope.fork_local_indexes` on success; the registry now covers all five Phase 5 kinds.
+**Build path.** `Session::build_fork_local_index(label, column, ForkLocalIndexKind::Vector)` builds a Lance native vector index (default IVF-Flat 1-partition L2) on the fork's branch via `lance_branch::create_vector_index_on_branch`. `ForkLocalIndexKind::FullText` builds via `IndexType::Inverted` + `InvertedIndexParams::default` (matching primary's `IndexManager::create_fts_index` — `ScalarIndexParams::for_builtin(Inverted)` is missing the required `base_tokenizer` and rejects the build). Both register in `ForkScope.fork_local_indexes` on success. The registry covers six kinds: the five Phase 5 kinds plus `ForkLocalIndexKind::Sparse`, a planner/EXPLAIN marker that switches `uni.sparse.query` on a fork to the `SparseDot` fusion (retrieval is a branch scan re-scored by sparse dot product). `FusionKind` likewise has `SparseRrf` (a `uni.search` with a `sparse` arm, independent of fork-local indexes) and `SparseDot` beside the five Phase 5 kinds.
 
 **Read path.** `BranchedBackend::vector_search` and `full_text_search` check whether the fork has a branch for the target dataset (`scope.branch_for(table)`); if yes, they call `lance_branch::vector_search_on_branch` / `full_text_search_on_branch`, which open the dataset on the branch and call `Scanner::nearest` / `Scanner::full_text_search`. Lance's `base_paths` chain on the branch surfaces both fork-local and parent-inherited rows in one scan. When the fork has no branch (label never written through the fork), the BranchedBackend delegates to primary's path.
 
@@ -9524,7 +9651,7 @@ Phase 5b extends Phase 5a-impl to the two *lossy* fusion types: vector ANN and B
 
 **Filter pushdown is dropped on the branch path.** Phase 5b's MVP doesn't push predicates through to `lance::Dataset::scan`; the caller above re-applies. Document and tighten in a 5b-followup.
 
-**Recall scaffold.** `crates/uni/tests/fork_index_recall_bench.rs` (`#[ignore]`'d) is the on-ramp for spec §8.2's 95% recall@K target on N=100k+ items. Run with `cargo nextest run -p uni-db --test fork_index_recall_bench --run-ignored ignored-only --no-capture`. For full compliance reporting, write a Criterion bench at `crates/uni/benches/fork_index.rs` and capture results in `compliance_reports/fork_index_<date>.md`.
+**Recall scaffold.** `crates/uni/tests/common/fork/fork_index_recall_bench.rs` (`#[ignore]`'d, part of the `integration` test binary) is the on-ramp for spec §8.2's 95% recall@K target on N=100k+ items. Run with `cargo nextest run -p uni-db --test integration -E 'test(fork_index_recall)' --run-ignored ignored-only --no-capture`. For full compliance reporting, write a Criterion bench at `crates/uni/benches/fork_index.rs` and capture results in `compliance_reports/fork_index_<date>.md`.
 
 ## Promotion and Diff (Phase 6b)
 
@@ -9534,12 +9661,14 @@ surfaces, both with content-addressed identity:
 **Diff** — `Uni::diff_fork_primary(name)` and `Uni::diff_forks(a, b)`
 return a `ForkDiff { vertices, edges }` describing the structural
 delta from the first view to the second: `added` rows appear in
-the second view only, `deleted` in the first only, `changed`
-carries per-property before/after pairs on rows with matching UID.
-Identity is `compute_vertex_uid(label, None, properties)` for
-vertices and `(src_uid, dst_uid)` (scoped to the edge type) for
-edges, so two unrelated forks with overlapping VID allocation still
-pair correctly. `DiffVertex.vid` survives as informational metadata.
+the second view only, `deleted` in the first only. Identity is the
+content UID: `compute_vertex_uid(label, ext_id, properties)` for
+vertices and `compute_edge_uid(src_uid, dst_uid, type, properties)`
+for edges, so two unrelated forks with overlapping VID allocation still
+pair correctly. Because the properties are part of the identity, a
+property edit appears as one `deleted` row plus one `added` row; the
+`changed` lists are always empty (kept in the API for a future
+identity that anchors on a stable id). `DiffVertex.vid` survives as informational metadata.
 The labels and edge types scanned are, per side, the declared ones
 plus those discovered in data (`MATCH (n) RETURN DISTINCT labels(n)`,
 `MATCH ()-[r]->() RETURN DISTINCT type(r)`), so schemaless labels and
@@ -9722,7 +9851,7 @@ graph TB
 
 The unit of extension is a **plugin**: a type implementing the `Plugin` trait (`crates/uni-plugin/src/plugin.rs`), which exposes a `manifest(&self) -> &PluginManifest` and a `register(&self, r: &mut PluginRegistrar) -> Result<(), PluginError>`. Inside `register`, the plugin calls one registrar method per extension it provides. The registrar validates each call against the plugin's *effective capabilities* and its qualified-name namespace, stages the registration, and — only if every call in the batch succeeds — atomically commits them to the registry via `commit_to_registry`. A capability mismatch fails the whole `register()` call; partial registration is never observable.
 
-Names are `QName { plugin: SmolStr, local: SmolStr }` (`crates/uni-plugin/src/qname.rs`) — reverse-DNS plugin id plus a local name, e.g. `ai.dragonscale.geo` × `haversine`. The registry is consulted by the executor, planner, and writer through point-lookups; there are zero hardcoded dispatch arms left (the mechanical invariant: `grep` for `enum FoldAggKind` or a `match name { "MIN" | "MAX" | ... }` in `crates/uni-query/src/query/df_graph/` returns nothing).
+Names are `QName { namespace: SmolStr, local: SmolStr }` (`crates/uni-plugin/src/qname.rs`) — reverse-DNS plugin id plus a local name, e.g. `ai.dragonscale.geo` × `haversine`. The registry is consulted by the executor, planner, and writer through point-lookups; there are zero hardcoded dispatch arms left (the mechanical invariant: `grep` for `enum FoldAggKind` or a `match name { "MIN" | "MAX" | ... }` in `crates/uni-query/src/query/df_graph/` returns nothing).
 
 The foundation crate is `uni-plugin` (traits, manifest, capability, registry, registrar, lifecycle, verification, observability). Loader crates and built-in sources sit above it (see [§XVII.5](#five-loaders--the-loader-matrix)).
 
@@ -9767,7 +9896,7 @@ let effective = declared.intersect(&granted);
 | `depends_on` | `Vec<PluginDep>` | `{id, version_req, optional}` |
 | `capabilities` | `CapabilitySet` | requested at load time |
 | `determinism` | `Determinism` | `Pure` / `SessionScoped` / `Nondeterministic` |
-| `side_effects` | `SideEffects` | `ReadOnly` / `Writes` / `ExternalIO` |
+| `side_effects` | `SideEffects` | `ReadOnly` / `Writes` / `ExternalIo` |
 | `scope` | `Scope` | `Instance` / `Session` |
 | `hash` | `Option<String>` | Blake3 hex, for hash-pinning |
 | `signature` | `Option<ManifestSignature>` | `{algorithm, key_id, value}` |
@@ -9788,12 +9917,12 @@ All five loaders converge on `PluginRegistrar`; the execution layer is loader-ag
 | Crate | `uni-plugin-builtin` / `-apoc-core` | `uni-plugin-wasm` | `uni-plugin-extism` | `uni-plugin-rhai` | `uni-plugin-pyo3` |
 | Sandbox | none (trusted) | wasmtime + WIT | extism host-fn ABI | Rhai engine | none (trusted) |
 | Boundary | native trait | WIT bindings (Arrow IPC) | Arrow IPC / JSON over linear memory | `rhai::Engine` | PyCapsule (Arrow C Data Interface) |
-| Surfaces shipped | **all 26** | scalar / aggregate / procedure / **algorithm** | scalar / aggregate / procedure / **algorithm** | scalar / aggregate / procedure / **algorithm** | scalar / aggregate / procedure / **algorithm** |
+| Surfaces shipped | **all 22** | scalar / aggregate / procedure / **algorithm** | scalar / aggregate / procedure / **algorithm** | scalar / aggregate / procedure / **algorithm** | scalar / aggregate / procedure / **algorithm** |
 | Vectorized scalars | n/a | row/IPC-batch | row/IPC-batch | row | **yes** (`vectorized=True`) |
 | Cap. gating | compile-time | structural (linker omits imports) | runtime (host-fn filter) | runtime (engine factory) | manifest + runtime |
 | Parity tier | reference | byte-identical | byte-identical | ≤ 4 ULP | ≤ 4 ULP |
 | Reload | full | epoch-fenced | epoch-fenced | full | session-scope unregister |
-| Parity test | (reference) | `m6_cross_abi_parity.rs` | (same) | `m7_rhai_cross_loader_parity.rs` | `m8_pyo3_cross_loader_parity.rs` |
+| Parity test | (reference) | `loaders/m6_cross_abi_parity.rs` | (same) | `loaders/m7_rhai_cross_loader_parity.rs` | `loaders/m8_pyo3_cross_loader_parity.rs` |
 
 > **Note:** Only the Rust path can author all 22 extension surfaces. As of 3.0.0 the four non-Rust loaders author **scalar, aggregate, procedure, and graph algorithms** — the WASM Component Model now defines *four* WIT worlds (`scalar-plugin`, `aggregate-plugin`, `procedure-plugin`, and `algorithm-plugin` in `crates/uni-plugin-wasm/wit/world.wit`, the last importing both the `host-graph` interface and the typed `host-arena` interface); Extism, Rhai, and PyO3 carry the matching GraphCompute host surface (`graph_compute` + `adapter_algorithm`). Guest graph algorithms drive the coarse GraphCompute kernels over opaque handles, and may grow their own mutable structure through the `graph-arena@1` kernels (see [§GraphCompute — Guest-Authorable Graph Algorithms](#graphcompute--guest-authorable-graph-algorithms)). The remaining surfaces are compile-time-Rust-only. Vectorized scalar evaluation is implemented for PyO3 only; CM/Extism are IPC-batch, Rhai is row-mode.
 
@@ -9826,8 +9955,10 @@ db.load_rhai_plugin(script, grants=None)
 db.load_python_plugin(module_src, module_name, grants=None)
 db.load_wasm_component(wasm_bytes, grants=None)   # WASM Component Model (wasmtime)
 db.load_wasm_extism(wasm_bytes, grants=None)      # Extism
-# The default wheel bundles wasmtime; variant wheels (onnx/cuda/metal) that omit the
-# `wasm-plugins`/`extism-plugins` features compile these two methods out.
+# The default wheel and the variant wheels (onnx/cuda/metal) are built without the
+# `wasm-plugins`/`extism-plugins` features, so these two methods are compiled out;
+# a source build with `--features wasm-plugins,extism-plugins` (or CI's separate
+# WASM test wheel) provides them.
 
 # In-process authoring via the host-injected `db` decorator sink:
 @db.scalar_fn("haversine", args=["float","float","float","float"],
@@ -9858,7 +9989,7 @@ The same scalar (great-circle distance, signature `(lat1, lon1, lat2, lon2: f64)
 | Rhai | `examples/example-rhai-geo/` (`geo.rhai`) | `Uni::load_rhai_plugin` |
 | PyO3 | `examples/example-pyo3-geo/` (`geo.py`) | `Uni::load_python_plugin` |
 
-Cross-loader byte-parity is a real test: `crates/uni/tests/m6_cross_abi_parity.rs::cross_abi_haversine_results_match` loads the CM and Extism artifacts into one `Uni` under different qnames and asserts `e.to_bits() == c.to_bits()` across all rows; the Rhai and PyO3 variants agree to ≤ 4 ULP (`m7_*` / `m8_*`).
+Cross-loader byte-parity is a real test: `crates/uni/tests/common/loaders/m6_cross_abi_parity.rs::cross_abi_haversine_results_match` loads the CM and Extism artifacts into one `Uni` under different qnames and asserts `e.to_bits() == c.to_bits()` across all rows; the Rhai and PyO3 variants agree to ≤ 4 ULP (`m7_*` / `m8_*`).
 
 ## Surface Traits Reference
 
@@ -9876,8 +10007,8 @@ Every surface trait lives in `crates/uni-plugin/src/traits/`, is `Send + Sync + 
 | Optimizer rule | `OptimizerRuleProvider` (operator.rs) | `rule` (logical), `physical_rule` | pushdown negotiation |
 | Pushdown markers | `SupportsFilter/Projection/Limit/TopN/AggregatePushdown` (pushdown.rs) | negotiation | (5 markers) |
 | Index kind | `IndexKindProvider` + `IndexBuild`/`IndexHandle` (index.rs) | `kind`, `build`, `open` | vector index |
-| Storage | `Storage` (storage.rs) | per-label async read / write | Lance backend |
-| Algorithm | `AlgorithmProvider` + `AlgorithmHost` (algorithm.rs) | `signature`, `run(AlgorithmContext)` | 35 native + guest-authored |
+| Storage | `Storage` (storage.rs) | per-label async read / write | — (Lance is the built-in storage engine, not a registered `Storage` plugin) |
+| Algorithm | `AlgorithmProvider` + `AlgorithmHost` (algorithm.rs) | `signature`, `run(AlgorithmContext)` | 37 native + 6 provider-authored built-ins + guest-authored |
 | GraphCompute / GraphView | `AlgorithmProvider` + `AlgorithmHost::project → GraphView` (algorithm.rs) | typed `AlgorithmSignature { args, slices }`; `AlgoSession` kernels over handles | `uni.algo.gcpagerank` / `gcwalks` / `gcoverlap` |
 | CRDT | `CrdtKindProvider` + `CrdtState` (crdt.rs) | `kind`, `empty`, `from_persisted` | 5 (LWW/OR-Set/G-Counter/MV-Register/RGA) |
 | Hook | `SessionHook` (hook.rs) | `on_parse`/`on_analyze`/`on_plan`/`on_execute_start` | phased + legacy bridge |
@@ -9901,11 +10032,11 @@ Every surface trait lives in `crates/uni-plugin/src/traits/`, is `Send + Sync + 
 
 **Bulk-load events** (`crates/uni-bulk/src/events.rs`, `crates/uni/src/api/bulk_events.rs`). A bulk load bypasses the transaction buffer, so the commit path's event extraction never saw it. `BulkBackend::events` (a `BulkEventSink`, `DbBulkEventSink` over a weak `UniInner`) closes that: after `show_load` in `BulkWriter::commit` (and in `Redrive::finish` for a load completed in the background) the writer hands a `VisibleLoad` to the sink, which takes a ticket via `sequence_announcement`, publishes one `CommitNotification` (`causal_version` = the load's `write_version`, `version` = the current version, `tx_id` = load id, `session_id` `"bulk-load"`), then reads the load back from the main vertex and edge tables filtered on `_version = write_version` (no other write uses a reserved bulk version) through `LoadEventReader`, at most `BULK_EVENT_CHUNK_ROWS` (4096) rows per chunk (the scan runs on the process-wide IO runtime through `ScanFeed`: Lance spawns a scan's fragment reads on the runtime polling it, so a scan polled after that runtime shuts down can fail or stall: Lance 11 panicked with `JoinError::Cancelled`, and Lance 13 can instead propagate a decoder task-cancellation error, pinned by `uni-store`'s `lance_scan_polled_after_its_runtime_is_dropped_fails_in_lance`; the delivery task runs on whatever runtime ran the load's `commit`), building `MutationEvents::creates` rows (`NODE_CREATE` per vertex label, `EDGE_CREATE` per edge; `props_json` decoded only when a predicate references properties). Each chunk goes to `TriggerRouter::dispatch_after` and, when a CDC output is registered, to a CDC *mutation stream*: `CdcRuntime::open_mutation_stream` registers a bounded (`MUTATION_STREAM_DEPTH` = 4) channel whose id rides on `CommitNotification::mutation_stream`; the driver, on reaching that notification, delivers each chunk as a `CdcBatch` with the load's LSN range and checkpoints once after the sender's `finish`. A stream that closes unfinished, or is missing, halts every stream (the gap stays visible). The runtime drops all pending receivers on `Lagged` and on stop, so a sender never waits on a stream nothing reads. Synchronous before-phase triggers cannot be honoured after the commit point: `BulkWriter::check_before_triggers` asks `TriggerRouter::synchronous_before_trigger_for` (event kind + label / edge type; predicates count as matching) before staging a label's or edge type's rows and again at the top of `commit` (then discarding the load), and refuses with `UniError::BulkLoadBlockedByTrigger` unless `skip_before_triggers(true)`. The sink is driven from a task of its own (`BulkWriter::publish_events` spawns `sink.publish` on a task tracked like the re-drive, and `commit` awaits a oneshot), so dropping `commit()` drops only the wait: before, a drop at `sequence_announcement` announced nothing (and leaked the mutation stream's receiver, which the sink opened first; it now takes the ticket before opening the stream), and a drop mid-stream left triggers short and halted every CDC stream (`triggers::bulk_events_delivery_resilience`). Only after-phase triggers that select a row of the load (`TriggerRouter::wants_after_event` for `NODE_CREATE` per label, `EDGE_CREATE` per edge type) cause the read-back; the built-in `_AuditMe` trigger used to cause it for every load. The delivery holds no strong `UniInner`: it subscribes to the view's shutdown signal before checking `ShutdownHandle::is_signalled`, and stops between chunks or while CDC back-pressures, returning `EventDelivery::Interrupted`; the dropped sender halts CDC (its checkpoint stays before the load), and the load's marker is kept -- `finalize` writes it `Committed` with `events_pending`, `Redrive::finish` leaves it `Active` -- so the next open delivers the load again. **Open-time delivery.** `finalize` promotes the marker to `Committed` only after the delivery, so a marker recovery finds `Active` (or `Committed` with `events_pending`) is a load whose events are not known delivered: `recover_interrupted_bulk_load` rewrites it `Committed` + `events_pending` (with `rows`, recorded at the commit point) and returns it as a `RecoveredLoad` (sorted by `write_version`; edge types from the marker's tables). `UniBuilder::build` hands them to `bulk_events::deliver_recovered_loads` after the `UniInner` exists, which announces each (tickets taken before `build` returns, so ahead of every user commit), finishes at once the markers of loads nothing consumes, and streams the rest on a tracked task, calling `finish_recovered_load_events` (receipt + delete, or just clearing `events_pending` when a read-only open left the endpoint check due) after each. `check_recovered_bulk_endpoints` leaves an `events_pending` marker for that call. A crash before it re-delivers at the next open: at least once. The consumers are those present during `build`: built-in triggers and declared triggers (reactivated by `register_builtin_plugins`, before recovery); `UniBuilder` has no plugin hook, so CDC outputs and plugin triggers, which register after `build` returns, never see an open-time delivery. A read-only open has no writer and delivers nothing; the markers wait. A marker of a release that did not record `version` cannot be read back and is not delivered. A fork's recovery runs in `UniInner::at_fork`, which returns its loads for `ForkBuilder::build` to deliver once the fork inner is shared. Forks have no CDC runtime (`UniInner::cdc_runtime` is `None` on derived inners), so a fork's load reaches triggers only.
 
-The authoritative *surface count* is the `Capability` enum's **26 extension variants** (3.0.0 removed `Connector` and added `LocyGenerator` + `GraphCompute`).
+The authoritative *surface count* is `SurfaceKind`'s **22 variants** (`crates/uni-plugin/src/surfaces/mod.rs`); the `Capability` enum gates them with **26 extension variants** (3.0.0 removed `Connector` and added `LocyGenerator` + `GraphCompute`).
 
 ## GraphCompute — Guest-Authorable Graph Algorithms
 
-**New in 3.0.0.** GraphCompute lets a third party author a *graph algorithm* — PageRank / Personalized PageRank, reachability/BFS, WCC, Bellman–Ford, k-core, eigenvector, HITS/Katz, random walks, neighbourhood similarity — as a plugin in **Rhai, Python, WASM (Component Model), or Extism**, with no forking and no shipping Rust. It complements the 35 native `algo.*` algorithms of [Part IX](#part-ix-graph-algorithms) with an *extensible* path.
+**New in 3.0.0.** GraphCompute lets a third party author a *graph algorithm* — PageRank / Personalized PageRank, reachability/BFS, WCC, Bellman–Ford, k-core, eigenvector, HITS/Katz, random walks, neighbourhood similarity — as a plugin in **Rhai, Python, WASM (Component Model), or Extism**, with no forking and no shipping Rust. It complements the 37 native `uni.algo.*` algorithms of [Part IX](#part-ix-graph-algorithms) with an *extensible* path.
 
 **"Conductor, not worker."** The guest runs only the O(iterations) control loop; native code does all O(V+E) work. Only **opaque handles and scalars** cross the plugin boundary — never frontiers, neighbour lists, or property columns. Because nothing heavy is marshalled, the identical design runs across every loader, and each ships a Personalized PageRank example that matches the native provider to **1e-9**.
 
@@ -9924,7 +10055,7 @@ The guest builds a graph and drives kernels through an **`AlgoSession`** (the ke
 
 Values are Arrow-backed; **handles are opaque, generational, epoch-tagged, kind-checked, and session-scoped** (`handle.rs` / `value.rs`). A handle packs `[epoch:16 | kind:4 | generation:12 | slot:32]`; the 4-bit kind tag admits up to 16 kinds, of which eight are live: `VertexSet = 0`, `Tensor = 1`, `Graph = 2`, `Walks = 3`, `Levels = 4`, `Pairs = 5`, `EdgeSet = 6`, `Arena = 7`.
 
-The catalog is **67 kernels** — 66 reachable from every loader, plus `graph`, which sandboxed guests receive through the `invoke-algorithm` arguments rather than as an op. The families:
+The catalog is **72 kernels** — 70 reachable from every loader, plus `graph` and `graph_named`, which sandboxed guests receive through the `invoke-algorithm` arguments rather than as an op. The families:
 
 - **Topology** — `bind_graph` / `project` a CSR snapshot (a `GraphView`); frontier / `expand` (direction `out` / `in` / **`both`** — the union of out- and in-edges, mask-fused). A **`both`** traversal requires a projection built with `includeReverse: true` (the reverse CSR): it fails loud with a typed error naming `includeReverse` rather than silently degrading to out-only. **`reach_fixpoint(g, seeds, dir)`** collapses the whole BFS-to-fixpoint (the reachable set) into one native O(V+E) call, so a guest never hand-writes the frontier loop — and cannot accidentally write the O(V·E) version that re-expands the visited set each round.
 - **Linear algebra** — SpMV over named semirings (direction `out` / `in` / `both`; `both` is an unweighted union, as the reverse CSR carries no weights); element-wise `map_apply` (`scale`, `recip`, `log`, **`exp`**, **`sqrt`**, affine, normalize) and `ewise` (`add`, `mul`, `min`, `max`, `axpy`, **`div`** with the `x/0 = 0` convention); reduce / scatter. `exp`/`log`/`sqrt`/`div` make the canonical UCT/PUCT term `c·√(ln N / n)` composable from kernels.
@@ -9989,7 +10120,8 @@ CALL uni.plugin.declareFunction(
   'cypher', 'RETURN price * (1.0 - pct)')
 CALL uni.plugin.declareProcedure('myco.reindex', '...', 'cypher', '...')  // WRITE mode needs Capability::ProcedureWrites
 CALL uni.plugin.declareAggregate('myco.wmean', ...)
-CALL uni.plugin.declareTrigger('myco.audit', 'Account', 'AfterCommit', ...)
+CALL uni.plugin.declareTrigger('myco.audit', 'CREATE ON :Account',
+  'CREATE (:AuditLog {vid: $vid})')        // (qname, event_filter, body[, deps_json])
 CALL uni.plugin.listDeclared()
 CALL uni.plugin.dropDeclared('myco.discount')
 ```
@@ -10023,7 +10155,7 @@ The scheduler (M11) drives durable, recurring maintenance:
 
 ## Hot Reload & Multi-Version ABI
 
-A captured `Arc<dyn ScalarPluginFn>` keeps serving its version while a post-reload registry lookup returns the new one — long-running queries finish on the version they began with (the arc-swap invariant, tested in `crates/uni/tests/hot_reload_consistency.rs`).
+A captured `Arc<dyn ScalarPluginFn>` keeps serving its version while a post-reload registry lookup returns the new one — long-running queries finish on the version they began with (the arc-swap invariant, tested in `crates/uni/tests/common/reload/hot_reload_consistency.rs`).
 
 - **`LifecycleState`** (`crates/uni-plugin/src/lifecycle.rs`): `Loaded → Linked → Initialized → Active → Draining → Removed`.
 - **`EpochFencedReload`**: `begin_drain` / `wait_for_drain` / `finalize` — drains in-flight invocations before swapping.
@@ -10031,7 +10163,7 @@ A captured `Arc<dyn ScalarPluginFn>` keeps serving its version while a post-relo
 
 ## Observability
 
-- **`init_otel_subscriber(cfg: OtelConfig) -> Result<OtelGuard>`** (`crates/uni-plugin-host/src/observability.rs`): an opt-in OTLP/gRPC exporter over `opentelemetry 0.27` + `tracing-opentelemetry 0.28`. Opt-in so it does not conflict with an embedder's own subscriber; dropping the `OtelGuard` shuts the provider down.
+- **`init_otel_subscriber(cfg: OtelConfig) -> Result<OtelGuard>`** (`crates/uni-plugin-host/src/observability.rs`): an opt-in OTLP/gRPC exporter over `opentelemetry 0.32` + `tracing-opentelemetry 0.33`. Opt-in so it does not conflict with an embedder's own subscriber; dropping the `OtelGuard` shuts the provider down.
 - **`host-log`** is the one host import available to every loader unconditionally — plugin tracing routes into the host's `tracing` macros at the matching level.
 - **`InvocationKind` + `record_invocation`** (`crates/uni-plugin/src/observability.rs`) emit per-plugin invocation telemetry (qname, kind, row count, elapsed, ok). Plugin-side `host.span_*` WIT imports are deferred (Phase D).
 
@@ -10059,7 +10191,7 @@ Probe ids are stability-tested (`conformance_probes_have_stable_ids`, in `crates
 | **Mark determinism** | `determinism: Pure` lets the planner memoize. |
 | **Bound runaway scripts** | `FuelPerCall(N)` / `WallClockMillisPerCall(N)` for Rhai/WASM. |
 | **Batch in PyO3** | `@db.scalar_fn(vectorized=True)` crosses the GIL once per `RecordBatch`, not per row. |
-| **Sign & pin in production** | Ship a `hash` (Blake3) and an Ed25519 `signature` (verification is default-on). |
+| **Sign & pin in production** | Ship a `hash` (Blake3) and an Ed25519 `signature`, and enable verification: the default `SignaturePolicy` is `Disabled` (`PluginTrustConfig`, set with `UniBuilder::plugin_trust`). |
 
 ## Plugin Anti-Patterns
 
@@ -10125,10 +10257,10 @@ The `uni` CLI provides command-line access to Uni databases.
 |---|---|---|
 | `repl` | Interactive REPL (default) | `uni repl --path ./db` |
 | `query` | Execute single Cypher query | `uni query "MATCH (n) RETURN n LIMIT 10" --path ./db` |
-| `import` | Bulk load from JSONL files | `uni import semantic-scholar --papers data.jsonl --output ./db` |
-| `snapshot list` | List all snapshots | `uni snapshot list --path ./db` |
-| `snapshot create` | Create a snapshot | `uni snapshot create release-v1 --path ./db` |
-| `snapshot restore` | Restore to a snapshot | `uni snapshot restore abc-123 --path ./db` |
+| `import` | Bulk load from JSONL files | `uni import semantic-scholar --papers papers.jsonl --citations citations.jsonl --output ./db` |
+| `snapshot list` | List all snapshots | `uni snapshot --path ./db list` |
+| `snapshot create` | Create a snapshot | `uni snapshot --path ./db create release-v1` |
+| `snapshot restore` | Restore to a snapshot | `uni snapshot --path ./db restore abc-123` |
 | `plugin install` | Install a plugin by extension/scheme | `uni plugin install ./geo.rhai --grants ScalarFn` |
 
 > **Note:** `plugin install` dispatches by extension/scheme. The `.rhai` branch is shipped (requires the `rhai-plugins-cli` feature); `oci://…` and `http(s)://…` install land in M12. The broader `uni plugin {list, grant, remove, info, reload, verify}` surface is also M12. See [Part XVII](#part-xvii-plugin-framework).
@@ -10137,8 +10269,8 @@ The `uni` CLI provides command-line access to Uni databases.
 
 - Interactive Cypher query execution with pretty-printed table output
 - Query history management
-- `EXPLAIN` and `PROFILE` support
-- Multi-line query input
+- `EXPLAIN` and `PROFILE` prefixes (handled by the REPL, not Cypher keywords)
+- One query per input line
 
 ### Import Command
 
@@ -11255,7 +11387,7 @@ Quick reference of all anti-patterns from every chapter:
 | **SimpleGraph** | Custom in-memory graph data structure (in `uni-common`) used for L0 buffer and algorithms |
 | **Snapshot** | JSON manifest capturing a consistent point-in-time view of all datasets |
 | **Stratum** | Group of mutually-recursive Locy rules evaluated together in fixpoint |
-| **Surface Trait** | One of the 26 extension-point traits in `uni-plugin/src/traits/` (ScalarPluginFn, LocyAggregate, LocyGenerator, AlgorithmProvider/GraphCompute, …) |
+| **Surface Trait** | One of the extension-point traits (22 `SurfaceKind`s) in `uni-plugin/src/traits/` (ScalarPluginFn, LocyAggregate, LocyGenerator, AlgorithmProvider/GraphCompute, …) |
 | **Trail** | Path semantics forbidding a repeated *relationship* (a vertex may repeat). openCypher's default, and what every Uni variable-length pattern uses |
 | **Trigger** | A `TriggerPlugin` that fires on mutations with phase + outcome (Continue / Reject / Defer) |
 | **UniId** | Content-addressed identifier — SHA3-256 hash of (label, ext_id, properties) |
@@ -11270,7 +11402,7 @@ Quick reference of all anti-patterns from every chapter:
 
 ---
 
-*The Uni Black Book — Version 2.2.1*
+*The Uni Black Book — Version 6.0.0*
 *Generated from Uni DB codebase analysis*
 
 
