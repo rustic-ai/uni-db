@@ -606,7 +606,7 @@ A manifest (`catalog/manifests/{id}.json` under the table root; `catalog/latest`
 - **A foreign commit** (a table version this handle did not write, met while it has no other commit on that table running) trips the writer's fence: it stops writing (`WriterFenced`), and the next writable open discards the version.
 - **Read-only handles** re-read `catalog/latest` at the start of a query, at most once per `UniConfig::read_cut_refresh`.
 - **Rewrites read the newest versions.** A path that reads a table to rewrite it (semantic compaction, index builds, schema evolution, restore, bulk load) reads each table's newest version, so it keeps rows a running flush has committed but not yet published.
-- **Older stores.** A manifest written before 5.4 names no tables; reads see every table's newest version until the first flush records them. Fork branches are read at their newest versions.
+- **Older stores.** A manifest written before 6.0 names no tables; reads see every table's newest version until the first flush records them. Fork branches are read at their newest versions.
 
 ### Snapshot Operations
 

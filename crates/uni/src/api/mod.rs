@@ -2233,7 +2233,7 @@ impl UniBuilder {
                      adopted automatically. To open this store, copy the bucket root's \
                      catalog/ (and, for a remote-only store, wal/ and id_allocator.json) \
                      under the prefix, then open it again. See the storage documentation \
-                     on stores written before 5.4.",
+                     on stores written before 6.0.",
                         root = location.root_uri(),
                         files = root_files.join(", "),
                     )));

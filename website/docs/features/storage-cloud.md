@@ -99,7 +99,7 @@ Also:
 | Azure | `az://container/prefix`, account from the configuration or `AZURE_STORAGE_ACCOUNT_NAME`; or `abfss://container@account.dfs.core.windows.net/prefix` |
 | Local | a path, or `file:///path` |
 
-The form `az://account/container` documented before 5.4 is no longer read: `az://acme/data` is container `acme` with prefix `data`, whatever account is configured. Write `az://container/prefix` with the account in the configuration. (The old reading made `az://acme/data` mean container `data` only when the configured account was `acme`, so a container named like its account could not be addressed.)
+The form `az://account/container` documented before 6.0 is no longer read: `az://acme/data` is container `acme` with prefix `data`, whatever account is configured. Write `az://container/prefix` with the account in the configuration. (The old reading made `az://acme/data` mean container `data` only when the configured account was `acme`, so a container named like its account could not be addressed.)
 
 A store on Microsoft Fabric (`abfss://…@account.dfs.fabric.microsoft.com`) needs its endpoint as the `azure_endpoint` storage option. An `AWS_SESSION_TOKEN` in the environment is kept alongside keys you configure explicitly, as Lance keeps it too: unset it when configuring a different account's static keys (a MinIO's, say), or the service rejects the token.
 
@@ -174,14 +174,14 @@ Every snapshot manifest names the Lance version of each table and index dataset,
 - **A stale writer's late append is never read.** A writer that stalled past its lease can still land one table commit after resuming, but no manifest names it. If the current writer then meets that version while it has no other commit on that table running, it stops writing (`WriterFenced`) rather than build on it: its commits stay in the WAL, and the next writable open discards the stray version.
 - **Read-only handles** pick up new flushes at the start of a query, at most once per `UniConfig::read_cut_refresh` (once a second by default on an object store; every query for a local store).
 
-Compaction, index builds and schema widening are visible to the handle that made them at once, and to other handles once a manifest names them: a successor manifest is published when each finishes, at the next catalog save and flush, and at `shutdown()`. A store whose latest manifest was written before 5.4 names no tables; reads see every table's newest version until its first flush under 5.4 records them. Fork branches are read at their newest versions.
+Compaction, index builds and schema widening are visible to the handle that made them at once, and to other handles once a manifest names them: a successor manifest is published when each finishes, at the next catalog save and flush, and at `shutdown()`. A store whose latest manifest was written before 6.0 names no tables; reads see every table's newest version until its first flush under 6.0 records them. Fork branches are read at their newest versions.
 
-## Stores written before 5.4
+## Stores written before 6.0
 
 - **Local stores and bucket-root remote stores** open unchanged.
   - A local store already has the standard layout.
   - A bucket-root remote store, which keeps its tables directly under the root, is recognized as the `flat` layout and stays that way. Its tables are never moved, so its forks keep working.
-- **Remote stores under a prefix** (`s3://bucket/prefix`) are refused with an error naming the files involved. Before 5.4, such a store wrote its catalog, snapshot pointer and WAL to the **bucket root**, not under its prefix, so stores in one bucket could overwrite each other's metadata. To open one:
+- **Remote stores under a prefix** (`s3://bucket/prefix`) are refused with an error naming the files involved. Before 6.0, such a store wrote its catalog, snapshot pointer and WAL to the **bucket root**, not under its prefix, so stores in one bucket could overwrite each other's metadata. To open one:
   1. Make sure no other store in the bucket still uses the bucket-root files.
   2. Copy the bucket root's `catalog/` to `prefix/catalog/`.
   3. For a remote-only store, also copy `wal/` and `id_allocator.json` under the prefix.

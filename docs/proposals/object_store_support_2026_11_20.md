@@ -20,7 +20,7 @@ Deviations from §5 not shipped, recorded here:
 - **Session token kept.** An `AWS_SESSION_TOKEN` in the environment is kept beside explicit keys, as Lance keeps it (documented in storage-cloud.md), rather than dropped as amendment 2 proposed.
 - **No emulator CI lanes at first.** MinIO, Azurite and fake-gcs-server lanes (goal 6) were added only in the review fixes of 2026-11-22.
 
-Phase A shipped with one change from §5, made at review: **one layout for every store kind**. Plain paths, `file://` and object stores all use today's local layout under the store root `R` (`R/catalog`, `R/wal`, `R/id_allocator.json`, `R/storage/…`). §5.4's flat remote layout is kept only for stores written before 5.4 (`catalog/layout.json` = `flat`). Lance writes full table URIs into fork `BasePath`s, so existing tables are never moved. Stores written by ≤ 5.3.0 under a prefix are refused with an actionable error. Automatic adoption (§5.5) was not shipped: the case was already corrupt-prone, and a manual copy is documented in `website/docs/features/storage-cloud.md`.
+Phase A shipped with one change from §5, made at review: **one layout for every store kind**. Plain paths, `file://` and object stores all use today's local layout under the store root `R` (`R/catalog`, `R/wal`, `R/id_allocator.json`, `R/storage/…`). §5.4's flat remote layout is kept only for stores written before 6.0 (`catalog/layout.json` = `flat`). Lance writes full table URIs into fork `BasePath`s, so existing tables are never moved. Stores written by ≤ 5.3.0 under a prefix are refused with an actionable error. Automatic adoption (§5.5) was not shipped: the case was already corrupt-prone, and a manual copy is documented in `website/docs/features/storage-cloud.md`.
 
 Where it lives:
 
@@ -66,7 +66,7 @@ Finished after the first commit:
 - BACKUP and COPY URLs of the database's own provider inherit its endpoint and credentials.
 - `BACKUP` writes a standard-layout store that `Uni::open` reads, instead of a flat copy (local) or a copy without tables (object store). It is refused in a fork session, and for a destination holding any of a store. An interrupted copy is refused at open. Forks are not backed up. `file://` destinations are sandbox-checked. The result row adds `objects` and `bytes`.
 - With `AWS_PROFILE` set, uni's client reads that profile, as Lance already did (its `services` section's S3 endpoint ahead of its `endpoint_url`). An undefined profile is ignored.
-- A new remote store keeps its tables under `R/storage/`. Bucket-root stores written before 5.4 open as `flat`. Prefixed stores written before 5.4 are refused until their catalog is copied under the prefix. A store with tables under its root and no catalog anywhere is refused instead of opening empty.
+- A new remote store keeps its tables under `R/storage/`. Bucket-root stores written before 6.0 open as `flat`. Prefixed stores written before 6.0 are refused until their catalog is copied under the prefix. A store with tables under its root and no catalog anywhere is refused instead of opening empty.
 - New APIs:
   - builder: `UniBuilder::{cloud_storage, storage_option, storage_options, hybrid, set_aside_stale_wal}`;
   - config: `UniConfig::read_cut_refresh`;
@@ -590,7 +590,7 @@ stale `id_allocator.json`.
 | Remote store under a prefix, written by ≤ 5.3.0 | Fails at open with a clear error until the user opts in (§5.5). This is deliberate: silently adopting shared root metadata could graft another store's schema and snapshots onto this one. |
 | Older binary opening a store written after the change | A bucket-root store opens fine. For a prefixed store, the older binary reads the root as before (and is unsafe as before). Release notes recommend against mixed versions. |
 | `CloudStorageConfig` struct literals | Break (§5.3). Constructors are provided. |
-| Azure `az://account/container` URLs | Accepted with a deprecation `warn!` in 5.4; no longer read since the review fixes (the host is always the container). |
+| Azure `az://account/container` URLs | No longer read in 6.0: the host is always the container (a configured account equal to the host logs a warning). |
 | Environment newly honored by uni's client | Settings that only Lance used to honor now apply to metadata too. Real behavior changes only for setups that were already split-brained. |
 
 ## 7. Alternatives considered

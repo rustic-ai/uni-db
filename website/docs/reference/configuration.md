@@ -518,7 +518,7 @@ Apart from `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`, Uni reads no `
 
 ## Cloud Storage Configuration
 
-A store lives in a local directory or in an object store. In hybrid mode the WAL and ID allocator stay in a local directory and everything else goes to the object store. [Storage & Cloud Durability](../features/storage-cloud.md) covers the layout, and stores written before 5.4.
+A store lives in a local directory or in an object store. In hybrid mode the WAL and ID allocator stay in a local directory and everything else goes to the object store. [Storage & Cloud Durability](../features/storage-cloud.md) covers the layout, and stores written before 6.0.
 
 ### Supported Backends
 

@@ -1,6 +1,6 @@
 # Uni Rust API Reference
 
-**Crate:** `uni-db` | **Target:** current 5.3.0 source; selected API signatures below
+**Crate:** `uni-db` | **Target:** current 6.0.0 source; selected API signatures below
 
 ---
 
