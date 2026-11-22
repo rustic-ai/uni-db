@@ -48,6 +48,7 @@ Defaults taken where the choice was minor:
 
 | Defects | Status |
 |---|---|
+| C2, C13, C14, C17, C18/C25, C19, C22, C27 | Fixed (temporal subtraction, BTIC range, pow and shifts, schemaless hop warning, windows in `WITH` and over groups, index and constraint listings, `similar_to` sparse and multi-vector, vector dimension required). C22's cause was the sparse parameter encoding in `value_to_scalar`. |
 | C6, C7, C8, C30 | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
 | C21 | Not a defect: ids are intended; declared yield type corrected |
 | C20 `fork_info` | Kept as documented (Python returns `None`) |

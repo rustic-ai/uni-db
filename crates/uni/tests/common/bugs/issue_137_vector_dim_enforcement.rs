@@ -389,3 +389,60 @@ async fn issue_137_fork_promote_vectors_flush_cleanly() -> anyhow::Result<()> {
     assert_eq!(res.len(), 1);
     Ok(())
 }
+
+/// A vector type without a dimension is refused where it is declared, and a
+/// vector index over a property with no usable dimension is refused.
+#[tokio::test]
+async fn vector_type_and_index_need_a_dimension() -> anyhow::Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    let err = db
+        .session()
+        .run("CALL uni.schema.createLabel('Bare', {properties: {emb: {type: 'VECTOR'}}})")
+        .await
+        .expect_err("VECTOR without a dimension must be refused");
+    assert!(err.to_string().contains("VECTOR(384)"), "message: {err}");
+    for bad in ["VECTOR(0)", "VECTOR(x)", "VECTOR()"] {
+        let stmt = format!(
+            "CALL uni.schema.createLabel('Bare', {{properties: {{emb: {{type: '{bad}'}}}}}})"
+        );
+        assert!(
+            db.session().run(&stmt).await.is_err(),
+            "{bad} must be refused"
+        );
+    }
+
+    db.session()
+        .run("CALL uni.schema.createLabel('Doc', {properties: {emb: {type: 'VECTOR(3)'}, tokens: {type: 'LIST<VECTOR(2)>'}}})")
+        .await?;
+    let schema = db.schema_manager().schema();
+    let props = &schema.properties["Doc"];
+    assert_eq!(props["emb"].r#type, vec3_schema());
+    assert_eq!(
+        props["tokens"].r#type,
+        DataType::List(Box::new(DataType::Vector { dimensions: 2 }))
+    );
+    db.session()
+        .run("CALL uni.schema.createIndex('Doc', 'emb', {type: 'VECTOR'})")
+        .await?;
+
+    // An index over a VECTOR property declared with no dimension (if the
+    // builder accepts the declaration at all).
+    let declared = db
+        .schema()
+        .label("Zero")
+        .property_nullable("emb", DataType::Vector { dimensions: 0 })
+        .done()
+        .apply()
+        .await;
+    if declared.is_err() {
+        return Ok(());
+    }
+    let err = db
+        .session()
+        .run("CALL uni.schema.createIndex('Zero', 'emb', {type: 'VECTOR'})")
+        .await
+        .expect_err("a vector index over a dimensionless VECTOR must be refused");
+    assert!(err.to_string().contains("VECTOR(N)"), "message: {err}");
+    Ok(())
+}

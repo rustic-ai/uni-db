@@ -5145,6 +5145,19 @@ impl PathBudget {
     }
 }
 
+/// Report that a variable-length search stopped at the *default* hop ceiling
+/// with `frontier` vertices still able to go further, so the rows are
+/// incomplete. Shared by the typed and the schemaless traversals.
+fn warn_default_hop_bound(graph_ctx: &GraphExecutionContext, frontier: usize) {
+    graph_ctx.push_warning(crate::types::QueryWarning::Other(format!(
+        "Variable-length pattern has no upper bound, so the default of \
+         {DEFAULT_MAX_HOPS} hops applied, and {frontier} vertices were still \
+         reachable at that depth; results are incomplete. Write an explicit \
+         upper bound (for example `*1..{DEFAULT_MAX_HOPS}`) to state the depth \
+         you want."
+    )));
+}
+
 impl GraphVariableLengthTraverseExecData {
     /// Report that the variable-length search hit a safety cap and stopped
     /// early, so the results below are incomplete.
@@ -5168,14 +5181,7 @@ impl GraphVariableLengthTraverseExecData {
     /// `MATCH p=(a)-[:R*]->(b)` with 100 paths, a longest length of 100, and an
     /// empty warnings list.
     fn warn_default_hop_bound(&self, frontier: usize) {
-        self.graph_ctx
-            .push_warning(crate::types::QueryWarning::Other(format!(
-                "Variable-length pattern has no upper bound, so the default of \
-                 {DEFAULT_MAX_HOPS} hops applied, and {frontier} vertices were still \
-                 reachable at that depth; results are incomplete. Write an explicit \
-                 upper bound (for example `*1..{DEFAULT_MAX_HOPS}`) to state the depth \
-                 you want."
-            )));
+        warn_default_hop_bound(&self.graph_ctx, frontier);
     }
 
     /// Check if a vertex passes the target label filter.
@@ -7148,6 +7154,10 @@ impl GraphVariableLengthTraverseMainStream {
     ) -> Vec<MainBfsResult> {
         let mut results = Vec::new();
         let mut queue: VecDeque<MainBfsResult> = VecDeque::new();
+        // Trails that reached the default ceiling with an admissible hop left:
+        // the rows are incomplete, and the user did not choose the bound.
+        let mut cut_at_default_bound = 0usize;
+        let check_default_bound = self.max_hops == DEFAULT_MAX_HOPS;
 
         queue.push_back((source, 0, vec![source], vec![]));
 
@@ -7157,8 +7167,8 @@ impl GraphVariableLengthTraverseMainStream {
                 results.push((current, depth, node_path.clone(), edge_path.clone()));
             }
 
-            // Stop if at max depth
-            if depth >= self.max_hops {
+            let at_ceiling = depth >= self.max_hops;
+            if at_ceiling && !check_default_bound {
                 continue;
             }
 
@@ -7192,6 +7202,12 @@ impl GraphVariableLengthTraverseMainStream {
                         continue;
                     }
 
+                    // At the ceiling, only note that the trail could go on.
+                    if at_ceiling {
+                        cut_at_default_bound += 1;
+                        break;
+                    }
+
                     let mut new_node_path = node_path.clone();
                     new_node_path.push(*neighbor);
                     let mut new_edge_path = edge_path.clone();
@@ -7199,6 +7215,10 @@ impl GraphVariableLengthTraverseMainStream {
                     queue.push_back((*neighbor, depth + 1, new_node_path, new_edge_path));
                 }
             }
+        }
+
+        if cut_at_default_bound > 0 {
+            warn_default_hop_bound(&self.graph_ctx, cut_at_default_bound);
         }
 
         results
@@ -7246,6 +7266,9 @@ impl GraphVariableLengthTraverseMainStream {
             neighbors,
             |_| true,
         )?;
+        if found.beyond_max > 0 && self.max_hops == DEFAULT_MAX_HOPS {
+            warn_default_hop_bound(&self.graph_ctx, found.beyond_max);
+        }
         let mut results = Vec::with_capacity(found.endpoints.len() + 1);
         // A non-empty node path marks a match; an empty one marks the NULL
         // row of an optional pattern (see `build_output_batch`).

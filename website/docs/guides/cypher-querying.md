@@ -585,6 +585,7 @@ RETURN 2 ^ 3   // 8.0
 // Temporal arithmetic takes durations; subtracting two values of one
 // temporal type gives a duration, and a number is not a duration
 RETURN date('2020-01-02') - date('2020-01-01')   // P1D
+RETURN date('2020-01-01') - date('2020-01-02')   // P-1D (a - b is the duration from b to a)
 RETURN duration('P1D') * 2                        // P2D
 // date('2020-01-02') + 1 is a type error
 
@@ -706,14 +707,25 @@ RETURN p.title, p.year, p.citations,
 ORDER BY p.year
 ```
 
-**Top N per group:**
+**Top N per group:** a window in `WITH` is a column the clause's `WHERE` and
+`ORDER BY`, and later clauses, can read by its alias.
 ```cypher
 MATCH (p:Paper)
-WITH p ORDER BY p.citations DESC
-WITH p.venue AS venue, collect(p)[0..3] AS top
-UNWIND top AS p
+WITH p, row_number() OVER (PARTITION BY p.venue ORDER BY p.citations DESC) AS rn
+WHERE rn <= 3
 RETURN p.venue, p.title, p.citations
 ORDER BY p.venue, p.citations DESC
+```
+
+**Windows over grouped rows:** in a `WITH` or `RETURN` that aggregates, a
+window runs after the grouping, so it can rank or total the groups.
+```cypher
+MATCH (p:Paper)
+WITH p.venue AS venue, count(*) AS papers,
+     rank() OVER (ORDER BY count(*) DESC) AS venue_rank,
+     sum(count(*)) OVER () AS all_papers
+RETURN venue, papers, venue_rank, all_papers
+ORDER BY venue_rank
 ```
 
 ---
@@ -757,7 +769,7 @@ Math functions take numbers: `NULL` gives `NULL`, and any other value (a string,
 | `log(n)` | Natural logarithm | `RETURN log(2.718)` → `~1` |
 | `log10(n)` | Base-10 logarithm | `RETURN log10(100)` → `2` |
 | `exp(n)` | e^n | `RETURN exp(1)` → `~2.718` |
-| `power(base, exp)` / `pow(base, exp)` | Exponentiation; `base ^ exp` is the operator form | `RETURN power(2.0, 3.0)` → `8.0`; `RETURN 2 ^ 3` → `8.0` |
+| `power(base, exp)` / `pow(base, exp)` | Exponentiation of any numbers, always a float; `base ^ exp` is the operator form | `RETURN pow(2, 3)` → `8.0`; `RETURN 2 ^ 3` → `8.0` |
 | `sin(n)`, `cos(n)`, `tan(n)` | Trigonometric | `RETURN sin(0)` → `0` |
 
 ### List Functions
@@ -1154,6 +1166,7 @@ OPTIONS {with_positions: true}
 
 ```cypher
 DROP INDEX paper_year
+DROP INDEX IF EXISTS paper_year   // no error when the index does not exist
 ```
 
 ### Show Indexes
@@ -1161,6 +1174,10 @@ DROP INDEX paper_year
 ```cypher
 SHOW INDEXES
 ```
+
+Each row has `name`, `type` and `details`. `type` is one of `SCALAR`,
+`VECTOR`, `FULLTEXT`, `INVERTED`, `JSON_FTS` or `SPARSE`; `uni.schema.indexes()`
+uses the same names.
 
 ---
 
@@ -2275,10 +2292,10 @@ YIELD name, type, label, properties, state
 WHERE type = 'VECTOR'
 RETURN name, label
 
-// List all constraints
+// List all constraints; `target` is `(:Label)` or `[:TYPE]`, as SHOW CONSTRAINTS writes it
 CALL uni.schema.constraints()
-YIELD name, type, label, properties, enabled
-RETURN name, type
+YIELD name, type, label, properties, enabled, target
+RETURN name, type, target
 
 // Get detailed label info
 CALL uni.schema.labelInfo('Paper')
@@ -2299,7 +2316,7 @@ CALL uni.schema.createLabel('Product', {
   properties: {
     name: { type: 'STRING', nullable: false },
     price: { type: 'FLOAT64' },
-    embedding: { type: 'VECTOR' }
+    embedding: { type: 'VECTOR(384)' }   // a vector type needs its dimension
   }
 })
 

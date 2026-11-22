@@ -139,3 +139,71 @@ async fn an_unbounded_pattern_that_completes_is_not_reported() -> Result<()> {
     }
     Ok(())
 }
+
+/// The same chain with an edge type no schema declares.
+async fn schemaless_chain(n: usize) -> Result<Uni> {
+    let db = Uni::in_memory().build().await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+    for i in 0..n {
+        tx.execute(&format!("CREATE (:S {{uid: 's{i}'}})")).await?;
+    }
+    for i in 0..n - 1 {
+        let j = i + 1;
+        tx.execute(&format!(
+            "MATCH (a:S {{uid: 's{i}'}}), (b:S {{uid: 's{j}'}}) CREATE (a)-[:LINK]->(b)"
+        ))
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(db)
+}
+
+/// A schemaless edge type runs a different traversal, which must report the
+/// default bound the same way: for path enumeration and for reachability.
+#[tokio::test]
+async fn default_hop_bound_truncation_is_reported_for_schemaless_edges() -> Result<()> {
+    let db = schemaless_chain(150).await?;
+    let session = db.session();
+
+    for (query, want) in [
+        (
+            "MATCH p = (a:S {uid: 's0'})-[:LINK*]->(b:S) RETURN max(length(p)) AS c",
+            100i64,
+        ),
+        (
+            "MATCH (a:S {uid: 's0'})-[:LINK*]->(b:S) RETURN count(DISTINCT b) AS c",
+            100,
+        ),
+    ] {
+        let result = session.query(query).await?;
+        let got: i64 = result.rows()[0].get("c")?;
+        assert_eq!(got, want, "{query}: the default bound caps the answer");
+        let warnings = result.warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "{query}: truncating at the default bound must be reported, got {warnings:?}"
+        );
+        let text = format!("{:?}", warnings[0]);
+        assert!(
+            text.contains("incomplete") && text.contains("upper bound"),
+            "{query}: {text}"
+        );
+    }
+
+    // An explicit bound, and a search that completes, stay quiet.
+    for query in [
+        "MATCH p = (a:S {uid: 's0'})-[:LINK*1..140]->(b:S) RETURN count(p) AS c",
+        "MATCH p = (a:S {uid: 's140'})-[:LINK*]->(b:S) RETURN count(p) AS c",
+        "MATCH (a:S {uid: 's140'})-[:LINK*]->(b:S) RETURN count(DISTINCT b) AS c",
+    ] {
+        let result = session.query(query).await?;
+        assert!(
+            result.warnings().is_empty(),
+            "{query}: nothing to report, got {:?}",
+            result.warnings()
+        );
+    }
+    Ok(())
+}

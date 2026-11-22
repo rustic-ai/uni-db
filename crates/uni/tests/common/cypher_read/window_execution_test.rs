@@ -809,3 +809,185 @@ async fn test_window_nth_value() -> Result<()> {
 
     Ok(())
 }
+
+/// Five employees in two departments, for the `WITH` window tests.
+async fn employees() -> Result<Uni> {
+    let db = Uni::in_memory().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL Employee (name STRING, dept STRING, salary INT)")
+        .await?;
+    tx.execute(
+        "CREATE (:Employee {name: 'a1', dept: 'A', salary: 100}), \
+                (:Employee {name: 'a2', dept: 'A', salary: 200}), \
+                (:Employee {name: 'a3', dept: 'A', salary: 300}), \
+                (:Employee {name: 'b1', dept: 'B', salary: 150}), \
+                (:Employee {name: 'b2', dept: 'B', salary: 250})",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(db)
+}
+
+fn names(result: &uni_db::QueryResult, column: &str) -> Result<Vec<String>> {
+    result
+        .rows()
+        .iter()
+        .map(|r| Ok(r.get::<String>(column)?))
+        .collect()
+}
+
+/// A window function in `WITH` is computed there, and later clauses read its alias.
+#[tokio::test]
+async fn test_window_in_with() -> Result<()> {
+    let db = employees().await?;
+    let result = db
+        .session()
+        .query(
+            "MATCH (e:Employee) \
+             WITH e.name AS name, row_number() OVER (PARTITION BY e.dept ORDER BY e.salary DESC) AS rn \
+             RETURN name, rn ORDER BY name",
+        )
+        .await?;
+    let got: Vec<(String, i64)> = result
+        .rows()
+        .iter()
+        .map(|r| Ok((r.get::<String>("name")?, r.get::<i64>("rn")?)))
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        got,
+        vec![
+            ("a1".to_string(), 3),
+            ("a2".to_string(), 2),
+            ("a3".to_string(), 1),
+            ("b1".to_string(), 2),
+            ("b2".to_string(), 1),
+        ]
+    );
+    Ok(())
+}
+
+/// Top-N per group: filter on the window's alias in the `WITH ... WHERE`.
+#[tokio::test]
+async fn test_window_in_with_where_top_n_per_group() -> Result<()> {
+    let db = employees().await?;
+    let result = db
+        .session()
+        .query(
+            "MATCH (e:Employee) \
+             WITH e, rank() OVER (PARTITION BY e.dept ORDER BY e.salary DESC) AS r \
+             WHERE r <= 2 \
+             RETURN e.name AS name ORDER BY name",
+        )
+        .await?;
+    assert_eq!(names(&result, "name")?, vec!["a2", "a3", "b1", "b2"]);
+    Ok(())
+}
+
+/// `WITH ... ORDER BY` the window's alias, then a page.
+#[tokio::test]
+async fn test_window_in_with_order_by() -> Result<()> {
+    let db = employees().await?;
+    let result = db
+        .session()
+        .query(
+            "MATCH (e:Employee) \
+             WITH e.name AS name, dense_rank() OVER (ORDER BY e.salary) AS pos \
+             ORDER BY pos DESC LIMIT 2 \
+             RETURN name, pos",
+        )
+        .await?;
+    assert_eq!(names(&result, "name")?, vec!["a3", "b2"]);
+    let pos: Vec<i64> = result
+        .rows()
+        .iter()
+        .map(|r| Ok(r.get::<i64>("pos")?))
+        .collect::<Result<_>>()?;
+    assert_eq!(pos, vec![5, 4]);
+    Ok(())
+}
+
+/// A window over the grouped rows of an aggregating `WITH`, in the same clause
+/// and in the next one.
+#[tokio::test]
+async fn test_window_after_aggregation_in_with() -> Result<()> {
+    let db = employees().await?;
+
+    // Same clause: rank departments by their total, and each one's share.
+    let result = db
+        .session()
+        .query(
+            "MATCH (e:Employee) \
+             WITH e.dept AS dept, sum(e.salary) AS total, \
+                  rank() OVER (ORDER BY sum(e.salary) DESC) AS r, \
+                  sum(sum(e.salary)) OVER () AS grand \
+             RETURN dept, total, r, grand ORDER BY dept",
+        )
+        .await?;
+    let got: Vec<(String, i64, i64, i64)> = result
+        .rows()
+        .iter()
+        .map(|r| {
+            Ok((
+                r.get::<String>("dept")?,
+                r.get::<i64>("total")?,
+                r.get::<i64>("r")?,
+                r.get::<i64>("grand")?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        got,
+        vec![
+            ("A".to_string(), 600, 1, 1000),
+            ("B".to_string(), 400, 2, 1000),
+        ]
+    );
+
+    // Next clause: aggregate, then a window and a filter on it.
+    let result = db
+        .session()
+        .query(
+            "MATCH (e:Employee) \
+             WITH e.dept AS dept, count(*) AS n \
+             WITH dept, n, row_number() OVER (ORDER BY n DESC) AS rn \
+             WHERE rn = 1 \
+             RETURN dept, n",
+        )
+        .await?;
+    assert_eq!(names(&result, "dept")?, vec!["A"]);
+    assert_eq!(result.rows()[0].get::<i64>("n")?, 3);
+    Ok(())
+}
+
+/// A window in an aggregating `RETURN` runs over the grouped rows too.
+#[tokio::test]
+async fn test_window_after_aggregation_in_return() -> Result<()> {
+    let db = employees().await?;
+    let result = db
+        .session()
+        .query(
+            "MATCH (e:Employee) \
+             RETURN e.dept AS dept, count(*) AS n, \
+                    rank() OVER (ORDER BY count(*) DESC) AS r, \
+                    sum(count(*)) OVER () AS total \
+             ORDER BY r",
+        )
+        .await?;
+    let got: Vec<(String, i64, i64, i64)> = result
+        .rows()
+        .iter()
+        .map(|r| {
+            Ok((
+                r.get::<String>("dept")?,
+                r.get::<i64>("n")?,
+                r.get::<i64>("r")?,
+                r.get::<i64>("total")?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        got,
+        vec![("A".to_string(), 3, 1, 5), ("B".to_string(), 2, 2, 5)]
+    );
+    Ok(())
+}

@@ -223,6 +223,27 @@ const EDGE_CASES: &[(&str, Option<Expect>)] = &[
         "date('2020-01-02') - date('2020-01-02')",
         Some(Expect::Cypher("n.d - date('2020-01-02')")),
     ),
+    // `a - b` is the duration from `b` to `a`: negative when `a` is earlier.
+    (
+        "date('2020-01-11') - date('2020-01-02')",
+        Some(Expect::Cypher("duration('P9D')")),
+    ),
+    (
+        "date('2020-01-02') - date('2020-01-11')",
+        Some(Expect::Cypher("duration('P-9D')")),
+    ),
+    (
+        "n.d - date('2020-01-11')",
+        Some(Expect::Cypher("duration('P-9D')")),
+    ),
+    (
+        "datetime('2020-01-02T05:04:05Z') - datetime('2020-01-02T03:04:05Z')",
+        Some(Expect::Cypher("duration('PT2H')")),
+    ),
+    (
+        "n.dt - datetime('2020-01-02T05:04:05Z')",
+        Some(Expect::Cypher("duration('PT-2H')")),
+    ),
     ("date('2020-01-02') < date('2020-01-03')", None),
     (
         "date('2020-01-02') < datetime('2020-01-02T03:04:05Z')",

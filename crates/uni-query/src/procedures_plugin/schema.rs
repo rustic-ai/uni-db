@@ -307,6 +307,10 @@ impl ProcedurePlugin for SchemaIndexesProc {
                     "INVERTED",
                     serde_json::to_string(&[&inv.property]).unwrap_or_default(),
                 ),
+                IndexDefinition::Sparse(sp) => (
+                    "SPARSE",
+                    serde_json::to_string(&[&sp.property]).unwrap_or_default(),
+                ),
                 _ => ("UNKNOWN", String::new()),
             };
             rows.push(HashMap::from([
@@ -404,12 +408,15 @@ impl ProcedurePlugin for SchemaConstraintsProc {
                     row.insert("type".to_owned(), Value::String("UNKNOWN".to_owned()));
                 }
             }
+            // `target` as SHOW CONSTRAINTS writes it: `(:Label)` or `[:TYPE]`.
             match &c.target {
                 ConstraintTarget::Label(l) => {
                     row.insert("label".to_owned(), Value::String(l.clone()));
+                    row.insert("target".to_owned(), Value::String(format!("(:{l})")));
                 }
                 ConstraintTarget::EdgeType(t) => {
                     row.insert("relationshipType".to_owned(), Value::String(t.clone()));
+                    row.insert("target".to_owned(), Value::String(format!("[:{t}]")));
                 }
                 _ => {
                     row.insert("target".to_owned(), Value::String("UNKNOWN".to_owned()));

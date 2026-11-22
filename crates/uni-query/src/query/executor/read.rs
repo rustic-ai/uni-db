@@ -4753,7 +4753,30 @@ impl Executor {
                     "SCALAR",
                     format!(":{}({:?})", cfg.label, cfg.properties),
                 ),
-                _ => ("UNKNOWN".to_string(), "UNKNOWN", "".to_string()),
+                uni_common::core::schema::IndexDefinition::Inverted(c) => (
+                    c.name.clone(),
+                    "INVERTED",
+                    format!("on {}.{}", c.label, c.property),
+                ),
+                uni_common::core::schema::IndexDefinition::JsonFullText(c) => (
+                    c.name.clone(),
+                    "JSON_FTS",
+                    if c.paths.is_empty() {
+                        format!("on {}.{}", c.label, c.column)
+                    } else {
+                        format!("on {}.{} paths {:?}", c.label, c.column, c.paths)
+                    },
+                ),
+                uni_common::core::schema::IndexDefinition::Sparse(c) => (
+                    c.name.clone(),
+                    "SPARSE",
+                    format!(
+                        "on {}.{} ({} dimensions)",
+                        c.label, c.property, c.dimensions
+                    ),
+                ),
+                // A kind added later: still listed under its own name.
+                other => (other.name().to_string(), "UNKNOWN", String::new()),
             };
 
             if let Some(f) = filter

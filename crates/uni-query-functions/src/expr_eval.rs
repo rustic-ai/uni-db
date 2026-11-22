@@ -771,7 +771,8 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
         && l.temporal_type() == r.temporal_type()
         && l.temporal_type() != TemporalType::Duration
     {
-        let args = [left.clone(), right.clone()];
+        // `duration.between(a, b)` is `b - a`, so `left - right` is `between(right, left)`.
+        let args = [right.clone(), left.clone()];
         return crate::datetime::eval_datetime_function("DURATION.BETWEEN", &args);
     }
 
@@ -793,7 +794,7 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
             (Some(lt), Some(rt))
                 if lt != TemporalType::Duration && rt != TemporalType::Duration && lt == rt =>
             {
-                let args = [left.clone(), right.clone()];
+                let args = [right.clone(), left.clone()];
                 return crate::datetime::eval_datetime_function("DURATION.BETWEEN", &args);
             }
             _ => {}
@@ -2673,7 +2674,7 @@ pub fn eval_btic_function(name: &str, args: &[Value]) -> Result<Value> {
             if lo == i64::MIN {
                 return Ok(Value::Null);
             }
-            Ok(ms_to_utc_datetime(lo))
+            ms_to_utc_datetime(name, lo)
         }
         "BTIC_HI" => {
             let Some((_, hi, _)) = require_btic_1arg(name, args)? else {
@@ -2682,7 +2683,7 @@ pub fn eval_btic_function(name: &str, args: &[Value]) -> Result<Value> {
             if hi == i64::MAX {
                 return Ok(Value::Null);
             }
-            Ok(ms_to_utc_datetime(hi))
+            ms_to_utc_datetime(name, hi)
         }
         "BTIC_DURATION" => {
             let Some((lo, hi, _)) = require_btic_1arg(name, args)? else {
@@ -2793,13 +2794,25 @@ fn require_btic_1arg_parsed(name: &str, args: &[Value]) -> Result<Option<uni_bti
         .map_err(|e| anyhow!("invalid BTIC: {}", e))
 }
 
-/// Convert milliseconds since epoch to a UTC DateTime value.
-fn ms_to_utc_datetime(ms: i64) -> Value {
-    Value::Temporal(TemporalValue::DateTime {
-        nanos_since_epoch: ms * 1_000_000,
+/// Convert a BTIC bound (milliseconds since epoch) to a UTC DateTime value.
+///
+/// A datetime holds nanoseconds in an `i64` (about years 1677 to 2262), while
+/// a BTIC bound spans the whole `i64` millisecond range, so a finite bound
+/// outside the datetime range is an error rather than a wrapped value.
+fn ms_to_utc_datetime(name: &str, ms: i64) -> Result<Value> {
+    let nanos_since_epoch = ms.checked_mul(1_000_000).ok_or_else(|| {
+        anyhow!(
+            "{}: the bound ({} ms since epoch) is outside the datetime range \
+             (about 1677-09-21 to 2262-04-11)",
+            name.to_lowercase(),
+            ms
+        )
+    })?;
+    Ok(Value::Temporal(TemporalValue::DateTime {
+        nanos_since_epoch,
         offset_seconds: 0,
         timezone_name: Some("UTC".to_string()),
-    })
+    }))
 }
 
 /// Evaluate a 2-arg BTIC predicate that takes (Btic, Btic) -> Bool.
@@ -2929,8 +2942,22 @@ fn eval_bitwise_function(name: &str, args: &[Value]) -> Result<Value> {
         "UNI_BITWISE_OR" => bitwise_binary("uni_bitwise_or", |l, r| l | r),
         "UNI_BITWISE_AND" => bitwise_binary("uni_bitwise_and", |l, r| l & r),
         "UNI_BITWISE_XOR" => bitwise_binary("uni_bitwise_xor", |l, r| l ^ r),
-        "UNI_BITWISE_SHIFTLEFT" => bitwise_binary("uni_bitwise_shiftLeft", |l, r| l << r),
-        "UNI_BITWISE_SHIFTRIGHT" => bitwise_binary("uni_bitwise_shiftRight", |l, r| l >> r),
+        "UNI_BITWISE_SHIFTLEFT" | "UNI_BITWISE_SHIFTRIGHT" => {
+            let left = name == "UNI_BITWISE_SHIFTLEFT";
+            let fname = if left {
+                "uni.bitwise.shiftLeft"
+            } else {
+                "uni.bitwise.shiftRight"
+            };
+            if args.len() != 2 {
+                return Err(anyhow!("{} requires exactly 2 arguments", fname));
+            }
+            let l = require_int(&args[0], fname)?;
+            let r = require_int(&args[1], fname)?;
+            crate::df_udfs::checked_bit_shift(fname, l, r, left)
+                .map(Value::Int)
+                .map_err(|e| anyhow!(e))
+        }
         "UNI_BITWISE_NOT" => {
             if args.len() != 1 {
                 return Err(anyhow!("uni_bitwise_not requires exactly 1 argument"));
@@ -3493,9 +3520,18 @@ mod tests {
         let dt2 = s("2024-01-01T00:00:00Z");
         let result = eval_binary_op(&dt1, &BinaryOp::Sub, &dt2).unwrap();
         // Result is now ISO 8601 duration string (1 day = PT24H for datetime types)
-        let dur_str = result.to_string();
-        assert!(dur_str.starts_with('P'));
-        assert!(dur_str.contains("24H")); // 24 hours
+        assert_eq!(result.to_string(), "PT24H");
+        // and the reverse order is negative
+        let result = eval_binary_op(&dt2, &BinaryOp::Sub, &dt1).unwrap();
+        assert_eq!(result.to_string(), "PT-24H");
+
+        // date - date
+        let d1 = s("2024-03-10");
+        let d2 = s("2024-03-01");
+        let result = eval_binary_op(&d1, &BinaryOp::Sub, &d2).unwrap();
+        assert_eq!(result.to_string(), "P9D");
+        let result = eval_binary_op(&d2, &BinaryOp::Sub, &d1).unwrap();
+        assert_eq!(result.to_string(), "P-9D");
     }
 
     // Bitwise operator tests removed - bitwise operations now use functions (uni_bitwise_*)

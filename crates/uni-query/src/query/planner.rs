@@ -835,6 +835,147 @@ fn is_aggregate_function_name(name: &str) -> bool {
 }
 
 /// Returns true if the expression is a window function (FunctionCall with window_spec).
+/// Whether `expr` is or contains a window function (`f(...) OVER (...)`).
+fn contains_window_function(expr: &Expr) -> bool {
+    let mut found = Vec::new();
+    QueryPlanner::collect_window_functions(expr, &mut found);
+    !found.is_empty()
+}
+
+/// Apply `f` to every expression a window function reads: its arguments and
+/// its PARTITION BY and ORDER BY expressions. Other expressions are unchanged.
+fn map_window_parts(expr: &Expr, f: &dyn Fn(&Expr) -> Expr) -> Expr {
+    let Expr::FunctionCall {
+        name,
+        args,
+        distinct,
+        window_spec: Some(spec),
+    } = expr
+    else {
+        return expr.clone();
+    };
+    Expr::FunctionCall {
+        name: name.clone(),
+        args: args.iter().map(f).collect(),
+        distinct: *distinct,
+        window_spec: Some(WindowSpec {
+            partition_by: spec.partition_by.iter().map(f).collect(),
+            order_by: spec
+                .order_by
+                .iter()
+                .map(|item| SortItem {
+                    expr: f(&item.expr),
+                    ascending: item.ascending,
+                })
+                .collect(),
+        }),
+    }
+}
+
+/// The aggregates the window functions in `expr` read (`count(*)` in
+/// `sum(count(*)) OVER ()`), which a grouping below the window computes.
+fn window_inner_aggregates(expr: &Expr) -> Vec<Expr> {
+    let mut windows = Vec::new();
+    QueryPlanner::collect_window_functions(expr, &mut windows);
+    let mut out: Vec<Expr> = Vec::new();
+    for window in &windows {
+        let Expr::FunctionCall {
+            args,
+            window_spec: Some(spec),
+            ..
+        } = window
+        else {
+            continue;
+        };
+        let parts = args
+            .iter()
+            .chain(&spec.partition_by)
+            .chain(spec.order_by.iter().map(|item| &item.expr));
+        for part in parts {
+            for agg in extract_inner_aggregates(part) {
+                if !out
+                    .iter()
+                    .any(|e| e.to_string_repr() == agg.to_string_repr())
+                {
+                    out.push(agg);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `expr` with every sub-expression equal to a grouping key replaced by the
+/// key's output column, as the Aggregate node names it.
+fn replace_group_keys_with_columns(expr: &Expr, keys: &HashSet<String>) -> Expr {
+    let repr = expr.to_string_repr();
+    if keys.contains(&repr) {
+        return Expr::Variable(repr);
+    }
+    expr.clone()
+        .map_children_in_scope(&mut |child| replace_group_keys_with_columns(&child, keys))
+}
+
+/// The window functions of one WITH clause, as a Window node computes them and
+/// as the projection above it reads them back.
+struct WithWindows {
+    /// `(original repr, expression the Window node evaluates)`.
+    windows: Vec<(String, Expr)>,
+}
+
+impl WithWindows {
+    /// `group_by` is the clause's grouping keys when it aggregates: the window
+    /// then runs over the grouped rows, so its aggregates and keys are read
+    /// as the Aggregate node's output columns.
+    fn new(window_exprs: &[Expr], group_by: Option<&Vec<Expr>>) -> Self {
+        let keys: Option<HashSet<String>> =
+            group_by.map(|keys| keys.iter().map(|k| k.to_string_repr()).collect());
+        let windows = window_exprs
+            .iter()
+            .map(|w| {
+                let planned = match &keys {
+                    Some(keys) => map_window_parts(w, &|part| {
+                        replace_group_keys_with_columns(
+                            &replace_aggregates_with_columns(part),
+                            keys,
+                        )
+                    }),
+                    None => w.clone(),
+                };
+                (
+                    w.to_string_repr(),
+                    QueryPlanner::transform_window_expr_properties(planned),
+                )
+            })
+            .collect();
+        Self { windows }
+    }
+
+    /// The Window node's expressions, or `None` when there are no windows.
+    fn plan_exprs(&self) -> Option<Vec<Expr>> {
+        (!self.windows.is_empty()).then(|| self.windows.iter().map(|(_, e)| e.clone()).collect())
+    }
+
+    /// The output column names of the windows, in order.
+    fn columns(&self) -> impl Iterator<Item = String> + '_ {
+        self.windows.iter().map(|(_, e)| e.to_string_repr())
+    }
+
+    /// `expr` with each window function replaced by a reference to its column.
+    fn replace(&self, expr: &Expr) -> Expr {
+        if self.windows.is_empty() {
+            return expr.clone();
+        }
+        if is_window_function(expr) {
+            let repr = expr.to_string_repr();
+            if let Some((_, planned)) = self.windows.iter().find(|(r, _)| *r == repr) {
+                return Expr::Variable(planned.to_string_repr());
+            }
+        }
+        expr.clone().map_children(&mut |child| self.replace(&child))
+    }
+}
+
 fn is_window_function(expr: &Expr) -> bool {
     matches!(
         expr,
@@ -1245,8 +1386,16 @@ fn parse_non_negative_integer(
 }
 
 /// Validate that aggregation functions are not nested.
+///
+/// A window aggregate over an aggregate (`sum(count(*)) OVER ()`) is not
+/// nesting: the window runs over the grouped rows, after the inner aggregate.
 fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
-    if let Expr::FunctionCall { name, args, .. } = expr
+    if let Expr::FunctionCall {
+        name,
+        args,
+        window_spec: None,
+        ..
+    } = expr
         && is_aggregate_function_name(name)
     {
         for arg in args {
@@ -3554,7 +3703,17 @@ impl QueryPlanner {
                         // Use source text as column name when no explicit alias
                         let effective_alias = alias.clone().or_else(|| source_text.clone());
                         projections.push((expr.clone(), effective_alias));
-                        if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                        if contains_window_function(expr) {
+                            // Computed by a Window node, not grouped on; any
+                            // aggregates it reads are computed by the grouping.
+                            for inner in window_inner_aggregates(expr) {
+                                has_agg = true;
+                                let repr = inner.to_string_repr();
+                                if projected_aggregate_reprs.insert(repr) {
+                                    aggregates.push(inner);
+                                }
+                            }
+                        } else if expr.is_aggregate() && !is_compound_aggregate(expr) {
                             // Bare aggregate — push directly
                             has_agg = true;
                             aggregates.push(expr.clone());
@@ -3606,14 +3765,6 @@ impl QueryPlanner {
             validate_compound_aggregates(&compound_agg_exprs, &group_by)?;
         }
 
-        if has_agg {
-            plan = LogicalPlan::Aggregate {
-                input: Box::new(plan),
-                group_by,
-                aggregates,
-            };
-        }
-
         let mut window_exprs = Vec::new();
         for (expr, _) in &projections {
             Self::collect_window_functions(expr, &mut window_exprs);
@@ -3622,6 +3773,34 @@ impl QueryPlanner {
         if let Some(order_by) = &return_clause.order_by {
             for item in order_by {
                 Self::collect_window_functions(&item.expr, &mut window_exprs);
+            }
+        }
+
+        // Windows in an aggregating RETURN run over the grouped rows, as in
+        // WITH: after the Aggregate, reading its output columns. The rest of
+        // the clause then reads each window as a column.
+        let grouped_windows = (has_agg && !window_exprs.is_empty())
+            .then(|| WithWindows::new(&window_exprs, Some(&group_by)));
+
+        if has_agg {
+            plan = LogicalPlan::Aggregate {
+                input: Box::new(plan),
+                group_by,
+                aggregates,
+            };
+            if let Some(windows) = &grouped_windows
+                && let Some(window_plan_exprs) = windows.plan_exprs()
+            {
+                plan = LogicalPlan::Window {
+                    input: Box::new(plan),
+                    window_exprs: window_plan_exprs,
+                };
+            }
+        }
+        if let Some(windows) = &grouped_windows {
+            window_exprs.clear();
+            for (expr, _) in projections.iter_mut() {
+                *expr = windows.replace(expr);
             }
         }
 
@@ -3790,6 +3969,9 @@ impl QueryPlanner {
                     expr: {
                         let mut rewritten =
                             rewrite_order_by_expr_with_aliases(&item.expr, &alias_exprs);
+                        if let Some(windows) = &grouped_windows {
+                            rewritten = windows.replace(&rewritten);
+                        }
                         if has_agg && !has_window_exprs {
                             rewritten = replace_aggregates_with_columns(&rewritten);
                         }
@@ -9524,7 +9706,19 @@ impl QueryPlanner {
                         }
 
                         projections.push((expr.clone(), alias.clone()));
-                        if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                        if contains_window_function(expr) {
+                            // Evaluated by a Window node, after any grouping:
+                            // neither a grouping key nor an aggregate itself,
+                            // but the aggregates inside it (`sum(count(*))
+                            // OVER ()`) are computed by the grouping.
+                            for inner in window_inner_aggregates(expr) {
+                                has_agg = true;
+                                let repr = inner.to_string_repr();
+                                if projected_aggregate_reprs.insert(repr) {
+                                    aggregates.push(inner);
+                                }
+                            }
+                        } else if expr.is_aggregate() && !is_compound_aggregate(expr) {
                             // Bare aggregate — push directly
                             has_agg = true;
                             aggregates.push(expr.clone());
@@ -9615,6 +9809,27 @@ impl QueryPlanner {
             }
         }
 
+        // Window functions, from the projection and from ORDER BY. Each is
+        // computed by a Window node below the projection, which then reads it
+        // as a column (see `WithWindows`).
+        let mut window_exprs = Vec::new();
+        for (expr, _) in &projections {
+            Self::collect_window_functions(expr, &mut window_exprs);
+        }
+        let projected_window_count = window_exprs.len();
+        if let Some(order_by) = &with_clause.order_by {
+            for item in order_by {
+                Self::collect_window_functions(&item.expr, &mut window_exprs);
+            }
+        }
+        let windows = WithWindows::new(&window_exprs, has_agg.then_some(&group_by));
+        // A window only ORDER BY names must survive the projection to be sorted on.
+        for column in windows.columns().skip(projected_window_count) {
+            if seen_passthrough.insert(column.clone()) {
+                passthrough_extras.push(column);
+            }
+        }
+
         let needs_cleanup = !passthrough_extras.is_empty();
         for extra in &passthrough_extras {
             projections.push((Expr::Variable(extra.clone()), Some(extra.clone())));
@@ -9630,13 +9845,23 @@ impl QueryPlanner {
                 group_by,
                 aggregates,
             };
+            // Windows run over the grouped rows: their aggregates and grouping
+            // keys are already columns of the Aggregate output.
+            if let Some(window_plan_exprs) = windows.plan_exprs() {
+                plan = LogicalPlan::Window {
+                    input: Box::new(plan),
+                    window_exprs: window_plan_exprs,
+                };
+            }
 
             // Insert a renaming Project so downstream clauses (WHERE, RETURN)
             // can reference the WITH aliases instead of raw column names.
             let rename_projections: Vec<(Expr, Option<String>)> = projections
                 .iter()
                 .map(|(expr, alias)| {
-                    if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                    if contains_window_function(expr) {
+                        (windows.replace(expr), alias.clone())
+                    } else if expr.is_aggregate() && !is_compound_aggregate(expr) {
                         // Bare aggregate — reference by column name
                         (Expr::Variable(aggregate_column_name(expr)), alias.clone())
                     } else if is_compound_aggregate(expr)
@@ -9655,9 +9880,44 @@ impl QueryPlanner {
                 projections: rename_projections,
             };
         } else if !projections.is_empty() {
+            if let Some(window_plan_exprs) = windows.plan_exprs() {
+                // Materialize the properties the windows read under their
+                // qualified names (`e.salary`), keeping every incoming
+                // variable for the projection above, as RETURN does.
+                let mut props_needed: Vec<Expr> = Vec::new();
+                for window_expr in &window_exprs {
+                    Self::collect_properties_from_expr(window_expr, &mut props_needed);
+                }
+                if !props_needed.is_empty() {
+                    let mut intermediate: Vec<(Expr, Option<String>)> = vars_in_scope
+                        .iter()
+                        .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
+                        .collect();
+                    for prop in props_needed {
+                        let name = prop.to_string_repr();
+                        if !intermediate
+                            .iter()
+                            .any(|(_, a)| a.as_deref() == Some(name.as_str()))
+                        {
+                            intermediate.push((prop, Some(name)));
+                        }
+                    }
+                    plan = LogicalPlan::Project {
+                        input: Box::new(plan),
+                        projections: intermediate,
+                    };
+                }
+                plan = LogicalPlan::Window {
+                    input: Box::new(plan),
+                    window_exprs: window_plan_exprs,
+                };
+            }
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
-                projections: projections.clone(),
+                projections: projections
+                    .iter()
+                    .map(|(expr, alias)| (windows.replace(expr), alias.clone()))
+                    .collect(),
             };
         }
 
@@ -9758,8 +10018,12 @@ impl QueryPlanner {
             let rewritten_order_by: Vec<SortItem> = order_by
                 .iter()
                 .map(|item| {
-                    let mut expr =
-                        rewrite_order_by_expr_with_aliases(&item.expr, &with_order_aliases);
+                    // A projected window sorts by its alias; any other reads
+                    // the column the Window node computed.
+                    let mut expr = windows.replace(&rewrite_order_by_expr_with_aliases(
+                        &item.expr,
+                        &with_order_aliases,
+                    ));
                     if has_agg {
                         // Rewrite any aggregate calls to the aggregate output
                         // columns produced by Aggregate.
@@ -11953,7 +12217,7 @@ impl QueryPlanner {
             }
             SchemaCommand::DropIndex(drop) => Ok(LogicalPlan::DropIndex {
                 name: drop.name,
-                if_exists: false, // new AST doesn't have if_exists for DROP INDEX yet
+                if_exists: drop.if_exists,
             }),
             SchemaCommand::CreateConstraint(c) => Ok(LogicalPlan::CreateConstraint(c)),
             SchemaCommand::DropConstraint(c) => Ok(LogicalPlan::DropConstraint(c)),

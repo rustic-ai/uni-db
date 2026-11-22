@@ -106,3 +106,64 @@ async fn numeric_functions_take_numbers() -> Result<()> {
     }
     Ok(())
 }
+
+/// `pow` / `power` take integers as `^` does, and `uni.bitwise.shiftLeft` /
+/// `shiftRight` are callable by their documented camel-case names. A shift by
+/// an amount outside `0..=63` has no answer and is an error.
+#[tokio::test]
+async fn pow_and_bitwise_shifts_are_callable() -> Result<()> {
+    let db = open().await?;
+    let mut failures = Vec::new();
+    for (query, want) in [
+        ("RETURN pow(2, 3)", vec![Value::Float(8.0)]),
+        ("RETURN power(2, 10)", vec![Value::Float(1024.0)]),
+        ("RETURN pow(2.0, 0.5)", vec![Value::Float(2.0_f64.sqrt())]),
+        ("RETURN pow(null, 2)", vec![Value::Null]),
+        (
+            "MATCH (p:P) RETURN pow(p.n, 2) ORDER BY p.n",
+            vec![Value::Float(6.25), Value::Float(16.0)],
+        ),
+        (
+            "UNWIND [1, 2] AS x RETURN pow(x, 2) = x ^ 2",
+            vec![Value::Bool(true), Value::Bool(true)],
+        ),
+        ("RETURN uni.bitwise.shiftLeft(1, 4)", vec![Value::Int(16)]),
+        (
+            "RETURN uni.bitwise.shiftRight(256, 4)",
+            vec![Value::Int(16)],
+        ),
+        (
+            "RETURN uni.bitwise.shiftRight(-16, 2)",
+            vec![Value::Int(-4)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN uni.bitwise.shiftLeft(x, 2)",
+            vec![Value::Int(4), Value::Int(8), Value::Int(12)],
+        ),
+        (
+            "UNWIND [0, 1, 63] AS k RETURN uni.bitwise.shiftRight(uni.bitwise.shiftLeft(1, k), k)",
+            vec![Value::Int(1), Value::Int(1), Value::Int(-1)],
+        ),
+        ("RETURN uni.bitwise.or(12, 3)", vec![Value::Int(15)]),
+    ] {
+        match values(&db, query).await {
+            Ok(got) if got == want => {}
+            Ok(got) => failures.push(format!("{query}: expected {want:?}, got {got:?}")),
+            Err(e) => failures.push(format!("{query}: expected {want:?}, got error {e}")),
+        }
+    }
+    for query in [
+        "RETURN uni.bitwise.shiftLeft(1, 64)",
+        "RETURN uni.bitwise.shiftLeft(1, -1)",
+        "UNWIND [1, 64] AS k RETURN uni.bitwise.shiftRight(8, k)",
+        "RETURN pow('x', 2)",
+    ] {
+        if let Ok(got) = values(&db, query).await {
+            failures.push(format!("{query}: expected an error, got {got:?}"));
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{}", failures.join("\n"));
+    }
+    Ok(())
+}

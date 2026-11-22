@@ -1382,6 +1382,12 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
             let cv_bytes = uni_common::cypher_value_codec::encode(&Value::Vector(v.clone()));
             Ok(ScalarValue::LargeBinary(Some(cv_bytes)))
         }
+        // A sparse vector likewise. The JSON fallback below rendered it as text
+        // that no consumer decodes, so a sparse parameter reached
+        // `similar_to` as NULL.
+        Value::SparseVector { .. } => Ok(ScalarValue::LargeBinary(Some(
+            uni_common::cypher_value_codec::encode(value),
+        ))),
         Value::Bytes(b) => Ok(ScalarValue::LargeBinary(Some(b.clone()))),
         // Graph entities encode as CypherValue, like `Value::Vector` above.
         //
@@ -2230,6 +2236,12 @@ fn translate_math_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Resul
                 expr_fn::signum(coerced),
                 datafusion::arrow::datatypes::DataType::Int64,
             )))
+        }
+        "POW" | "POWER" => {
+            check_args!(2, df_args, "pow");
+            // The `^` operator's UDF: numbers of any kind (and cv-encoded
+            // ones) in, a float out, as the row evaluator answers.
+            Some(Ok(dummy_udf_expr("_cypher_pow", df_args.to_vec())))
         }
         "SQRT" => unary_f64("sqrt", expr_fn::sqrt),
         "LOG" | "LN" => unary_f64("log", expr_fn::ln),

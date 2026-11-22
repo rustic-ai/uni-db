@@ -20,7 +20,7 @@ impl GraphAlgoAdapter for BridgesAdapter {
     }
 
     fn yields() -> Vec<(&'static str, ValueType)> {
-        vec![("source", ValueType::Node), ("target", ValueType::Node)]
+        vec![("source", ValueType::Int), ("target", ValueType::Int)]
     }
 
     fn to_config(_args: Vec<Value>) -> Result<BridgesConfig> {

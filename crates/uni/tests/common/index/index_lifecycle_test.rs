@@ -607,3 +607,80 @@ async fn a_fulltext_index_declared_before_any_data_is_built_at_the_first_flush()
     );
     Ok(())
 }
+
+/// `SHOW INDEXES` and `uni.schema.indexes()` name every index kind: inverted,
+/// JSON full-text and sparse indexes were listed as `UNKNOWN`.
+#[tokio::test]
+async fn show_indexes_names_every_index_kind() -> Result<()> {
+    use uni_db::DataType;
+    use uni_db::core::schema::JsonFtsIndexConfig;
+
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Doc")
+        .property_nullable("tags", DataType::List(Box::new(DataType::String)))
+        .property_nullable("emb", DataType::SparseVector { dimensions: 100 })
+        .apply()
+        .await?;
+    db.session()
+        .run("CALL uni.schema.createIndex('Doc', 'tags', {type: 'inverted', name: 'doc_tags'})")
+        .await?;
+    db.session()
+        .run("CALL uni.schema.createIndex('Doc', 'emb', {type: 'sparse', name: 'doc_emb'})")
+        .await?;
+    db.schema_manager()
+        .add_index(IndexDefinition::JsonFullText(JsonFtsIndexConfig {
+            name: "doc_json".to_string(),
+            label: "Doc".to_string(),
+            column: "_doc".to_string(),
+            paths: vec![],
+            with_positions: false,
+            metadata: Default::default(),
+        }))?;
+
+    let shown = db.session().query("SHOW INDEXES").await?;
+    let mut rows: Vec<(String, String)> = shown
+        .rows()
+        .iter()
+        .map(|r| Ok((r.get::<String>("name")?, r.get::<String>("type")?)))
+        .collect::<Result<_>>()?;
+    rows.sort();
+    let want = vec![
+        ("doc_emb".to_string(), "SPARSE".to_string()),
+        ("doc_json".to_string(), "JSON_FTS".to_string()),
+        ("doc_tags".to_string(), "INVERTED".to_string()),
+    ];
+    assert_eq!(rows, want, "SHOW INDEXES");
+
+    let listed = db
+        .session()
+        .query("CALL uni.schema.indexes() YIELD name, type RETURN name, type ORDER BY name")
+        .await?;
+    let rows: Vec<(String, String)> = listed
+        .rows()
+        .iter()
+        .map(|r| Ok((r.get::<String>("name")?, r.get::<String>("type")?)))
+        .collect::<Result<_>>()?;
+    assert_eq!(rows, want, "uni.schema.indexes()");
+    Ok(())
+}
+
+/// `DROP INDEX IF EXISTS` on a missing index succeeds; without `IF EXISTS` it fails.
+#[tokio::test]
+async fn drop_index_if_exists_tolerates_a_missing_index() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+    db.session()
+        .run("DROP INDEX IF EXISTS no_such_index")
+        .await?;
+    assert!(db.session().run("DROP INDEX no_such_index").await.is_err());
+
+    db.session()
+        .run("CREATE LABEL Person (name STRING)")
+        .await?;
+    db.session()
+        .run("CREATE INDEX person_name FOR (p:Person) ON (p.name)")
+        .await?;
+    db.session().run("DROP INDEX IF EXISTS person_name").await?;
+    assert!(db.indexes().list(Some("Person")).is_empty());
+    Ok(())
+}

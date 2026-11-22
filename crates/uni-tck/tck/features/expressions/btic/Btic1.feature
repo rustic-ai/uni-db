@@ -401,3 +401,33 @@ Feature: Btic1 - BTIC Temporal Interval Functions
       RETURN btic('not-a-date') AS b
       """
     Then a TypeError should be raised at runtime: InvalidArgumentValue
+
+  @extension
+  Scenario: [28] btic_lo on a bound before the datetime range should produce an error
+    Given any graph
+    When executing query:
+      """
+      RETURN btic_lo(btic('500 BCE')) AS lo
+      """
+    Then a ArgumentError should be raised at any time: outside the datetime range
+
+  @extension
+  Scenario: [29] btic_hi on a bound after the datetime range should produce an error
+    Given any graph
+    When executing query:
+      """
+      RETURN btic_hi(btic('3000')) AS hi
+      """
+    Then a ArgumentError should be raised at any time: outside the datetime range
+
+  @extension
+  Scenario: [30] btic_lo and btic_hi near the edges of the datetime range still return datetimes
+    Given any graph
+    When executing query:
+      """
+      RETURN toString(btic_lo(btic('1700'))) AS lo, toString(btic_hi(btic('2261'))) AS hi
+      """
+    Then the result should be, in any order:
+      | lo                       | hi                       |
+      | '1700-01-01T00:00Z[UTC]' | '2262-01-01T00:00Z[UTC]' |
+    And no side effects

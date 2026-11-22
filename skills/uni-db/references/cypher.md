@@ -337,7 +337,7 @@ Non-aggregated columns in RETURN become implicit GROUP BY keys.
 |---|---|
 | `abs(x)`, `ceil(x)`, `floor(x)`, `round(x)` | Rounding / absolute |
 | `sqrt(x)`, `exp(x)`, `log(x)`, `log10(x)` | Roots and logarithms |
-| `x ^ y`, `pow(x, y)` / `power(x, y)` | Exponentiation, e.g. `2 ^ 3`, `pow(2.0, 3.0)` |
+| `x ^ y`, `pow(x, y)` / `power(x, y)` | Exponentiation of any numbers, always a float, e.g. `2 ^ 3`, `pow(2, 3)` = `8.0` |
 | `sign(x)` | -1, 0, or 1 |
 | `rand()` | Random float in [0, 1) |
 | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2` | Trigonometric |
@@ -390,7 +390,7 @@ BTIC encodes half-open time intervals `[lo, hi)` as a single 24-byte property wi
 
 **Literal formats:** `btic('1985')` (year), `btic('1985-03')` (month), `btic('1939/1945')` (range), `btic('~1985')` (approximate), `btic('2020-03/')` (ongoing), `btic('/')` (unbounded).
 
-**Accessors:** `btic_lo(b)`, `btic_hi(b)` (DateTime), `btic_duration(b)` (Int64 ms), `btic_granularity(b)`, `btic_certainty(b)` (String), `btic_is_finite(b)`, `btic_is_unbounded(b)`, `btic_is_instant(b)` (Boolean).
+**Accessors:** `btic_lo(b)`, `btic_hi(b)` (DateTime; an error for a bound outside about 1677-2262), `btic_duration(b)` (Int64 ms), `btic_granularity(b)`, `btic_certainty(b)` (String), `btic_is_finite(b)`, `btic_is_unbounded(b)`, `btic_is_instant(b)` (Boolean).
 
 **Predicates (2-arg → Boolean):** `btic_contains_point(b, point)`, `btic_overlaps(a, b)`, `btic_contains(a, b)`, `btic_before(a, b)`, `btic_after(a, b)`, `btic_meets(a, b)`, `btic_adjacent(a, b)`, `btic_disjoint(a, b)`, `btic_equals(a, b)`, `btic_starts(a, b)`, `btic_during(a, b)`, `btic_finishes(a, b)`.
 
@@ -427,7 +427,7 @@ Options: `method` (`'rrf'`|`'weighted'`), `weights` (list), `k` (RRF constant, d
 
 ### Bitwise Functions
 
-`uni.bitwise.and(a, b)`, `uni.bitwise.or(a, b)`, `uni.bitwise.xor(a, b)`, `uni.bitwise.not(a)`
+`uni.bitwise.and(a, b)`, `uni.bitwise.or(a, b)`, `uni.bitwise.xor(a, b)`, `uni.bitwise.not(a)`, `uni.bitwise.shiftLeft(a, n)`, `uni.bitwise.shiftRight(a, n)` (arithmetic; a shift amount outside `0..63` is an error)
 
 ---
 
@@ -459,6 +459,20 @@ MATCH (n:Employee)
 RETURN n.name, n.salary, n.department,
     ROW_NUMBER() OVER (PARTITION BY n.department ORDER BY n.salary DESC) AS rank,
     SUM(n.salary) OVER (PARTITION BY n.department) AS dept_total
+```
+
+A window works in `WITH` too, so its alias can be filtered and sorted on (top-N per group), and in an aggregating `WITH`/`RETURN` it runs over the grouped rows:
+
+```cypher
+MATCH (n:Employee)
+WITH n, ROW_NUMBER() OVER (PARTITION BY n.department ORDER BY n.salary DESC) AS rn
+WHERE rn <= 3
+RETURN n.department, n.name, n.salary
+
+MATCH (n:Employee)
+WITH n.department AS dept, sum(n.salary) AS total,
+     RANK() OVER (ORDER BY sum(n.salary) DESC) AS dept_rank
+RETURN dept, total, dept_rank
 ```
 
 ---
@@ -528,6 +542,8 @@ CALL uni.schema.labelInfo('Person') YIELD property, dataType, nullable, indexed,
 CALL uni.schema.indexes() YIELD name, type, label, state, properties
 CALL uni.schema.constraints() YIELD name, type, enabled, properties, target
 ```
+
+Index `type` (here and in `SHOW INDEXES`): `SCALAR`, `VECTOR`, `FULLTEXT`, `INVERTED`, `JSON_FTS`, `SPARSE`. Constraint `target` is `(:Label)` or `[:TYPE]`. `DROP INDEX IF EXISTS name` succeeds when the index is missing.
 
 ### Vector Search
 
@@ -676,11 +692,9 @@ RETURN a.name, papers_cited, total_citations
 Find the top 3 most-cited papers in each venue.
 
 ```cypher
-CALL {
-  MATCH (p:Paper)
-  RETURN p, ROW_NUMBER() OVER (PARTITION BY p.venue ORDER BY p.citations DESC) AS rn
-}
-WITH p, rn WHERE rn <= 3
+MATCH (p:Paper)
+WITH p, ROW_NUMBER() OVER (PARTITION BY p.venue ORDER BY p.citations DESC) AS rn
+WHERE rn <= 3
 RETURN p.venue, p.title, p.citations
 ORDER BY p.venue, p.citations DESC
 ```

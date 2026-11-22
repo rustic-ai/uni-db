@@ -3564,6 +3564,20 @@ RETURN n.name, n.salary, n.department,
 | `NTH_VALUE(expr, n)` | Nth value |
 | `NTILE(n)` | Distribute into n buckets |
 
+Windows are planned in `RETURN` (`plan_return_clause`) and in `WITH`
+(`plan_with_clause`, through `WithWindows`). In a `WITH` the clause projection
+reads each window as the column its `LogicalPlan::Window` node computed, so the
+clause's `WHERE`, its `ORDER BY` and later clauses use the window's alias
+(`WITH n, ROW_NUMBER() OVER (...) AS rn WHERE rn <= 3` is top-N per group). When
+the `WITH` aggregates, the Window node sits between the `Aggregate` and the
+renaming `Project`: a window item is neither a grouping key nor an aggregate,
+the aggregates it reads (`count(*)` in `SUM(count(*)) OVER ()`) are added to
+the `Aggregate`, and its aggregates and grouping keys are rewritten to that
+node's output columns. A window used only in the clause's `ORDER BY` is carried
+through the projection as a passthrough column. Pinned by
+`cypher_read::window_execution_test` (`test_window_in_with*`,
+`test_window_after_aggregation_in_with`).
+
 ## Built-in Functions Reference
 
 ### Graph Introspection
@@ -3629,7 +3643,7 @@ ORDER BY last_touched DESC LIMIT 10
 | `exp(x)` | Float | e^x |
 | `log(x)` | Float | Natural log |
 | `log10(x)` | Float | Base-10 log |
-| `pow(x, y)` | Numeric | x^y |
+| `pow(x, y)` / `power(x, y)` | Float | x^y for any numbers; lowers to `_cypher_pow`, the `^` operator's UDF |
 | `sign(x)` | Integer | -1, 0, or 1 |
 | `rand()` | Float | Random [0, 1) |
 | `sin(x)`, `cos(x)`, `tan(x)` | Float | Trigonometric |
@@ -3707,6 +3721,10 @@ BTIC (Binary Temporal Interval Codec) encodes half-open time intervals `[lo, hi)
 |---|---|---|
 | `btic_lo(b)` | DateTime | Lower bound (inclusive); NULL if unbounded |
 | `btic_hi(b)` | DateTime | Upper bound (exclusive); NULL if unbounded |
+
+A finite bound outside the datetime range (nanoseconds in an `i64`, about
+1677-09-21 to 2262-04-11) makes `btic_lo` / `btic_hi` an error naming the
+range, not a wrapped value: a BTIC bound is milliseconds over the whole `i64`.
 | `btic_duration(b)` | Int64 | Duration in milliseconds; NULL if unbounded |
 | `btic_granularity(b)` | String | Lower bound granularity (`"year"`, `"month"`, `"day"`, ...) |
 | `btic_lo_granularity(b)` / `btic_hi_granularity(b)` | String | Per-bound granularity |
@@ -3776,6 +3794,12 @@ RETURN btic_span_agg(e.period) AS total_span
 | `uni.bitwise.or(x, y)` | Integer | Bitwise OR |
 | `uni.bitwise.xor(x, y)` | Integer | Bitwise XOR |
 | `uni.bitwise.not(x)` | Integer | Bitwise NOT |
+| `uni.bitwise.shiftLeft(x, n)` | Integer | `x << n`; `n` outside `0..=63` is an error |
+| `uni.bitwise.shiftRight(x, n)` | Integer | Arithmetic `x >> n`; `n` outside `0..=63` is an error |
+
+Function calls resolve by their lower-cased name, so the shift UDFs are
+registered as `uni.bitwise.shiftleft` / `uni.bitwise.shiftright`; the
+camel-case spelling calls them.
 
 ## Relationship Property Maps
 
@@ -4625,6 +4649,12 @@ frontier. A pattern that completes inside 100 hops stays quiet, which is the
 overwhelming majority of them, and an explicitly written bound is never reported
 because that is the user getting what they asked for.
 
+The typed traversal (`GraphVariableLengthTraverseExec`) and the schemaless one
+(`GraphVariableLengthTraverseMainStream`, both its trail enumeration `bfs` and
+its `reachable_endpoints` reachability path) report through the same
+`warn_default_hop_bound`; the schemaless `bfs` counts the trails that reached
+the ceiling with an admissible relationship left.
+
 A bound written as `[*1..100]` is indistinguishable from `[*]` here — the "was
 it written" bit does not survive the `LogicalPlan` boundary — so such a query is
 reported as though the bound were the default. The warning is true either way.
@@ -4832,6 +4862,15 @@ exact cosine to f32 (0.8 became 0.800000011920929 and passed `> 0.8`), and
 `vector_distance` errored on a NULL operand instead of returning NULL. On a
 multi-vector (`List<Vector>`) operand pair `vector_similarity(doc, query)` is
 MaxSim with a cosine per query token, computed per row.
+
+`similar_to` (`SimilarToExecExpr::determine_scoring_mode`) scores the same two
+shapes. A pair of sparse operands (`Value::SparseVector`, or the
+`{indices, values}` map a sparse parameter decodes to) is `ScoringMode::Sparse`,
+the dot product of `eval_sparse_similar_to_pure`; a pair of multi-vectors
+(`as_multivector`: a non-empty list whose items are all vectors) is
+`ScoringMode::MultiVector`, `maxsim` under the source's index metric (cosine by
+default). Both are checked before the dense `Vector` arm, which a list pair
+would otherwise take.
 
 **`~=` is sized by the `LIMIT` it feeds, or by `vector_knn_default_k`.**
 `LogicalPlan::VectorKnn` carries `k: Option<usize>` and `optional: bool`.
@@ -5935,7 +5974,7 @@ DROP CONSTRAINT constraint_name
 
 ```cypher
 SHOW DATABASE       // Database metadata
-SHOW INDEXES        // All indexes with status
+SHOW INDEXES        // name, type (SCALAR, VECTOR, FULLTEXT, INVERTED, JSON_FTS, SPARSE), details
 SHOW CONSTRAINTS    // All constraints
 SHOW CONFIG         // Current configuration
 SHOW STATISTICS     // Storage statistics

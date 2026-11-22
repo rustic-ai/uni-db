@@ -20,7 +20,7 @@ impl GraphAlgoAdapter for ArticulationPointsAdapter {
     }
 
     fn yields() -> Vec<(&'static str, ValueType)> {
-        vec![("node", ValueType::Node)]
+        vec![("node", ValueType::Int)]
     }
 
     fn to_config(_args: Vec<Value>) -> Result<ArticulationPointsConfig> {

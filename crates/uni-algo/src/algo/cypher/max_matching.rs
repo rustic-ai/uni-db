@@ -21,8 +21,8 @@ impl GraphAlgoAdapter for MaxMatchingAdapter {
 
     fn yields() -> Vec<(&'static str, ValueType)> {
         vec![
-            ("node1", ValueType::Node),
-            ("node2", ValueType::Node),
+            ("node1", ValueType::Int),
+            ("node2", ValueType::Int),
             ("matchId", ValueType::Int),
         ]
     }

@@ -649,7 +649,29 @@ fn parse_data_type(s: &str) -> Result<DataType> {
         return Ok(DataType::Map(Box::new(key_type), Box::new(value_type)));
     }
 
-    match s.to_uppercase().as_str() {
+    // `VECTOR(N)`: a vector column has a fixed width, and an index over it
+    // is built for that width.
+    let upper = s.to_uppercase();
+    if let Some(rest) = upper.strip_prefix("VECTOR") {
+        let dims = rest
+            .trim()
+            .strip_prefix('(')
+            .and_then(|r| r.strip_suffix(')'))
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0);
+        return match dims {
+            Some(dimensions) => Ok(DataType::Vector { dimensions }),
+            None => Err(UniError::InvalidArgument {
+                arg: "type".into(),
+                message: format!(
+                    "{s}: a vector type needs a positive dimension, for example VECTOR(384)"
+                ),
+            }
+            .into()),
+        };
+    }
+
+    match upper.as_str() {
         "STRING" | "UTF8" => Ok(DataType::String),
         "INT" | "INTEGER" | "INT64" => Ok(DataType::Int64),
         "INT32" => Ok(DataType::Int32),
@@ -659,7 +681,6 @@ fn parse_data_type(s: &str) -> Result<DataType> {
         "DATETIME" => Ok(DataType::DateTime),
         "DATE" => Ok(DataType::Date),
         "BTIC" => Ok(DataType::Btic),
-        "VECTOR" => Ok(DataType::Vector { dimensions: 0 }),
         _ => Err(UniError::InvalidArgument {
             arg: "type".into(),
             message: format!("Unknown data type: {}", s),

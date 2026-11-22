@@ -201,6 +201,8 @@ A per-row expression for `WHERE`, `RETURN`, `ORDER BY`, and Locy rule bodies. Sc
 | Vector property | Vector literal | **Vector** | Metric-aware similarity per row |
 | Vector property (with embedding config) | String literal | **AutoEmbed** | Embeds query once, then vector similarity per row |
 | String property (with FTS index) | String literal | **FTS** | BM25 score normalized via `score / (score + fts_k)` |
+| Sparse-vector property | Sparse vector (or `{indices, values}` map) | **Sparse** | Dot product per row (unbounded, not normalized) |
+| `LIST<VECTOR(N)>` property (multi-vector) | List of vectors | **MultiVector** | MaxSim per row: each query vector's best match, summed |
 
 Metric is resolved from the vector index at compile time. Defaults to cosine if no index found.
 

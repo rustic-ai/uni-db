@@ -1594,14 +1594,16 @@ impl ScalarUDFImpl for RangeUdf {
 
 /// Invoke a binary bitwise operation on two Int64 arguments.
 ///
-/// Consolidates the matching logic for all binary bitwise UDFs.
+/// Consolidates the matching logic for all binary bitwise UDFs. A NULL operand
+/// gives NULL; an operation that has no answer (a shift by an amount outside
+/// `0..=63`) is an error.
 fn invoke_binary_bitwise_op<F>(
     args: &ScalarFunctionArgs,
     name: &str,
     op: F,
 ) -> DFResult<ColumnarValue>
 where
-    F: Fn(i64, i64) -> i64,
+    F: Fn(i64, i64) -> DFResult<i64>,
 {
     use arrow_array::Int64Array;
     use datafusion::common::ScalarValue;
@@ -1619,33 +1621,57 @@ where
 
     match (left, right) {
         (
-            ColumnarValue::Scalar(ScalarValue::Int64(Some(l))),
-            ColumnarValue::Scalar(ScalarValue::Int64(Some(r))),
-        ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(op(*l, *r))))),
-        (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
+            ColumnarValue::Scalar(ScalarValue::Int64(l)),
+            ColumnarValue::Scalar(ScalarValue::Int64(r)),
+        ) => {
+            let out = match (l, r) {
+                (Some(l), Some(r)) => Some(op(*l, *r)?),
+                _ => None,
+            };
+            Ok(ColumnarValue::Scalar(ScalarValue::Int64(out)))
+        }
+        _ => {
+            let rows = args.number_rows;
+            let l_arr = left.to_array(rows)?;
+            let r_arr = right.to_array(rows)?;
             let l_arr = l_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                DataFusionError::Execution(format!("{}(): left array must be Int64", name))
+                DataFusionError::Execution(format!("{}(): left argument must be an integer", name))
             })?;
             let r_arr = r_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                DataFusionError::Execution(format!("{}(): right array must be Int64", name))
+                DataFusionError::Execution(format!("{}(): right argument must be an integer", name))
             })?;
 
             let result: Int64Array = l_arr
                 .iter()
                 .zip(r_arr.iter())
                 .map(|(l, r)| match (l, r) {
-                    (Some(l), Some(r)) => Some(op(l, r)),
-                    _ => None,
+                    (Some(l), Some(r)) => op(l, r).map(Some),
+                    _ => Ok(None),
                 })
-                .collect();
+                .collect::<DFResult<_>>()?;
 
             Ok(ColumnarValue::Array(Arc::new(result)))
         }
-        _ => Err(DataFusionError::Execution(format!(
-            "{}(): mixed scalar/array not supported",
-            name
-        ))),
     }
+}
+
+/// Shift `value` by `amount` bits, or fail when `amount` is outside `0..=63`.
+pub(crate) fn checked_bit_shift(
+    name: &str,
+    value: i64,
+    amount: i64,
+    left: bool,
+) -> std::result::Result<i64, String> {
+    u32::try_from(amount)
+        .ok()
+        .and_then(|amount| {
+            if left {
+                value.checked_shl(amount)
+            } else {
+                value.checked_shr(amount)
+            }
+        })
+        .ok_or_else(|| format!("{name}(): the shift amount must be between 0 and 63, got {amount}"))
 }
 
 /// Invoke a unary bitwise operation on a single Int64 argument.
@@ -1776,11 +1802,19 @@ macro_rules! define_unary_bitwise_udf {
 }
 
 // Define all binary bitwise UDFs using the macro
-define_binary_bitwise_udf!(BitwiseOrUdf, "uni.bitwise.or", |l, r| l | r);
-define_binary_bitwise_udf!(BitwiseAndUdf, "uni.bitwise.and", |l, r| l & r);
-define_binary_bitwise_udf!(BitwiseXorUdf, "uni.bitwise.xor", |l, r| l ^ r);
-define_binary_bitwise_udf!(ShiftLeftUdf, "uni.bitwise.shiftLeft", |l, r| l << r);
-define_binary_bitwise_udf!(ShiftRightUdf, "uni.bitwise.shiftRight", |l, r| l >> r);
+define_binary_bitwise_udf!(BitwiseOrUdf, "uni.bitwise.or", |l, r| Ok(l | r));
+define_binary_bitwise_udf!(BitwiseAndUdf, "uni.bitwise.and", |l, r| Ok(l & r));
+define_binary_bitwise_udf!(BitwiseXorUdf, "uni.bitwise.xor", |l, r| Ok(l ^ r));
+// Registered lower-case: function calls are resolved by their lower-cased name,
+// so `uni.bitwise.shiftLeft(...)` looks up `uni.bitwise.shiftleft`.
+define_binary_bitwise_udf!(ShiftLeftUdf, "uni.bitwise.shiftleft", |l, r| {
+    checked_bit_shift("uni.bitwise.shiftLeft", l, r, true)
+        .map_err(datafusion::error::DataFusionError::Execution)
+});
+define_binary_bitwise_udf!(ShiftRightUdf, "uni.bitwise.shiftright", |l, r| {
+    checked_bit_shift("uni.bitwise.shiftRight", l, r, false)
+        .map_err(datafusion::error::DataFusionError::Execution)
+});
 
 // Define the unary bitwise NOT UDF using the macro
 define_unary_bitwise_udf!(BitwiseNotUdf, "uni.bitwise.not", |v| !v);

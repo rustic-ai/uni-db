@@ -499,6 +499,28 @@ impl IndexManager {
         mut config: VectorIndexConfig,
         force_backfill: bool,
     ) -> Result<()> {
+        // An ANN index is built over a fixed width; without one every build
+        // and every query would fail later, far from the declaration.
+        match index_build_dim(&self.schema_manager.schema(), &config) {
+            Some(dim) if dim > 0 => {}
+            Some(_) => {
+                return Err(anyhow!(
+                    "vector index '{}': {}.{} is declared VECTOR with no dimension; \
+                     declare it as VECTOR(N), for example VECTOR(384)",
+                    config.name,
+                    config.label,
+                    config.property
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "vector index '{}': {}.{} is not a declared VECTOR(N) property",
+                    config.name,
+                    config.label,
+                    config.property
+                ));
+            }
+        }
         let outcome = if let VectorIndexType::Muvera { inner, .. } = &config.index_type {
             // Register + backfill the derived FDE column (forced on a full rebuild).
             self.prepare_muvera_fde(&config, force_backfill).await?;

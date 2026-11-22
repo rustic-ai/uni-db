@@ -420,6 +420,19 @@ Scoring is **metric-aware**: `similar_to()` automatically uses the distance metr
 similar_to(sources, queries [, options]) → FLOAT  // range depends on the metric: see Score Conversion
 ```
 
+A `SparseVector` property scored against a sparse query (a `SparseVector`
+parameter, or an `{indices: [...], values: [...]}` map) gives their dot product.
+A multi-vector property (`LIST<VECTOR(N)>`) scored against a list of vectors
+gives their MaxSim: for each query vector, its best similarity to any of the
+property's vectors, summed.
+
+```cypher
+MATCH (d:Doc)
+RETURN d.title,
+       similar_to(d.sparse_emb, $sparse_query) AS lexical,
+       similar_to(d.tokens, [[1.0, 0.0], [0.0, 1.0]]) AS maxsim
+```
+
 ### Single Vector Source
 
 Score a bound node's embedding against a pre-computed vector or text query:
@@ -514,7 +527,7 @@ Adding two separate `similar_to` calls produces raw score addition without norma
 | Syntax | Operation | Capabilities |
 |---|---|---|
 | `n.embedding ~= $q` | Top-K index scan (desugars to `uni.vector.query`) | Vector only |
-| `similar_to(n.embedding, $q)` | Per-row scoring on bound nodes | Vector, Auto-Embed, FTS |
+| `similar_to(n.embedding, $q)` | Per-row scoring on bound nodes | Vector, Auto-Embed, FTS, sparse (dot product), multi-vector (MaxSim) |
 | `similar_to([sources], [queries])` | Multi-source hybrid fusion | Vector + FTS with RRF/weighted |
 
 Use `~=` to **find** candidates; use `similar_to()` to **score** or **fuse** on bound nodes.
