@@ -50,6 +50,8 @@ fn merge_postings_segments(segments: Vec<HashMap<String, Vec<u64>>>) -> HashMap<
 /// for optimal performance during small mutations.
 pub struct InvertedIndex {
     dataset: Option<Dataset>,
+    /// The postings dataset under the store's read cut.
+    cut: crate::storage::index_datasets::DatasetCut,
     base_uri: String,
     label: String,
     property: String,
@@ -70,6 +72,21 @@ impl std::fmt::Debug for InvertedIndex {
 impl InvertedIndex {
     /// Open or initialize an inverted index at `base_uri` for the given config.
     pub async fn new(base_uri: &str, config: InvertedIndexConfig) -> Result<Self> {
+        Self::open(base_uri, config, None, false).await
+    }
+
+    /// [`Self::new`] under the store's read cut: `at_cut` reads the version
+    /// the cut publishes (a reader), otherwise the newest (a writer updating
+    /// the postings); writes record their version either way.
+    ///
+    /// # Errors
+    /// The postings dataset exists but could not be opened.
+    pub async fn open(
+        base_uri: &str,
+        config: InvertedIndexConfig,
+        read_cut: Option<Arc<crate::storage::read_cut::ReadCut>>,
+        at_cut: bool,
+    ) -> Result<Self> {
         let path = format!(
             "{}/indexes/{}/{}_inverted",
             base_uri, config.label, config.property
@@ -80,7 +97,9 @@ impl InvertedIndex {
         // search reports as zero hits. Only a genuinely absent dataset means
         // the index has not been built yet. Same discrimination as
         // `storage/index.rs::get_vid`.
-        let dataset = match crate::backend::lance_directory::open_dataset_uri(&path).await {
+        let cut =
+            crate::storage::index_datasets::DatasetCut::new(read_cut, base_uri, &path, at_cut);
+        let dataset = match cut.open(&path).await {
             Ok(ds) => Some(ds),
             Err(e) => {
                 let err = anyhow::Error::from(e);
@@ -94,6 +113,7 @@ impl InvertedIndex {
 
         Ok(Self {
             dataset,
+            cut,
             base_uri: base_uri.to_string(),
             label: config.label.clone(),
             property: config.property.clone(),
@@ -269,6 +289,7 @@ impl InvertedIndex {
             iter_schema,
             vec![batch],
             write_params.mode,
+            &self.cut.for_writes(),
         )
         .await?;
         self.dataset = Some(ds);

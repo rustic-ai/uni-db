@@ -157,7 +157,18 @@ A store, local or remote, has **one writable handle at a time**, and any number 
 
 This needs conditional writes (`If-Match` / `If-None-Match`, which S3, GCS, Azure, MinIO and R2 provide). An object store without them is refused. A service that silently ignores those headers cannot be detected, so check yours before relying on the lease. `WriteLease::Unenforced` opens a store with no lock or lease, which means one writer by convention, and logs a warning. It also lets the ID allocator write without conditional writes. `WriteLease::Custom` uses your own provider: it is acquired before the first write, heartbeated, and released on close.
 
-A writer stops on its own once its lease could have lapsed (expiry minus `clock_skew`), even if a stalled renewal never told it so. Two limits remain. A writer stalled in the middle of a table append can complete that one append after resuming; pinning table versions in the snapshot manifest is planned to close this. Lease expiry assumes hosts' clocks agree to within `clock_skew` (5 seconds). Forks created from a read-only handle still write their own fork state.
+A writer stops on its own once its lease could have lapsed (expiry minus `clock_skew`), even if a stalled renewal never told it so. Lease expiry assumes hosts' clocks agree to within `clock_skew` (5 seconds). Forks created from a read-only handle still write their own fork state.
+
+### The manifest is the commit point
+
+Every snapshot manifest names the Lance version of each table and index dataset, and reads see those versions rather than each table's newest. So:
+
+- **A flush is visible all at once**, when its manifest is published. A reader never sees a flush's vertices without its edges.
+- **A crash between a flush's table commits and its manifest leaves nothing behind.** The next writable open rolls every table back to the versions the manifest names (logging what it discarded), and the WAL writes the flush again.
+- **A stale writer's late append is never read.** A writer that stalled past its lease can still land one table commit after resuming, but no manifest names it. If the current writer then meets that version while it has no other commit on that table running, it stops writing (`WriterFenced`) rather than build on it: its commits stay in the WAL, and the next writable open discards the stray version.
+- **Read-only handles** pick up new flushes at the start of a query, at most once per `UniConfig::read_cut_refresh` (once a second by default on an object store; every query for a local store).
+
+Compaction, index builds and schema widening are visible to the handle that made them at once, and to other handles once a manifest names them: a successor manifest is published when each finishes, at the next catalog save and flush, and at `shutdown()`. A store whose latest manifest was written before 5.4 names no tables; reads see every table's newest version until its first flush under 5.4 records them. Fork branches are read at their newest versions.
 
 ## Stores written before 5.4
 

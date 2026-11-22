@@ -616,6 +616,7 @@ pub struct UniConfig {
     pub flush_stream_timeout: Duration,
     pub drop_fork_drain_timeout: Duration,
     pub flush_drain_timeout: Duration,
+    pub read_cut_refresh: Option<Duration>, // read-only handles: how often to pick up new flushes (None: every query locally, 1 s remote)
     pub max_forks: Option<usize>,
     pub fork_default_ttl: Option<Duration>,
     pub fork_sweeper_interval: Duration,

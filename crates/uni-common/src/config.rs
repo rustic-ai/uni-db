@@ -614,6 +614,16 @@ pub struct UniConfig {
     /// Single-writer lease and lock timing.
     pub writer_lease: WriterLeaseConfig,
 
+    /// How often a read-only handle looks for a newer published manifest.
+    ///
+    /// Reads see the table versions the latest manifest names (its read
+    /// cut). A writable handle moves its own cut as it publishes; a read-only
+    /// handle re-reads `catalog/latest` at the start of a query, at most once
+    /// per this interval. Zero re-reads it for every query. `None` (the
+    /// default) is zero for a store in a local directory, where the read is
+    /// a file read, and one second for an object store.
+    pub read_cut_refresh: Option<Duration>,
+
     /// Background index rebuild configuration
     pub index_rebuild: IndexRebuildConfig,
 
@@ -857,6 +867,7 @@ impl Default for UniConfig {
             lance_index_cache_bytes: None,
             object_store: ObjectStoreConfig::default(),
             writer_lease: WriterLeaseConfig::default(),
+            read_cut_refresh: None,
             index_rebuild: IndexRebuildConfig::default(),
             strict_schema: false,
             #[expect(

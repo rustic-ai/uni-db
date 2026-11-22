@@ -923,6 +923,7 @@ impl crate::api::UniInner {
         let plan_time = plan_start.elapsed();
 
         let config = overrides.apply(&self.config);
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
@@ -987,6 +988,7 @@ impl crate::api::UniInner {
         let planner = self.base_planner().with_params(params.clone());
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
 
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
@@ -1459,6 +1461,7 @@ impl crate::api::UniInner {
         let plan_time = plan_start.elapsed();
 
         let config = overrides.apply(&self.config);
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
@@ -1530,6 +1533,7 @@ impl crate::api::UniInner {
         let planner = self.base_planner().with_params(params.clone());
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
 
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
@@ -1628,6 +1632,7 @@ impl crate::api::UniInner {
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
         let plan_time = plan_start.elapsed();
 
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
@@ -1704,6 +1709,7 @@ impl crate::api::UniInner {
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
         let plan_time = plan_start.elapsed();
 
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
@@ -1800,6 +1806,7 @@ impl crate::api::UniInner {
     ) -> Result<QueryResult> {
         let total_start = Instant::now();
 
+        self.storage.refresh_read_cut().await;
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);

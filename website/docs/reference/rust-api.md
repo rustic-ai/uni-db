@@ -1202,7 +1202,7 @@ pub enum WriteLease {
 }
 ```
 
-`Local` (the default) holds a local store with an OS lock and an object store with a renewed lease. A second writable open fails with `UniError::StoreLocked`, and a handle that loses its lease (or was closed) fails writes with `UniError::WriterFenced`. Read-only handles take no lease. `DynamoDB` is not implemented, so the open fails. Timing is in `UniConfig::writer_lease` (`ttl` 30 s, `renew_interval` 10 s, `acquire_grace` 5 s, `clock_skew` 5 s).
+`Local` (the default) holds a local store with an OS lock and an object store with a renewed lease. A second writable open fails with `UniError::StoreLocked`, and a handle that loses its lease (or was closed) fails writes with `UniError::WriterFenced`. Read-only handles take no lease. `DynamoDB` is not implemented, so the open fails. Timing is in `UniConfig::writer_lease` (`ttl` 30 s, `renew_interval` 10 s, `acquire_grace` 5 s, `clock_skew` 5 s). Reads see the table versions the latest manifest names; a read-only handle picks up newer ones at most once per `UniConfig::read_cut_refresh` (by default every query for a local store, once a second for an object store).
 
 ### WriteLeaseProvider Trait
 

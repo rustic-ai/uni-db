@@ -311,7 +311,7 @@ impl BulkWriterBuilder {
         // would be neither isolated nor atomic, and the only undo -- for an
         // abort or a crash -- would roll each table back by version, dropping
         // whatever other writers committed to it meanwhile.
-        if !self.backend.storage.backend().stages_invisibly() {
+        if !self.backend.storage.head_backend().stages_invisibly() {
             return Err(UniError::BulkLoadUnsupported {
                 reason: "the storage backend cannot stage rows invisibly until commit, which \
                          a bulk load's isolation, abort and crash recovery require"
@@ -1117,7 +1117,7 @@ impl BulkWriter {
         let version = self
             .backend
             .storage
-            .backend()
+            .head_backend()
             .get_table_version(table_name)
             .await
             .map_err(UniError::Internal)?;
@@ -1210,7 +1210,7 @@ impl BulkWriter {
     /// Hold `table`'s staged files against version cleanup, once per table.
     fn hold_staged(&mut self, table: &str) {
         if !self.staged_holds.contains_key(table) {
-            let hold = self.backend.storage.backend().hold_staged_files(table);
+            let hold = self.backend.storage.head_backend().hold_staged_files(table);
             self.staged_holds.insert(table.to_string(), hold);
         }
     }
@@ -1218,7 +1218,7 @@ impl BulkWriter {
     /// Stage `batch` for `table`, invisible until `commit` publishes it.
     async fn write_rows(&mut self, table: &str, batch: arrow_array::RecordBatch) -> Result<()> {
         self.hold_staged(table);
-        let backend = self.backend.storage.backend();
+        let backend = self.backend.storage.head_backend();
         let staged = uni_store::storage::manager::stage_batch(backend, table, batch)
             .await
             .map_err(UniError::Internal)?;
@@ -1479,7 +1479,7 @@ impl BulkWriter {
 
             let schema = self.backend.schema.schema();
             let storage = Arc::clone(&self.backend.storage);
-            let backend = storage.backend();
+            let backend = storage.head_backend();
 
             // Main edges FIRST, deltas second — the same order as
             // `Writer::flush_to_l1`. Background compaction folds whatever a
@@ -1593,7 +1593,7 @@ impl BulkWriter {
         // them and searches the branch's whole retained history instead.
         let mut records = Vec::with_capacity(order.len());
         let storage = Arc::clone(&self.backend.storage);
-        let backend = storage.backend();
+        let backend = storage.head_backend();
         for (table, _) in &order {
             self.record_initial_version(table).await?;
             let runs = self.staged.get(table).map_or(&[][..], Vec::as_slice);
@@ -1847,7 +1847,7 @@ impl BulkWriter {
     /// Bring the published tables' fixed indexes and in-memory label index up
     /// to date with the rows this load made visible.
     async fn index_published_rows(&mut self) -> Result<()> {
-        let backend = self.backend.storage.backend();
+        let backend = self.backend.storage.head_backend();
 
         let mut labels: Vec<String> = self.written_vids.keys().cloned().collect();
         labels.sort();
@@ -1998,7 +1998,8 @@ impl BulkWriter {
                 self.backend.storage.base_path(),
                 self.backend.storage.schema_manager_arc(),
             )
-            .with_backend(self.backend.storage.backend_arc());
+            .with_backend(self.backend.storage.head_backend_arc())
+            .with_read_cut(std::sync::Arc::clone(self.backend.storage.read_cut()));
             if let Err(e) = idx_mgr.rebuild_indexes_for_label(label).await {
                 // The label's indexes do not cover the rows just published:
                 // keep the planner off them, and let the rebuild trigger pick
@@ -2014,7 +2015,7 @@ impl BulkWriter {
             let row_count = self
                 .backend
                 .storage
-                .backend()
+                .head_backend()
                 .count_rows(&vtable_name, None)
                 .await
                 // #233: `.ok()` persisted `row_count_at_build = None`, and
@@ -2139,7 +2140,7 @@ impl BulkWriter {
         };
 
         // Update counts and versions for touched labels (vertices)
-        let backend = self.backend.storage.backend();
+        let backend = self.backend.storage.head_backend();
         for label in &self.touched_labels {
             let vtable_name = uni_store::backend::table_names::vertex_table_name(label);
             let count = backend
@@ -2748,7 +2749,7 @@ impl BulkWriter {
         self.buffer_size_bytes = 0;
 
         let storage = Arc::clone(&self.backend.storage);
-        let backend = storage.backend();
+        let backend = storage.head_backend();
 
         // 2. Staged rows: never visible, so there is nothing to roll back.
         // Reclaiming their files is best effort — an unreferenced file is

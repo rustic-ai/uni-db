@@ -21,6 +21,7 @@ pub mod lance_branch;
 pub mod lance_directory;
 #[cfg(feature = "lance-backend")]
 pub(crate) mod lance_fts;
+pub mod read_cut_view;
 #[cfg(feature = "lance-backend")]
 pub(crate) use lance_fts::score_documents;
 

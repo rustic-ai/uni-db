@@ -26,6 +26,7 @@ pub mod parquet_export_test;
 pub mod persistence_restart_test;
 pub mod property_batch_test;
 pub mod property_manager;
+pub mod read_cut_durability;
 pub mod reader_isolation;
 pub mod schema_ddl_widen_resilience;
 pub mod shutdown_test;

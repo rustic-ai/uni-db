@@ -17,3 +17,18 @@ pub trait WriteGate: Send + Sync + std::fmt::Debug {
     /// Records that another writer is active; the handle stops writing.
     fn trip(&self, reason: String);
 }
+
+/// Runs before every catalog save.
+///
+/// The storage layer publishes the table versions this handle committed
+/// outside a flush (an index build, a widened table), so a catalog that names
+/// them is never ahead of what other handles, and the next open, read.
+pub trait CatalogPublisher: Send + Sync + std::fmt::Debug {
+    /// Publishes what the catalog about to be saved may name.
+    ///
+    /// # Errors
+    /// The publish failed; the catalog is not saved.
+    fn before_save(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>;
+}

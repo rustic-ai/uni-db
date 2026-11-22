@@ -918,7 +918,7 @@ pub(crate) async fn publish_records(
     publish: &[StagedTablePublish],
     mut after_table: impl FnMut(&str) -> Result<()>,
 ) -> Result<usize> {
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     let mut published = 0usize;
     for entry in publish {
         let after = tables.get(&entry.table).copied().flatten();
@@ -939,7 +939,7 @@ pub(crate) async fn publish_records(
 /// version (drop tables created during the load) so the per-label and main
 /// tables cannot be left divergent.
 async fn roll_back_visible(storage: &StorageManager, intent: &BulkFlushIntent) -> Result<()> {
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     let mut failures = 0usize;
     for (table, pre_version) in &intent.tables {
         let result = match pre_version {

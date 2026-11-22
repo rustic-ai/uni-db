@@ -1507,6 +1507,12 @@ impl Uni {
             if let Err(e) = writer.flush_to_l1(None).await {
                 tracing::error!("Error flushing during shutdown: {}", e);
             }
+            // Compaction, index builds and widening this handle made since its
+            // last publish: other handles, and the next open, read them only
+            // once a manifest names them.
+            if let Err(e) = self.inner.storage.publish_cut().await {
+                tracing::error!("Error publishing the read cut during shutdown: {}", e);
+            }
             // A flush that did not run (or found nothing to flush) leaves
             // announced commits in the WAL; record that they were announced,
             // so the next open does not announce them again.
@@ -2438,6 +2444,16 @@ impl UniBuilder {
         // once the database's event machinery exists, below.
         // Recovery writes, so it is the writer's; a reader sees the store as
         // the crash left it until a writer opens.
+        // Reads see the table versions the latest manifest names (its read
+        // cut). A writable handle records its commits from here, so a
+        // manifest a recovery below saves names every table.
+        storage
+            .begin_read_cut(!self.read_only)
+            .await
+            .map_err(UniError::Internal)?;
+        if !self.read_only {
+            schema_manager.set_catalog_publisher(storage.catalog_publisher());
+        }
         let recovered_loads = if self.read_only {
             Vec::new()
         } else {
@@ -2571,6 +2587,23 @@ impl UniBuilder {
                 (0, 0)
             }
         };
+
+        // Roll every table back to the versions the manifest the store
+        // resumes from names, before the WAL replays: what is above them was
+        // never published (a crashed flush's commits, which the replay writes
+        // again, or a stale writer's). A reader reads at those versions.
+        if self.read_only {
+            if let Some(manifest) = recovered_manifest.as_ref() {
+                storage
+                    .read_cut()
+                    .publish(&manifest.snapshot_id, manifest.tables.clone());
+            }
+        } else {
+            storage
+                .reconcile_read_cut(recovered_manifest.as_ref())
+                .await
+                .map_err(UniError::Internal)?;
+        }
 
         // Which WAL a hybrid store follows (`uni_store::runtime::wal_lineage`).
         // Its WAL is local while everything else is remote, so a WAL the store

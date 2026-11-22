@@ -86,6 +86,22 @@
   that has not been shown to exist; a progress comment asserts a state the
   merged code has not reached, since local commits sit unpushed.
 
+## Read cut — the manifest is the commit point
+- **Reads see the versions the latest manifest names** (`SnapshotManifest::tables`,
+  `uni_store::storage::read_cut`), not each table's newest. `StorageManager::backend()`
+  reads rows there; `head_backend()` reads newest versions.
+- **A path that reads a table to rewrite it must use `head_backend()`** (compaction,
+  index builds, schema evolution, restore, bulk, backfills). Reading at the cut would
+  drop rows a running flush has committed but not yet published.
+- **Every Lance commit must go through `LanceDbBackend` or a `DatasetCut`**, so it
+  records its version. A raw `Dataset::write` / `restore()` / `create_index` elsewhere
+  leaves the cut naming an older version, and the next writable open rolls it back.
+- **A write outside a flush must call `StorageManager::publish_cut()` before the
+  catalog depends on it** (DDL widening, index builds): other handles read it only once
+  a manifest names it. Never call it from inside a flush (it returns at once there).
+- **Never roll a table back mid-session on suspicion.** A version this handle did not
+  write trips the fence instead; the WAL still holds the handle's unpublished commits.
+
 ## Fork system — current invariants (post Phase 7)
 
 The fork track shipped phases 0 through 7. This block captures the

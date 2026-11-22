@@ -1,7 +1,7 @@
 # Proposal: correct, complete object-store support
 
 - **Date:** 2026-11-20
-- **Status:** Phase A implemented (2026-11-21); Phases B and C implemented; BACKUP part of Phase E implemented; Phase D proposed
+- **Status:** Phase A implemented (2026-11-21); Phases B and C implemented; BACKUP part of Phase E implemented; Phase D implemented (§8d)
 - **Issues:** #349 (schema ignores the URL prefix), #350 (remote-only open
   can't take an endpoint or credentials). Related: #348 (no store lock).
 - **Scope:** S3 and S3-compatibles (MinIO, Cloudflare R2, LocalStack), GCS,
@@ -626,7 +626,7 @@ Once tripped, the handle refuses writes with `UniError::WriterFenced`. Lingering
 
 **Release points.** The lease is released at the end of `Uni::shutdown`, in `Drop for Uni` after its bounded wait, and in `Drop for UniInner` as a fallback.
 
-**Limits.** Lance table appends are not fenced: a stalled holder that resumes after a takeover can still append to a table before its fence trips. Closing that needs Phase D. The lease relies on holders' clocks agreeing within the skew allowance.
+**Limits.** A stalled holder that resumes after a takeover can still land one table commit before its fence trips; since Phase D (§8d) no manifest names it, so it is never read, and the next writer to meet it stops rather than build on it. The lease relies on holders' clocks agreeing within the skew allowance.
 
 ## 8c. Phase C design (as implemented)
 
@@ -642,6 +642,84 @@ The lease stops two hosts writing at once, but not divergence. Host A crashes wi
 Only hybrid stores are checked: a local or remote-only store keeps its WAL beside it, shared by every writer. A first version stamped the id into every snapshot manifest and claimed by publishing a successor manifest; review found that the successor masked an older binary's manifest from the endpoint-conformance check, missed stores with a lost `latest` or none yet, and falsely refused a local store whose `wal_id.json` was lost. A separate claim file has none of those problems.
 
 Tests: `crates/uni/tests/common/storage/hybrid_wal_lineage.rs` (refusal after another host wrote or only opened, flushed or never flushed, set-aside, same-host replay, clean handover, read-only, legacy adoption, local and remote-only unchanged), unit tests in `wal_lineage.rs` and `snapshot/manager.rs`, Python `test_a_stale_hybrid_wal_is_refused_then_set_aside`.
+
+## 8d. Phase D design: the manifest is the commit point (as implemented)
+
+**Problem.** Every flush manifest stamps `lance_version: 0`, and live reads open each Lance table at its newest version. Three things follow:
+
+- A flush is not atomic: a reader sees each table as soon as Lance commits it, so a query between two table commits sees vertices without their edges.
+- A crash after some table commits and before the manifest leaves those rows visible, and WAL replay writes them again under new `_version`s.
+- A stalled writer that resumes after a takeover can append to a table before its fence trips (§8b), and its rows are visible to everyone.
+
+**Decisions** (user, 2026-11-21): a full read cut; read-only handles refresh on an interval; the index datasets are inside the cut.
+
+**The cut.** `SnapshotManifest.tables` maps every table to the Lance version readers read:
+- keys are the backend table names, plus `indexes/...` paths for the UID, JSON, inverted and sparse index datasets;
+- an empty map is a manifest from an older binary: readers then read every table's newest version, as before;
+- `EntitySnapshot.lance_version` stays 0, because its consumers (`get_edge_version_by_id`) read it as a row ceiling.
+
+`catalog/latest` keeps holding a bare snapshot id, so older binaries still open the store.
+
+**Recording** (`uni_store::storage::read_cut::ReadCut`, one per primary storage, shared by its views):
+- every Lance commit made through the backend or an index dataset records the version it produced (`committed`);
+- `SnapshotManager::save_snapshot` stamps `tables` from `committed`, as it stamps the ID marks;
+- after the pointer moves, `published` becomes that map, and live reads use `published`.
+
+**Units and loose commits.** A flush is a unit, named by the snapshot id of the manifest it will publish (a task-local around the stream). Its commits stay unread until that manifest is published, and that manifest names the published cut plus the unit's own commits. A single lock from first commit to pointer was rejected: async flush runs up to two streams at once, and a synchronous flush holding `flush_lock` would wait on a stream whose finalize needs it.
+
+Commits outside a unit are loose: compaction, native optimize, index builds, DDL widening, bulk publish, restore, recovery, and a fork's writes to primary's datasets (the shared UID index). Each is complete when it lands, so the handle that made it reads it at once. Every manifest names the loose commits on tables no other open flush has written; a loose commit on such a table contains that flush's rows and waits for it.
+
+**Standalone publish.** `StorageManager::publish_cut` saves a successor of the latest manifest (new id, parent the current one) naming the loose commits, and moves the pointer under the same lock as every pointer flip. It first waits for the flushes open when it started, because a loose commit on a table such a flush wrote contains that flush's rows. It runs after optimize, a full compaction pass, widening, label backfill and index rebuilds.
+- DDL publishes after widening storage and before the catalog changes, so a declared column is always in the version readers read.
+- Native optimize cleans up only versions below the published one (`CleanupPolicy::before_version`), so cleanup never deletes the version readers read.
+
+**Two views of one backend.**
+
+| View | Used by | Reads |
+|---|---|---|
+| `StorageManager::backend()` | Queries, transactions, the property manager, adjacency warming | At `published` |
+| `head_backend()` | Every path that reads in order to write: flush internals, semantic compaction, MUVERA backfill, overflow promotion, label backfill, index builds, bulk, restore, recovery | Each table's newest version, as today |
+
+Reading a rewrite path's input at the cut would drop rows a running flush has committed but not yet published.
+
+**Reconcile at a writable open.** After the lease, bulk recovery and restore recovery, and before WAL replay:
+- a table whose newest version is above the cut is rolled back to the cut's version with Lance `restore()`;
+- a table on disk that the cut does not name is emptied;
+- both log a warning naming what was discarded;
+- recoveries that complete a commit adopt the versions they produced.
+
+What is discarded is a crashed flush's partial commits, which WAL replay rewrites, or a stale writer's appends.
+
+**Foreign commits.** A commit that reads a table above the version this handle holds is a foreign commit. So is a single commit whose result skips a version, because Lance folded another commit in. Either one trips the write fence, and the handle stops with `WriterFenced`.
+- This applies only while no other commit of this handle on that table is running, because an unrecorded own commit looks the same.
+- Rolling back mid-session was rejected for the same reason: a false positive would discard the handle's own data.
+- Stopping loses nothing, because the WAL keeps every commit until its manifest is published. The next writable open discards the foreign version and replays the WAL.
+- A Lance `CommitHandler` that checks the fence was not added. The read cut already keeps a late commit from being read.
+- A commit that fails after Lance may have committed (an optimize whose cleanup fails, a late acknowledgement) marks its table uncertain. The next commit adopts the version it reads rather than fence.
+- An open's reconciliation first publishes what its recoveries completed. Without that, a bulk load found already published, but not named by any manifest, would be rolled back.
+
+**Known limit:** two async flush streams (up to `max_pending_flushes`) committing to one table stack. No version holds the earlier flush's rows without the later one's. The earlier manifest names the combined version, so a crash before the later flush finalizes replays its rows a second time, as before Phase D.
+
+**Read-only handles** re-read `catalog/latest` at query start, at most once per `UniConfig::read_cut_refresh`, and switch `published` when it names a new manifest. The default (`None`) is every query for a local store, where the check is a file read and the 1 s default reopened issue #168 (a second handle not seeing a writer's flush), and 1 s for an object store.
+
+**Out of scope:**
+- Fork branches keep reading their branch heads. A fork's unbranched tables read primary at its cut.
+- A failed flush (an error, not a crash) leaves its commits unpublished on their tables, and a later commit on the same table contains them, as before Phase D.
+- An index built by a DDL procedure outside the rebuild paths is read by other handles from the next publish.
+
+**Tests:**
+- `crates/uni/tests/common/storage/read_cut_durability.rs`:
+  - the manifest names the versions;
+  - a foreign append is invisible to the writer and to readers;
+  - the writer meeting it stops, and a reopen discards it;
+  - a writable open rolls back unnamed versions;
+  - a read-only refresh interval;
+  - legacy-manifest adoption;
+  - compaction with zero retention keeps the read version;
+  - DDL on a flushed label reads at once;
+  - a paused flush is invisible to readers until its manifest is published (failpoint);
+  - an abort before the manifest leaves no partial flush (crash harness).
+- Unit tests in `storage/read_cut.rs` and `storage/index_datasets.rs`.
 
 ## 9. Test plan
 

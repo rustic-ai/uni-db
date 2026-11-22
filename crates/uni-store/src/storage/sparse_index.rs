@@ -196,6 +196,8 @@ fn weight_scale_column(batch: &RecordBatch) -> Option<&Float32Array> {
 /// Scored sparse-vector inverted index over a `DataType::SparseVector` column.
 pub struct SparseVectorIndex {
     dataset: Option<Dataset>,
+    /// The postings dataset under the store's read cut.
+    cut: crate::storage::index_datasets::DatasetCut,
     base_uri: String,
     label: String,
     property: String,
@@ -221,11 +223,28 @@ impl SparseVectorIndex {
 
     /// Open or initialize a sparse index at `base_uri` for the given config.
     pub async fn new(base_uri: &str, config: SparseVectorIndexConfig) -> Result<Self> {
+        Self::open(base_uri, config, None, false).await
+    }
+
+    /// [`Self::new`] under the store's read cut: `at_cut` reads the version
+    /// the cut publishes (a reader), otherwise the newest (a writer updating
+    /// the postings); writes record their version either way.
+    ///
+    /// # Errors
+    /// The postings dataset exists but could not be opened.
+    pub async fn open(
+        base_uri: &str,
+        config: SparseVectorIndexConfig,
+        read_cut: Option<Arc<crate::storage::read_cut::ReadCut>>,
+        at_cut: bool,
+    ) -> Result<Self> {
         let path = Self::postings_path(base_uri, &config.label, &config.property);
         // #233 Tier 1: see `inverted_index.rs` — `.ok()` made a broken index
         // indistinguishable from an unbuilt one, so a sparse search returned
         // zero hits instead of surfacing the failure.
-        let dataset = match crate::backend::lance_directory::open_dataset_uri(&path).await {
+        let cut =
+            crate::storage::index_datasets::DatasetCut::new(read_cut, base_uri, &path, at_cut);
+        let dataset = match cut.open(&path).await {
             Ok(ds) => Some(ds),
             Err(e) => {
                 let err = anyhow::Error::from(e);
@@ -238,6 +257,7 @@ impl SparseVectorIndex {
         };
         Ok(Self {
             dataset,
+            cut,
             base_uri: base_uri.to_string(),
             label: config.label.clone(),
             property: config.property.clone(),
@@ -421,6 +441,7 @@ impl SparseVectorIndex {
             Self::postings_schema(quantize),
             vec![batch],
             write_params.mode,
+            &self.cut.for_writes(),
         )
         .await?;
         self.dataset = Some(ds);

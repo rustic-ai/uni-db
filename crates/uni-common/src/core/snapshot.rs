@@ -40,6 +40,14 @@ pub struct SnapshotManifest {
     /// EID counterpart of [`next_vid`](Self::next_vid).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_eid: Option<u64>,
+    /// The read cut: the Lance version of every table and index dataset
+    /// that readers of this manifest read. Keys are backend table names and,
+    /// for index datasets, their paths under the table root
+    /// (`indexes/...`). Stamped by `SnapshotManager::save_snapshot`. Empty
+    /// in a manifest an older binary wrote, whose readers read every table
+    /// at its newest version.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tables: std::collections::BTreeMap<String, u64>,
 }
 
 /// Snapshot counters for one entity kind (a vertex label or an edge type).
@@ -76,6 +84,7 @@ impl SnapshotManifest {
             unpublished_bulk_versions: Vec::new(),
             next_vid: None,
             next_eid: None,
+            tables: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -1481,6 +1481,8 @@ pub struct SchemaManager {
     /// end of its write, so writes reach the store in the order their
     /// contents were taken and the last one holds the newest catalog.
     save_order: tokio::sync::Mutex<()>,
+    /// Runs before every save; see [`crate::core::write_gate::CatalogPublisher`].
+    publisher: std::sync::RwLock<Option<Arc<dyn crate::core::write_gate::CatalogPublisher>>>,
 }
 
 impl SchemaManager {
@@ -1555,6 +1557,7 @@ impl SchemaManager {
                     stored: std::sync::Mutex::new(stored),
                     gate: std::sync::RwLock::new(None),
                     save_order: tokio::sync::Mutex::new(()),
+                    publisher: std::sync::RwLock::new(None),
                 })
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Self {
@@ -1569,6 +1572,7 @@ impl SchemaManager {
                 stored: std::sync::Mutex::new(StoredCatalog::Absent),
                 gate: std::sync::RwLock::new(None),
                 save_order: tokio::sync::Mutex::new(()),
+                publisher: std::sync::RwLock::new(None),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
         }
@@ -1596,6 +1600,16 @@ impl SchemaManager {
         }
     }
 
+    /// Runs `publisher` before every save.
+    pub fn set_catalog_publisher(
+        &self,
+        publisher: Arc<dyn crate::core::write_gate::CatalogPublisher>,
+    ) {
+        if let Ok(mut held) = self.publisher.write() {
+            *held = Some(publisher);
+        }
+    }
+
     fn write_gate(&self) -> Option<Arc<dyn crate::core::write_gate::WriteGate>> {
         self.gate.read().ok().and_then(|g| g.clone())
     }
@@ -1603,6 +1617,10 @@ impl SchemaManager {
     pub async fn save(&self) -> Result<()> {
         if let Some(gate) = self.write_gate() {
             gate.check()?;
+        }
+        let publisher = self.publisher.read().ok().and_then(|p| p.clone());
+        if let Some(publisher) = publisher {
+            publisher.before_save().await?;
         }
         let _ordered = self.save_order.lock().await;
         let (content, version) = {
@@ -1875,6 +1893,7 @@ impl SchemaManager {
             stored: std::sync::Mutex::new(StoredCatalog::Unknown),
             gate: std::sync::RwLock::new(None),
             save_order: tokio::sync::Mutex::new(()),
+            publisher: std::sync::RwLock::new(None),
         })
     }
 

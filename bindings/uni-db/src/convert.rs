@@ -1934,6 +1934,7 @@ pub const UNI_CONFIG_KEYS: &[&str] = &[
     "lance_index_cache_bytes",
     "object_store",
     "writer_lease",
+    "read_cut_refresh",
     "index_rebuild",
     "strict_schema",
     "defer_embeddings",
@@ -2254,6 +2255,9 @@ pub fn apply_uni_config(
     }
     if let Some(v) = config.get("flush_stream_timeout") {
         uni_config.flush_stream_timeout = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("read_cut_refresh") {
+        uni_config.read_cut_refresh = py_optional_duration(v.bind(py))?;
     }
     if let Some(v) = config.get("drop_fork_drain_timeout") {
         uni_config.drop_fork_drain_timeout = py_duration(v.bind(py))?;
@@ -2586,6 +2590,10 @@ pub fn uni_config_to_py(py: Python, config: &uni_common::UniConfig) -> PyResult<
     )?;
     nested.set_item("clock_skew", config.writer_lease.clock_skew.as_secs_f64())?;
     dict.set_item("writer_lease", nested)?;
+    dict.set_item(
+        "read_cut_refresh",
+        config.read_cut_refresh.map(|d| d.as_secs_f64()),
+    )?;
     let nested = PyDict::new(py);
     nested.set_item("max_retries", config.index_rebuild.max_retries)?;
     nested.set_item(

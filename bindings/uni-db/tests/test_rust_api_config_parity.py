@@ -42,6 +42,7 @@ def config_values(tmp_path):
             "acquire_grace": 2.0,
             "clock_skew": 3.0,
         },
+        "read_cut_refresh": 0.5,
         "strict_schema": False,
         "defer_embeddings": True,
         "fork_fragment_warn_threshold": 8,

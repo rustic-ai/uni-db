@@ -67,6 +67,7 @@ impl JsonPathIndex {
             schema,
             vec![batch],
             WriteMode::Append,
+            &crate::storage::index_datasets::DatasetCut::none(),
         )
         .await?;
         Ok(())

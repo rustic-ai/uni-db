@@ -23,12 +23,30 @@ fn uid_to_hex(uid: &UniId) -> String {
 
 pub struct UidIndex {
     uri: String,
+    /// The store's read cut: lookups read the version it publishes, writes
+    /// record theirs.
+    cut: crate::storage::index_datasets::DatasetCut,
 }
 
 impl UidIndex {
     pub fn new(base_uri: &str, label: &str) -> Self {
         let uri = format!("{}/indexes/uni_id_to_vid/{}/index.lance", base_uri, label);
-        Self { uri }
+        Self {
+            uri,
+            cut: crate::storage::index_datasets::DatasetCut::none(),
+        }
+    }
+
+    /// The index under `base_uri`'s read cut `cut`.
+    #[must_use]
+    pub fn with_read_cut(
+        mut self,
+        base_uri: &str,
+        cut: std::sync::Arc<crate::storage::read_cut::ReadCut>,
+    ) -> Self {
+        self.cut =
+            crate::storage::index_datasets::DatasetCut::new(Some(cut), base_uri, &self.uri, true);
+        self
     }
 
     /// Open the backing dataset.
@@ -40,7 +58,7 @@ impl UidIndex {
     /// index's own scan. Consumers get domain methods
     /// ([`Self::resolve_uids`], [`Self::resolve_all_vids`]) instead.
     async fn open(&self) -> Result<Arc<Dataset>> {
-        let ds = crate::backend::lance_directory::open_dataset_uri(&self.uri).await?;
+        let ds = self.cut.open(&self.uri).await?;
         Ok(Arc::new(ds))
     }
 
@@ -127,6 +145,7 @@ impl UidIndex {
             schema,
             vec![batch],
             WriteMode::Append,
+            &self.cut.for_writes(),
         )
         .await?;
         self.ensure_uid_hex_index().await?;
@@ -188,6 +207,7 @@ impl UidIndex {
             new_schema,
             migrated,
             WriteMode::Overwrite,
+            &self.cut.for_writes(),
         )
         .await?;
         Ok(())
@@ -220,7 +240,8 @@ impl UidIndex {
             }
         };
 
-        if let Err(e) = ds
+        let ticket = self.cut.begin();
+        match ds
             .create_index(
                 &["_uid_hex"],
                 lance_index::IndexType::Scalar,
@@ -230,7 +251,10 @@ impl UidIndex {
             )
             .await
         {
-            crate::storage::record_default_index_failure(&self.uri, "_uid_hex", &e);
+            Ok(_) => {
+                crate::storage::index_datasets::finish_commit(ticket, None, ds.version().version)?
+            }
+            Err(e) => crate::storage::record_default_index_failure(&self.uri, "_uid_hex", &e),
         }
 
         Ok(())

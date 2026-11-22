@@ -87,7 +87,18 @@ pub struct SnapshotManager {
     /// Serializes this manager's compare-and-swap publishes, so two of its
     /// own concurrent writes never race each other into a false conflict.
     publish: tokio::sync::Mutex<()>,
+    /// The store's read cut: every manifest saved names the versions it
+    /// holds, and moving `latest` to a manifest publishes them. Unset for a
+    /// fork, whose manifests name no tables.
+    read_cut: std::sync::OnceLock<Arc<crate::storage::read_cut::ReadCut>>,
+    /// The cut each manifest saved by this manager named, until `latest`
+    /// moves to it.
+    /// Each entry also names the published manifest it was stamped on.
+    stamped: parking_lot::Mutex<HashMap<String, Stamp>>,
 }
+
+/// The published manifest a cut was stamped on, and the cut.
+type Stamp = (Option<String>, std::collections::BTreeMap<String, u64>);
 
 /// What a compare-and-swap write expects to replace.
 #[derive(Debug, Clone, Default)]
@@ -111,6 +122,8 @@ impl SnapshotManager {
             fence: parking_lot::RwLock::new(None),
             latest_version: parking_lot::Mutex::new(Expected::Unknown),
             publish: tokio::sync::Mutex::new(()),
+            read_cut: std::sync::OnceLock::new(),
+            stamped: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -119,6 +132,37 @@ impl SnapshotManager {
     /// whose allocator file is gone restarts above them. First call wins.
     pub fn set_id_allocator(&self, allocator: Arc<crate::runtime::id_allocator::IdAllocator>) {
         let _ = self.id_allocator.set(allocator);
+    }
+
+    /// A manifest stamped on a published cut that another publish has since
+    /// replaced (a bulk load's manifest, saved before a flush published) is
+    /// stamped again before `latest` moves to it, so it does not take back
+    /// the newer versions.
+    async fn restamp_if_stale(&self, snapshot_id: &str) -> Result<()> {
+        let Some(cut) = self.recording_cut() else {
+            return Ok(());
+        };
+        let current = cut.published().map(|p| p.snapshot_id);
+        let stale = self
+            .stamped
+            .lock()
+            .get(snapshot_id)
+            .is_some_and(|(base, _)| *base != current);
+        if stale {
+            let manifest = self.load_snapshot(snapshot_id).await?;
+            self.save_snapshot(&manifest).await?;
+        }
+        Ok(())
+    }
+
+    /// Records the store's read cut; see the field.
+    pub fn set_read_cut(&self, cut: Arc<crate::storage::read_cut::ReadCut>) {
+        let _ = self.read_cut.set(cut);
+    }
+
+    /// The read cut, when this handle records one.
+    fn recording_cut(&self) -> Option<&Arc<crate::storage::read_cut::ReadCut>> {
+        self.read_cut.get().filter(|cut| cut.is_recording())
     }
 
     /// The fence every publish checks; a lost compare-and-swap trips it.
@@ -208,6 +252,8 @@ impl SnapshotManager {
             fence: parking_lot::RwLock::new(None),
             latest_version: parking_lot::Mutex::new(Expected::Unknown),
             publish: tokio::sync::Mutex::new(()),
+            read_cut: std::sync::OnceLock::new(),
+            stamped: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -256,13 +302,21 @@ impl SnapshotManager {
         let needs_marks = marks.is_some_and(|(v, e)| {
             manifest.next_vid.is_none_or(|m| m < v) || manifest.next_eid.is_none_or(|m| m < e)
         });
+        // And the read cut: the versions of every table this handle holds.
+        let cut = self
+            .recording_cut()
+            .map(|cut| cut.stamp(&manifest.snapshot_id));
         let json = if manifest.writer_features.as_slice()
             == uni_common::core::schema::WRITER_FEATURES
             && !needs_marks
+            && cut.is_none()
         {
             serde_json::to_string_pretty(manifest)?
         } else {
             let mut stamped = manifest.clone();
+            if let Some(tables) = &cut {
+                stamped.tables = tables.clone();
+            }
             stamped.writer_features = uni_common::core::schema::current_writer_features();
             if let Some((v, e)) = marks {
                 stamped.next_vid = Some(stamped.next_vid.unwrap_or(0).max(v));
@@ -272,6 +326,20 @@ impl SnapshotManager {
         };
         tracing::Span::current().record("size_bytes", json.len());
         put_with_timeout(&self.store, &path, Bytes::from(json), DEFAULT_TIMEOUT).await?;
+        if let Some(tables) = cut {
+            let base = self
+                .read_cut
+                .get()
+                .and_then(|c| c.published())
+                .map(|p| p.snapshot_id);
+            let mut stamped = self.stamped.lock();
+            // Kept only until `latest` moves to them; a manifest that never
+            // becomes latest must not stay forever.
+            if stamped.len() >= 64 {
+                stamped.clear();
+            }
+            stamped.insert(manifest.snapshot_id.clone(), (base, tables));
+        }
         Ok(())
     }
 
@@ -363,6 +431,38 @@ impl SnapshotManager {
     pub async fn set_latest_snapshot(&self, snapshot_id: &str) -> Result<()> {
         self.check_fence()?;
         let _publishing = self.publish.lock().await;
+        self.set_latest_locked(snapshot_id).await
+    }
+
+    /// Publishes this handle's loose commits (see
+    /// [`crate::storage::read_cut`]) in a successor of the latest manifest:
+    /// its contents with a new id, the current one as its parent. Returns
+    /// the successor's id; `None` when no manifest exists yet, so the next
+    /// flush publishes them.
+    ///
+    /// Holds the pointer's lock from reading `latest` to moving it, so a
+    /// flush publishing in between cannot be replaced by a successor of the
+    /// manifest before it.
+    ///
+    /// # Errors
+    /// A read or write failed, or the fence is tripped.
+    pub async fn publish_successor(&self) -> Result<Option<String>> {
+        self.check_fence()?;
+        let _publishing = self.publish.lock().await;
+        let Some(mut manifest) = self.load_latest_snapshot().await? else {
+            return Ok(None);
+        };
+        manifest.parent_snapshot = Some(manifest.snapshot_id.clone());
+        manifest.snapshot_id = uuid::Uuid::new_v4().to_string();
+        manifest.name = None;
+        manifest.created_at = chrono::Utc::now();
+        self.save_snapshot(&manifest).await?;
+        self.set_latest_locked(&manifest.snapshot_id).await?;
+        Ok(Some(manifest.snapshot_id))
+    }
+
+    async fn set_latest_locked(&self, snapshot_id: &str) -> Result<()> {
+        self.restamp_if_stale(snapshot_id).await?;
         let path = self.latest_ptr_path();
         // A manager that never read the pointer learns where it stands first.
         let expected = {
@@ -383,6 +483,15 @@ impl SnapshotManager {
             .put_expecting(&path, Bytes::from(snapshot_id.to_string()), expected)
             .await?;
         *self.latest_version.lock() = written;
+        // Reads now see what the manifest names.
+        if let Some(cut) = self.read_cut.get() {
+            let stamped = self.stamped.lock().remove(snapshot_id);
+            let tables = match stamped {
+                Some((_, tables)) => tables,
+                None => self.load_snapshot(snapshot_id).await?.tables,
+            };
+            cut.publish(snapshot_id, tables);
+        }
         Ok(())
     }
 

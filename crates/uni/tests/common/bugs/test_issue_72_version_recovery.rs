@@ -255,6 +255,7 @@ async fn test_snapshot_manager_has_any_manifests() -> Result<()> {
         unpublished_bulk_versions: Vec::new(),
         next_vid: None,
         next_eid: None,
+        tables: Default::default(),
     };
 
     snapshot_mgr.save_snapshot(&manifest).await?;

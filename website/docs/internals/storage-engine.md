@@ -570,92 +570,47 @@ Snapshots provide consistent point-in-time views.
 
 ### Manifest Structure
 
+A manifest (`catalog/manifests/{id}.json` under the table root; `catalog/latest` holds the id of the latest) is a `SnapshotManifest`:
+
 ```json
 {
-  "version": 42,
-  "timestamp": "2024-01-15T10:30:00Z",
-  "schema_version": 1,
-
-  "vertex_datasets": {
-    "Paper": {
-      "lance_version": 15,
-      "row_count": 1000000,
-      "size_bytes": 524288000
-    },
-    "Author": {
-      "lance_version": 8,
-      "row_count": 250000,
-      "size_bytes": 62500000
-    }
-  },
-
-  "edge_datasets": {
-    "CITES": {
-      "lance_version": 12,
-      "row_count": 5000000,
-      "size_bytes": 200000000
-    }
-  },
-
-  "adjacency_datasets": {
-    "CITES_OUT": { "lance_version": 12 },
-    "CITES_IN": { "lance_version": 12 }
-  },
-
-  "l1_runs": [
-    { "sequence": 100, "created_at": "2024-01-15T10:25:00Z" },
-    { "sequence": 101, "created_at": "2024-01-15T10:28:00Z" }
-  ],
-
-  "indexes": {
-    "paper_embeddings": {
-      "type": "hnsw",
-      "version": 5,
-      "row_count": 1000000
-    },
-    "paper_year": {
-      "type": "btree",
-      "version": 3
-    }
+  "snapshot_id": "7f3c…",
+  "parent_snapshot": "a91e…",
+  "created_at": "2026-11-21T10:30:00Z",
+  "schema_version": 12,
+  "version_high_water_mark": 4211,
+  "wal_high_water_mark": 98,
+  "vertices": { "Paper": { "version": 7, "count": 1000000, "lance_version": 0 } },
+  "edges": { "CITES": { "version": 3, "count": 5000000, "lance_version": 0 } },
+  "next_vid": 1048576,
+  "next_eid": 5242880,
+  "tables": {
+    "vertices": 41,
+    "vertices_Paper": 38,
+    "edges": 29,
+    "deltas_CITES_fwd": 17,
+    "deltas_CITES_bwd": 17,
+    "indexes/uni_id_to_vid/Paper/index.lance": 12
   }
 }
 ```
 
+`tables` is the **read cut**: the Lance version of every table and index dataset that readers of this manifest read. (`lance_version` in `vertices` / `edges` is always 0 and kept for compatibility.)
+
+### The manifest is the commit point
+
+- **Reads** open each table at the version the latest manifest names, not at its newest. A table the manifest does not name holds nothing a reader can see.
+- **A flush** commits its tables, then publishes a manifest naming them, so it becomes visible all at once. Its table commits are unread until then.
+- **Compaction, index builds and schema widening** commit outside a flush. The handle that made them reads them at once; a successor of the latest manifest publishes them for everyone when each finishes, before each catalog save, and at `shutdown()`. A flush manifest names the published cut, the flush's own commits, and loose commits on tables no other running flush has written. Version cleanup never removes the version the latest manifest names.
+- **A writable open** rolls every table back to the versions the manifest it resumes from names (Lance `restore()`), and empties a table the manifest does not name, before the WAL replays. What it discards was never published: a crashed flush's commits, which the WAL writes again, or a stale writer's.
+- **A foreign commit** (a table version this handle did not write, met while it has no other commit on that table running) trips the writer's fence: it stops writing (`WriterFenced`), and the next writable open discards the version.
+- **Read-only handles** re-read `catalog/latest` at the start of a query, at most once per `UniConfig::read_cut_refresh`.
+- **Rewrites read the newest versions.** A path that reads a table to rewrite it (semantic compaction, index builds, schema evolution, restore, bulk load) reads each table's newest version, so it keeps rows a running flush has committed but not yet published.
+- **Older stores.** A manifest written before 5.4 names no tables; reads see every table's newest version until the first flush records them. Fork branches are read at their newest versions.
+
 ### Snapshot Operations
 
-```rust
-impl StorageManager {
-    /// Create a new snapshot (after flush)
-    pub async fn create_snapshot(&self) -> Result<Snapshot> {
-        let manifest = Manifest {
-            version: self.next_version(),
-            timestamp: Utc::now(),
-            vertex_datasets: self.collect_vertex_versions(),
-            edge_datasets: self.collect_edge_versions(),
-            adjacency_datasets: self.collect_adjacency_versions(),
-            l1_runs: self.l1_manager.list_runs(),
-            indexes: self.collect_index_versions(),
-        };
-
-        // Write manifest atomically
-        self.write_manifest(&manifest).await?;
-
-        Ok(Snapshot::new(manifest))
-    }
-
-    /// Open a specific snapshot for reading
-    pub async fn open_snapshot(&self, version: u64) -> Result<SnapshotReader> {
-        let manifest = self.read_manifest(version).await?;
-
-        Ok(SnapshotReader {
-            manifest,
-            vertex_readers: self.open_vertex_readers(&manifest).await?,
-            edge_readers: self.open_edge_readers(&manifest).await?,
-            adjacency_cache: self.load_adjacency(&manifest).await?,
-        })
-    }
-}
-```
+A flush manifest records the read cut but no restore point. `Uni::create_snapshot` (and `uni.admin.snapshot.create`) flushes and also records a restore point, which tags every table's version so a restore can return to it. `VERSION AS OF` reads a snapshot with a restore point at its tagged versions, and a flush manifest through its version ceiling over the live tables.
 
 ---
 

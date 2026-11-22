@@ -249,6 +249,7 @@ fields as Rust (including `None`) and reject unknown provider-specific keys.
 | `flush_stream_timeout` | seconds or `timedelta` |
 | `drop_fork_drain_timeout` | seconds or `timedelta` |
 | `flush_drain_timeout` | seconds or `timedelta` |
+| `read_cut_refresh` | seconds, `timedelta`, or `None`: how often a read-only handle picks up newer flushes |
 | `max_forks` | `int` or `None` |
 | `fork_default_ttl` | seconds, `timedelta`, or `None` |
 | `fork_sweeper_interval` | seconds or `timedelta` |

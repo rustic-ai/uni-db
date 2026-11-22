@@ -315,6 +315,9 @@ pub struct IndexManager {
     /// `replace_table_atomic`); `None` callers (e.g. some rebuild paths) still build
     /// indexes over already-materialised columns.
     backend: Option<Arc<dyn StorageBackend>>,
+    /// The store's read cut, which index datasets this manager writes record
+    /// their versions in.
+    read_cut: Option<Arc<crate::storage::read_cut::ReadCut>>,
 }
 
 impl std::fmt::Debug for IndexManager {
@@ -370,7 +373,15 @@ impl IndexManager {
             base_uri: base_uri.to_string(),
             schema_manager,
             backend: None,
+            read_cut: None,
         }
+    }
+
+    /// Puts the index datasets this manager writes under the store's cut.
+    #[must_use]
+    pub fn with_read_cut(mut self, cut: Arc<crate::storage::read_cut::ReadCut>) -> Self {
+        self.read_cut = Some(cut);
+        self
     }
 
     /// Attach a storage backend, enabling MUVERA FDE backfill over already-flushed rows.
@@ -420,7 +431,9 @@ impl IndexManager {
         let postings_path = format!("{}/indexes/{}/{}_inverted", self.base_uri, label, property);
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = InvertedIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            InvertedIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
 
         // Backfill from the flushed vertex table via the storage backend. The
         // LanceDB-managed table is not at the raw `{base}/vertices_<label>`
@@ -1256,7 +1269,9 @@ impl IndexManager {
         );
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = InvertedIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            InvertedIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
         index.apply_incremental_updates(added, removed).await
     }
 
@@ -1283,7 +1298,9 @@ impl IndexManager {
         let postings_path = format!("{}/indexes/{}/{}_sparse", self.base_uri, label, property);
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = SparseVectorIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            SparseVectorIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
 
         // Backfill from the flushed vertex table via the storage backend (the
         // LanceDB-managed table is not at the raw `{base}/vertices_<label>`
@@ -1343,7 +1360,9 @@ impl IndexManager {
         );
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = SparseVectorIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            SparseVectorIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
         index.apply_incremental_updates(added, removed).await
     }
 
@@ -1366,7 +1385,7 @@ impl IndexManager {
                 _ => None,
             })
             .ok_or_else(|| anyhow!("No sparse vector index found for {}.{}", label, property))?;
-        SparseVectorIndex::new(&self.base_uri, config).await
+        SparseVectorIndex::open(&self.base_uri, config, self.read_cut.clone(), true).await
     }
 }
 

@@ -179,7 +179,7 @@ impl Compactor {
             .collect();
 
         let dataset = self.storage.vertex_dataset(label)?;
-        let backend = self.storage.backend();
+        let backend = self.storage.head_backend();
         let table_name = dataset.table_name();
 
         // Check if table exists
@@ -426,7 +426,7 @@ impl Compactor {
             // leaves the table exactly as it was.
             self.safe_point("compaction::safe-point::before-vertex-replace")?;
             dataset
-                .replace(self.storage.backend(), batch, &schema)
+                .replace(self.storage.head_backend(), batch, &schema)
                 .await?;
 
             // `replace` goes through `replace_table_atomic`, which is
@@ -452,7 +452,7 @@ impl Compactor {
             // only the declared set leaves the table partially indexed — measured:
             // 4 indexes before the overwrite, 1 after a declared-only rebuild.
             dataset
-                .ensure_default_indexes(self.storage.backend())
+                .ensure_default_indexes(self.storage.head_backend())
                 .await?;
 
             #[cfg(feature = "lance-backend")]
@@ -607,7 +607,7 @@ impl Compactor {
         // 1. Load all L1 Deltas sorted by key
         let delta_ds = self.storage.delta_dataset(edge_type, direction)?;
         let mut deltas = delta_ds
-            .scan_all_backend(self.storage.backend(), &schema)
+            .scan_all_backend(self.storage.head_backend(), &schema)
             .await?;
         // Fold only the deltas at or below the oldest version an in-flight
         // reader with a versioned edge tier is pinned at. L2 rows carry no version, so everything folded
@@ -670,7 +670,7 @@ impl Compactor {
         let mut processed_vids = HashSet::new();
 
         // Try to read from backend (canonical storage)
-        let backend = self.storage.backend();
+        let backend = self.storage.head_backend();
         let adj_table_name = adj_ds.table_name();
         if backend.table_exists(&adj_table_name).await.unwrap_or(false) {
             let adj_row_count = backend.count_rows(&adj_table_name, None).await?;
@@ -786,7 +786,7 @@ impl Compactor {
             merge
                 .record(self.storage.snapshot_manager(), folded_through)
                 .await?;
-            adj_ds.replace(self.storage.backend(), batch).await?;
+            adj_ds.replace(self.storage.head_backend(), batch).await?;
         }
 
         // Crash window: L2 `adj_{et}_{dir}` has been fully overwritten with
@@ -833,7 +833,7 @@ impl Compactor {
                     // An I/O failure is not evidence that the EID is missing:
                     // report it as what it is instead of tripping the assertion.
                     let main_edge_exists =
-                        MainEdgeDataset::exists_by_eid(self.storage.backend(), eid)
+                        MainEdgeDataset::exists_by_eid(self.storage.head_backend(), eid)
                             .await
                             .map_err(|e| {
                                 e.context(format!(
@@ -869,7 +869,7 @@ impl Compactor {
             let clear_hwm = deltas.iter().map(|e| e.version).max().unwrap_or(0);
             let delta_ds = self.storage.delta_dataset(edge_type, direction)?;
             delta_ds
-                .delete_up_to_version(self.storage.backend(), clear_hwm)
+                .delete_up_to_version(self.storage.head_backend(), clear_hwm)
                 .await?;
         }
 

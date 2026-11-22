@@ -155,6 +155,11 @@ pub struct UniConfig {
     /// Maximum time without progress draining async flushes (default: 900s).
     pub flush_drain_timeout: Duration,
 
+    /// How often a read-only handle looks for a newer published manifest
+    /// (default `None`: every query for a local store, 1s for an object
+    /// store; zero checks at every query).
+    pub read_cut_refresh: Option<Duration>,
+
     /// Commit stream broadcast capacity (default: 256).
     pub commit_channel_capacity: usize,
 
@@ -657,6 +662,10 @@ Managed identity, workload identity and client-secret credentials are configured
 | `clock_skew` | 5 s | Allowance added before a takeover, and subtracted from a holder's own deadline. |
 
 Local stores use an OS lock, so only `acquire_grace` applies to them. In Python these are `config({"writer_lease": {"acquire_grace": 0.5, ...}})`, in seconds.
+
+### Read cut (`UniConfig::read_cut_refresh`)
+
+Reads see the table versions the latest manifest names (its read cut), not each table's newest version, so a flush becomes visible all at once when its manifest is published. A writable handle moves its cut as it publishes. A read-only handle re-reads `catalog/latest` at the start of a query, at most once per `read_cut_refresh` (by default at every query for a store in a local directory, where it is a file read, and once a second for an object store; zero re-reads it every query), and until then keeps reading the manifest it last saw. In Python: `config({"read_cut_refresh": 0.5})`, in seconds.
 
 ### Cloud Storage with BACKUP/COPY
 

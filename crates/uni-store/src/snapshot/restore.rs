@@ -70,7 +70,7 @@ pub async fn capture_restore_point(
     snapshot_id: &str,
 ) -> Result<RestorePoint> {
     let catalog = (*storage.schema_manager().schema()).clone();
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     let tag = restore_point_tag(snapshot_id);
     let mut tables = BTreeMap::new();
     for table in backend.table_names().await? {
@@ -104,7 +104,7 @@ pub async fn capture_restore_point(
 /// When a tag that exists cannot be removed. Every pin is attempted before
 /// the first failure is returned.
 pub async fn release_restore_point(storage: &StorageManager, point: &RestorePoint) -> Result<()> {
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     let mut failures = Vec::new();
     for table in point.tables.keys() {
         if let Err(e) = backend.delete_table_tag(table, &point.tag).await {
@@ -180,7 +180,7 @@ pub async fn rewind_storage(
     snapshot: &SnapshotManifest,
 ) -> Result<()> {
     let snapshot_created_at = snapshot.created_at;
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     let mut failures = Vec::new();
     let current = backend.table_names().await?;
     for table in &current {
@@ -261,7 +261,7 @@ async fn drop_rows_outside_the_snapshot(
         ));
     }
     let outside = FilterExpr::any_of(outside);
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     for table in point.tables.keys() {
         let Some(schema) = backend.get_table_schema(table).await? else {
             continue;
@@ -339,7 +339,7 @@ async fn sync_catalog_file(storage: &StorageManager) -> Result<()> {
 /// values held as schemaless data, as the declaration did.
 async fn rewiden_declared_properties(storage: &StorageManager) -> Result<()> {
     let schema = storage.schema_manager().schema();
-    let backend = storage.backend();
+    let backend = storage.head_backend();
     for (entity, props) in &schema.properties {
         let declared: Vec<(String, uni_common::DataType)> = props
             .iter()
@@ -411,6 +411,10 @@ pub async fn recover_interrupted_restore(storage: &StorageManager) -> Result<boo
             )
         })?;
     rewind_storage(storage, &point, &snapshot).await?;
+    // Saved again: the manifest names the rewound tables' versions (the
+    // read cut), known only now.
+    let manifest = sm.load_snapshot(&intent.manifest_id).await?;
+    sm.save_snapshot(&manifest).await?;
     sm.set_latest_snapshot(&intent.manifest_id).await?;
     finish(storage, &intent).await?;
     storage.reload_vid_labels_index().await?;
@@ -439,7 +443,8 @@ async fn rebuild_indexes(storage: &StorageManager, labels: &[String]) -> Result<
         storage.base_path(),
         storage.schema_manager_arc(),
     )
-    .with_backend(storage.backend_arc());
+    .with_backend(storage.head_backend_arc())
+    .with_read_cut(std::sync::Arc::clone(storage.read_cut()));
     for label in labels {
         manager
             .rebuild_indexes_for_label(label)
@@ -564,6 +569,7 @@ mod index_datasets {
                     at.restore()
                         .await
                         .with_context(|| format!("restore index dataset {uri} to v{version}"))?;
+                    storage.read_cut().record(&rel, at.version().version);
                 }
                 None => {
                     // Created after the snapshot, so it indexes only rows the
@@ -583,6 +589,8 @@ mod index_datasets {
                             .await
                             .with_context(|| format!("delete {path}"))?;
                     }
+                    // Gone: a dataset created under its name starts again.
+                    storage.read_cut().forget(&rel);
                 }
             }
         }

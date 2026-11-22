@@ -352,6 +352,14 @@ pub trait StorageBackend: Send + Sync + 'static {
         false
     }
 
+    /// Attaches the store's read cut: every commit this backend makes from
+    /// now on records the version it produced there, and fails (tripping the
+    /// write fence) on meeting a version this handle did not write. A no-op
+    /// for a backend without table versions.
+    fn attach_read_cut(&self, cut: Arc<crate::storage::read_cut::ReadCut>) {
+        let _ = cut;
+    }
+
     /// Write `batches` into `table_name`'s storage without publishing them.
     ///
     /// The table must already exist. Readers, compaction and every other

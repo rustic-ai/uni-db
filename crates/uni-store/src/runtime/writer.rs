@@ -6402,7 +6402,9 @@ impl Writer {
         // 4.
         restore::rewind_storage(&self.storage, &point, &target).await?;
 
-        // 5.
+        // 5. Saved again: the manifest names the rewound tables' versions
+        // (the read cut), known only now.
+        sm.save_snapshot(&manifest).await?;
         sm.set_latest_snapshot(&manifest.snapshot_id).await?;
         let local_root = self.storage.local_fs_root();
         let barrier_id = manifest.snapshot_id.clone();
@@ -6836,6 +6838,48 @@ impl Writer {
         current_version: u64,
         name: Option<String>,
     ) -> Result<FlushOutcome> {
+        // The flush is a commit unit of the read cut, named by the manifest
+        // it will publish: its table commits stay unread until that manifest
+        // is published, and the manifest names them. The unit stays open
+        // past a successful stream, until the finalize publishes it (or
+        // closes it, failing); a stream that fails closes it here.
+        let snapshot_id = Uuid::new_v4().to_string();
+        // A fork's flush publishes no primary manifest: what it commits on
+        // primary's own datasets (the shared UID index) is loose there.
+        let forked = self.storage.fork_scope().is_some();
+        let cut = Arc::clone(self.storage.read_cut());
+        let unit = (!forked).then(|| cut.open_unit(&snapshot_id));
+        // Boxed as `dyn`: one more layer of nesting around the stream's
+        // future overflows the Send proof of every future holding a flush
+        // (E0275); erasing the type stops it.
+        let stream: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<FlushOutcome>> + Send + '_>,
+        > = Box::pin(self.flush_stream_l1_in_unit(
+            old_l0_arc,
+            wal_lsn,
+            current_version,
+            name,
+            snapshot_id.clone(),
+        ));
+        let outcome = match unit {
+            Some(unit) => {
+                let outcome = crate::storage::read_cut::in_unit(snapshot_id, stream).await?;
+                unit.keep_open();
+                outcome
+            }
+            None => stream.await?,
+        };
+        Ok(outcome)
+    }
+
+    async fn flush_stream_l1_in_unit(
+        &self,
+        old_l0_arc: Arc<RwLock<L0Buffer>>,
+        wal_lsn: u64,
+        current_version: u64,
+        name: Option<String>,
+        unit_snapshot_id: String,
+    ) -> Result<FlushOutcome> {
         // Test-only seam (no-op without the `failpoints` feature): the rotate
         // (begin_flush) already moved the to-be-flushed buffer onto
         // pending_flush and installed a fresh empty current buffer, but the
@@ -7102,7 +7146,7 @@ impl Writer {
         // Save parent snapshot ID before generating new one (for lineage tracking)
         let parent_id = manifest.snapshot_id.clone();
         manifest.parent_snapshot = Some(parent_id);
-        manifest.snapshot_id = Uuid::new_v4().to_string();
+        manifest.snapshot_id = unit_snapshot_id;
         manifest.name = name;
         manifest.created_at = Utc::now();
         manifest.version_high_water_mark = current_version;
@@ -7390,6 +7434,10 @@ impl Writer {
             // Note: No CSR invalidation needed. AdjacencyManager's overlay
             // already has these edges via dual-write in insert_edge/delete_edge.
         }
+
+        // Seam: the main tables and the edge deltas are committed, the label
+        // tables are not.
+        fail::fail_point!("flush::before-label-tables");
 
         // 4. Per-label vertex table writes
         // Iterate all labels that have either full-row data or tombstones
@@ -7759,6 +7807,9 @@ impl Writer {
         initial_count: usize,
         start: std::time::Instant,
     ) -> Result<String> {
+        // Closes the flush's commit unit however the finalize ends; a
+        // publish closes it first.
+        let _unit = shared.storage.read_cut().closing_unit(&snapshot_id);
         // Flushed row counts have just moved, so forget them (#260). Placed in
         // the shared finalize body rather than in `flush_to_l1`, because the
         // sync and async paths both land here and a hook on either alone would
@@ -7794,6 +7845,8 @@ impl Writer {
             shared.storage.snapshot_manager().is_fork_scoped(),
             "fork writer must publish to a fork-scoped snapshot namespace (review C1)"
         );
+        // Seam: every table of the flush is committed, its manifest is not.
+        fail::fail_point!("flush::before-manifest");
         shared
             .storage
             .snapshot_manager()
