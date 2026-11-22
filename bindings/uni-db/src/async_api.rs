@@ -546,7 +546,11 @@ impl AsyncDatabase {
         }
     }
 
-    /// Flush data and prepare for shutdown.
+    /// Shut the database down: flush, stop background tasks, release the store.
+    ///
+    /// Waits for every background task to stop, then gives up the writer lock
+    /// or lease, so another handle can open the store for writing at once. A
+    /// flush failure is logged, not raised.
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
