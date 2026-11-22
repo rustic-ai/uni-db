@@ -1194,17 +1194,14 @@ Coordinate write access across multiple processes sharing the same database.
 
 ```rust
 pub enum WriteLease {
-    Local,                          // Single-process lock (default)
-    DynamoDB { table: String },     // DynamoDB-based distributed lease (not implemented)
-    Custom(Box<dyn WriteLeaseProvider>),  // Custom provider (not called yet)
+    Local,                          // Default: OS lock (local) or renewed lease (object store)
+    DynamoDB { table: String },     // Not implemented: the open fails
+    Custom(Box<dyn WriteLeaseProvider>),  // Your provider: acquire, heartbeat, release
+    Unenforced,                     // No lock or lease: one writer by convention
 }
 ```
 
-!!! warning "Write leases are not enforced yet"
-    The strategy is recorded and reported, but no lease is acquired, renewed
-    or checked, and a `WriteLeaseProvider` is never called. Nothing stops a
-    second writable handle on the same store, so run one writer per store.
-    Setting a non-`Local` strategy logs a warning.
+`Local` (the default) holds a local store with an OS lock and an object store with a renewed lease. A second writable open fails with `UniError::StoreLocked`, and a handle that loses its lease (or was closed) fails writes with `UniError::WriterFenced`. Read-only handles take no lease. `DynamoDB` is not implemented, so the open fails. Timing is in `UniConfig::writer_lease` (`ttl` 30 s, `renew_interval` 10 s, `acquire_grace` 5 s, `clock_skew` 5 s).
 
 ### WriteLeaseProvider Trait
 

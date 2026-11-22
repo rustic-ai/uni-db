@@ -36,6 +36,12 @@ def config_values(tmp_path):
         "lance_index_cache_bytes": 2**20,
         "object_store": {"read_timeout": 3.0, "max_retries": 2},
         "index_rebuild": {"max_index_age": None, "auto_rebuild_enabled": False},
+        "writer_lease": {
+            "ttl": 40.0,
+            "renew_interval": 12.0,
+            "acquire_grace": 2.0,
+            "clock_skew": 3.0,
+        },
         "strict_schema": False,
         "defer_embeddings": True,
         "fork_fragment_warn_threshold": 8,

@@ -137,11 +137,21 @@ The WAL and ID allocator live in the local directory, and everything else lives 
 
 - Commits are durable once written to the local WAL. Until the next flush (by default within 5 seconds) they exist only on that host.
 - If the local directory is lost, the store reopens from the object store with a fresh directory. ID allocation resumes above every ID in use. Commits that were not yet flushed are lost.
-- A hybrid store has one host. Do not open it from two hosts at once.
+- A hybrid store is held by its object-store lease and by a lock on its local directory, so a second host's writable open fails with `StoreLocked`. Commits not yet flushed live only in the first host's local WAL, and a host that takes over after the lease lapses does not see them.
 
 ## Concurrency
 
-A store, local or remote, supports **one writable handle at a time**. Uni does not yet take a lock or lease on the store, and a configured `WriteLease` is recorded but not enforced, so run a single writer per store. On an object store, compaction is unlocked too and logs a warning the first time it runs. On an object store, the ID allocator needs conditional writes and detects a concurrent writer through them; a service without them fails the first ID reservation. For an S3-compatible service, set `aws_conditional_put` to the mechanism it supports.
+A store, local or remote, has **one writable handle at a time**, and any number of read-only handles alongside it.
+
+- **A local store** (a path or `file://`) is held by an OS lock on `writer.lock`. The OS releases it when the handle closes or the process exits.
+- **An object store** is held by a lease object, `catalog/writer_lease.json`. The holder renews it every 10 seconds, and it lapses 30 seconds after the last renewal. A writer that crashed therefore blocks new writers for at most about 30 seconds. Both times are set in `UniConfig::writer_lease`. Closing the handle (`shutdown()`, or dropping it) gives the lease back at once. Prefer `shutdown()`: a drop on a single-threaded async runtime can only send the release once that runtime runs again, so a reopen right after it may wait out `acquire_grace`, and a process that exits straight after the drop leaves the lease to lapse.
+- **A second writable open** waits a few seconds (`acquire_grace`) for a handle that is closing, then fails with `StoreLocked`, which names the holder's process and host. Open it read-only instead, or close the other handle.
+- **A writer that loses its lease** stops writing and fails with `WriterFenced`. That happens when its lease was taken over after it stalled past expiry, or when it couldn't renew in time. So do sessions of a handle that was closed.
+- **Catalog writes** (`latest`, the schema, named snapshots, the fork registry) are compare-and-swap on object stores, so a stale writer cannot overwrite them.
+
+This needs conditional writes (`If-Match` / `If-None-Match`, which S3, GCS, Azure, MinIO and R2 provide). An object store without them is refused. A service that silently ignores those headers cannot be detected, so check yours before relying on the lease. `WriteLease::Unenforced` opens a store with no lock or lease, which means one writer by convention, and logs a warning. It also lets the ID allocator write without conditional writes. `WriteLease::Custom` uses your own provider: it is acquired before the first write, heartbeated, and released on close.
+
+A writer stops on its own once its lease could have lapsed (expiry minus `clock_skew`), even if a stalled renewal never told it so. Two limits remain. A writer stalled in the middle of a table append can complete that one append after resuming; pinning table versions in the snapshot manifest is planned to close this. Lease expiry assumes hosts' clocks agree to within `clock_skew` (5 seconds). Forks created from a read-only handle still write their own fork state.
 
 ## Stores written before 5.4
 

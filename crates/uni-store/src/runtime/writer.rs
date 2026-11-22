@@ -1417,6 +1417,8 @@ impl Writer {
     }
 
     async fn seal_wal_locked(&self) -> Result<()> {
+        // After the handle gave the store up, another writer may own the WAL.
+        self.storage.write_fence().check()?;
         let wal = self.l0_manager.get_current().read().wal.clone();
         if let Some(wal) = wal {
             wal.seal().await?;
@@ -1962,6 +1964,8 @@ impl Writer {
         lock_timeout: Option<std::time::Duration>,
         on_abandon: Option<crate::runtime::publish_sequencer::AbandonAnnouncement>,
     ) -> Result<CommittedTx> {
+        // A handle that lost its writer lease, or was closed, commits nothing.
+        self.storage.write_fence().check()?;
         // Hold `flush_lock` across WAL append + flush + main-L0 merge.
         // Two concurrent commits serialize here; in Phase 3 the outer
         // `Arc<RwLock<Writer>>` already provides this exclusion, so the
@@ -1981,6 +1985,9 @@ impl Writer {
             },
             None => self.flush_lock.lock().await,
         };
+        // Checked again with the lock held: the fence may have tripped while
+        // this commit waited behind a flush.
+        self.storage.write_fence().check()?;
 
         // Crash-recovery seam: simulate process death immediately after winning
         // the commit serialization point but before any durable work. No-op
@@ -6095,6 +6102,7 @@ impl Writer {
     /// must call `flush_inline_under_lock` (private) directly to avoid a re-entrant
     /// `tokio::sync::Mutex` deadlock — see concurrent_writer.md §5.5.
     pub async fn flush_to_l1(&self, name: Option<String>) -> Result<String> {
+        self.storage.write_fence().check()?;
         // Drain any in-flight async flushes first. `flush_to_l1` is a
         // SYNCHRONIZATION BARRIER — callers (test fixtures, fork
         // setup, shutdown paths) rely on it as "all writes are now
@@ -6276,6 +6284,9 @@ impl Writer {
     ///
     /// [`RestoreIntent`]: crate::snapshot::manager::RestoreIntent
     pub async fn restore_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        // A restore rewinds tables before it publishes: refuse it outright on
+        // a handle that may no longer write.
+        self.storage.write_fence().check()?;
         // Refuse up front too, before the flush below does any work.
         self.refuse_restore_with_forks().await?;
         use crate::snapshot::manager::RestoreIntent;

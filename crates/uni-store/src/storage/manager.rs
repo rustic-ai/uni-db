@@ -153,6 +153,9 @@ pub struct StorageManager {
     base_uri: String,
     /// Set when the manager was built from a [`StoreLocation`](crate::location::StoreLocation).
     origin: Option<StoreOrigin>,
+    /// Whether this handle may still write; shared with every clone and
+    /// checked before commits, flush publishes and compaction.
+    write_fence: Arc<crate::lease::WriteFence>,
     /// Local directory behind `base_uri`, when there is one: a plain path or
     /// a `file://` URI. Enables fsync and the compaction lock.
     fs_root: Option<std::path::PathBuf>,
@@ -860,24 +863,6 @@ fn label_backfill_marker_path(label: &str) -> object_store::path::Path {
     object_store::path::Path::from(format!("{LABEL_BACKFILL_MARKER_DIR}/{name}"))
 }
 
-/// Logs, once per store, that compaction on an object store runs unlocked.
-///
-/// A local store's compaction takes a file lock, so a second handle on the
-/// same directory waits instead of overwriting appends it made concurrently.
-/// An object store has no such lock yet (a store lease is planned), so two
-/// writable handles compacting one store can lose writes.
-fn warn_unlocked_compaction(base_uri: &str) {
-    static WARNED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
-        std::sync::LazyLock::new(Default::default);
-    if WARNED.lock().insert(base_uri.to_string()) {
-        warn!(
-            store = base_uri,
-            "Compaction on an object store takes no lock: open this store with at most one \
-             writable handle at a time, or concurrent compactions can drop each other's writes"
-        );
-    }
-}
-
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -887,8 +872,16 @@ impl StorageManager {
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
-        Self::new_with_backend_retrying(base_uri, store, backend, schema_manager, config, false)
-            .await
+        Self::new_with_backend_retrying(
+            base_uri,
+            store,
+            backend,
+            schema_manager,
+            config,
+            false,
+            true,
+        )
+        .await
     }
 
     /// [`Self::new_with_backend`]; `client_retries` says `store` is an
@@ -901,6 +894,7 @@ impl StorageManager {
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
         client_retries: bool,
+        recover: bool,
     ) -> Result<Self> {
         let resilient_store: Arc<dyn ObjectStore> = Arc::new(if client_retries {
             ResilientObjectStore::without_retries(store, config.object_store.clone())
@@ -911,7 +905,10 @@ impl StorageManager {
         let snapshot_manager = Arc::new(SnapshotManager::new(resilient_store.clone()));
 
         // Perform crash recovery for all known table patterns
-        Self::recover_all_staging_tables(backend.as_ref(), &schema_manager).await?;
+        // Writes: a read-only handle leaves it to the writer.
+        if recover {
+            Self::recover_all_staging_tables(backend.as_ref(), &schema_manager).await?;
+        }
 
         // Every table and index URI is `base_uri` joined with a relative
         // name, so a trailing `/` would put `//` in all of them.
@@ -923,6 +920,7 @@ impl StorageManager {
             requires_adjacency_revalidation: false,
             fs_root: (!base_uri.contains("://")).then(|| std::path::PathBuf::from(base_uri)),
             origin: None,
+            write_fence: crate::lease::WriteFence::new(),
             base_uri: base_uri.to_string(),
             store: resilient_store,
             schema_manager,
@@ -948,6 +946,9 @@ impl StorageManager {
             history_whole: true,
             excluded_versions: Arc::from(Vec::new()),
         };
+
+        sm.snapshot_manager
+            .set_write_fence(Arc::clone(&sm.write_fence));
 
         // How far earlier processes' semantic compaction merged history, so a
         // session pinned below it is refused rather than served merged rows.
@@ -1034,6 +1035,19 @@ impl StorageManager {
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
+        Self::new_with_location_opts(location, layout, schema_manager, config, false).await
+    }
+
+    /// [`Self::new_with_location`]; a `read_only` manager writes nothing at
+    /// construction (crash recovery of staging tables is the writer's).
+    #[cfg(feature = "lance-backend")]
+    pub async fn new_with_location_opts(
+        location: &crate::location::StoreLocation,
+        layout: crate::location::StoreLayout,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        read_only: bool,
+    ) -> Result<Self> {
         let base_uri = location.table_uri(layout);
         let store = location.table_store(layout)?;
         // A remote store's client retries with the configured settings
@@ -1046,6 +1060,7 @@ impl StorageManager {
             config,
             location.lance_storage_options(),
             location.is_remote(),
+            !read_only,
         )
         .await?;
         sm.fs_root = location.table_fs_root(layout);
@@ -1055,6 +1070,18 @@ impl StorageManager {
             local: None,
         });
         Ok(sm)
+    }
+
+    /// Whether this handle may still write.
+    pub fn write_fence(&self) -> &Arc<crate::lease::WriteFence> {
+        &self.write_fence
+    }
+
+    /// Shares `fence` with this manager and its snapshot catalog: once it
+    /// trips, commits, flush publishes and compaction refuse.
+    pub fn set_write_fence(&mut self, fence: Arc<crate::lease::WriteFence>) {
+        self.snapshot_manager.set_write_fence(Arc::clone(&fence));
+        self.write_fence = fence;
     }
 
     /// Records a hybrid store's local directory (its WAL and ID allocator).
@@ -1124,6 +1151,7 @@ impl StorageManager {
             config,
             lancedb_storage_options,
             false,
+            true,
         )
         .await
     }
@@ -1136,6 +1164,7 @@ impl StorageManager {
         config: UniConfig,
         lancedb_storage_options: Option<HashMap<String, String>>,
         client_retries: bool,
+        recover: bool,
     ) -> Result<Self> {
         let cache_sizes = crate::backend::lance_directory::LanceCacheSizes {
             index_bytes: config.lance_index_cache_bytes,
@@ -1160,6 +1189,7 @@ impl StorageManager {
             schema_manager,
             config,
             client_retries,
+            recover,
         )
         .await
     }
@@ -1291,6 +1321,7 @@ impl StorageManager {
             base_uri: self.base_uri.clone(),
             fs_root: self.fs_root.clone(),
             origin: self.origin.clone(),
+            write_fence: Arc::clone(&self.write_fence),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1404,6 +1435,7 @@ impl StorageManager {
             base_uri: self.base_uri.clone(),
             fs_root: self.fs_root.clone(),
             origin: self.origin.clone(),
+            write_fence: Arc::clone(&self.write_fence),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1481,11 +1513,13 @@ impl StorageManager {
             self.store.clone(),
             scope.fork_id(),
         ));
+        snapshot_manager.set_write_fence(Arc::clone(&self.write_fence));
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             fs_root: self.fs_root.clone(),
             origin: self.origin.clone(),
+            write_fence: Arc::clone(&self.write_fence),
             store: self.store.clone(),
             schema_manager: merged_schema,
             snapshot_manager,
@@ -2913,17 +2947,18 @@ impl StorageManager {
 
     /// Waits for this directory's compaction lock, then takes it.
     ///
-    /// Returns `Ok(None)` for a remote store, which has no lock: compaction
-    /// there is safe only with a single writable handle per store, and the
-    /// first such compaction says so in the log.
+    /// Returns `Ok(None)` for a remote store, which has no lock: its writer
+    /// lease already admits a single writable (and so compacting) handle.
     ///
     /// # Errors
     ///
     /// Returns [`CompactionCancelled`] if cancelled while waiting, or the
     /// lock file's I/O error.
     pub(crate) async fn lock_compaction_dir(&self) -> Result<Option<CompactionDirLock>> {
+        self.write_fence.check()?;
+        // An object store has no directory to lock: its writer lease admits
+        // one compacting handle.
         let Some(root) = self.local_fs_root() else {
-            warn_unlocked_compaction(&self.base_uri);
             return Ok(None);
         };
         loop {
@@ -3156,6 +3191,10 @@ impl StorageManager {
         // them through L2 adjacency. The next tick retries.
         if this.bulk_gate.is_closed() {
             log::debug!("Background compaction deferred: a bulk load is being published");
+            return Ok(CompactionStats::default());
+        }
+        if this.write_fence.is_tripped() {
+            log::debug!("Background compaction skipped: this handle can no longer write");
             return Ok(CompactionStats::default());
         }
         // Skip, rather than wait, when another handle on this directory is

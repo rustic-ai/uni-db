@@ -709,6 +709,143 @@ async fn test_remote_only_open_from_a_named_aws_profile() -> Result<()> {
     Ok(())
 }
 
+// ---- One writer per store on S3 (issue #348) -----------------------------
+
+fn lease_config(renew: std::time::Duration) -> uni_db::UniConfig {
+    let mut config = uni_db::UniConfig::default();
+    config.writer_lease.acquire_grace = std::time::Duration::from_millis(500);
+    config.writer_lease.renew_interval = renew;
+    config.writer_lease.clock_skew = std::time::Duration::from_millis(0);
+    config
+}
+
+async fn read_lease(bucket: &str, key: &str) -> Result<serde_json::Value> {
+    let store = build_localstack_store(bucket)?;
+    let bytes = store.get(&ObjPath::from(key)).await?.bytes().await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_a_second_writer_on_s3_waits_for_the_first_to_close() -> Result<()> {
+    configure_localstack_env();
+    let bucket = unique_bucket("lease");
+    create_localstack_bucket(&bucket).await?;
+    let cfg = localstack_cloud_config(&bucket);
+    let uri = format!("s3://{bucket}/g");
+    let open = || {
+        Uni::open(&uri)
+            .cloud_storage(cfg.clone())
+            .config(lease_config(std::time::Duration::from_secs(10)))
+            .build()
+    };
+    let a = open().await?;
+    seed(&a, &["Alice"]).await?;
+    match open().await {
+        Err(uni_db::UniError::StoreLocked { .. }) => {}
+        Err(e) => anyhow::bail!("expected StoreLocked, got {e}"),
+        Ok(_) => anyhow::bail!("a second writer opened on S3"),
+    }
+    // A reader is fine alongside.
+    let r = Uni::open(&uri)
+        .cloud_storage(cfg.clone())
+        .read_only()
+        .build()
+        .await?;
+    assert_eq!(names(&r).await?, ["Alice"]);
+    let lease = read_lease(&bucket, "g/catalog/writer_lease.json").await?;
+    assert_eq!(lease["epoch"], serde_json::json!(1));
+    a.shutdown().await?;
+    assert_eq!(
+        read_lease(&bucket, "g/catalog/writer_lease.json").await?["released"],
+        true
+    );
+    let b = open().await?;
+    assert_eq!(names(&b).await?, ["Alice"]);
+    assert_eq!(
+        read_lease(&bucket, "g/catalog/writer_lease.json").await?["epoch"],
+        2
+    );
+    Ok(())
+}
+
+/// A writer paused past its lease (simulated by expiring the lease object
+/// under it) is taken over, and from then on cannot write.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_a_writer_whose_lease_is_taken_over_is_fenced() -> Result<()> {
+    configure_localstack_env();
+    let bucket = unique_bucket("fence");
+    create_localstack_bucket(&bucket).await?;
+    let cfg = localstack_cloud_config(&bucket);
+    let uri = format!("s3://{bucket}/g");
+    let a = Uni::open(&uri)
+        .cloud_storage(cfg.clone())
+        .config(lease_config(std::time::Duration::from_millis(200)))
+        .build()
+        .await?;
+    seed(&a, &["Alice"]).await?;
+    // a's lease lapses as if a had stalled: expire it in place.
+    let store = build_localstack_store(&bucket)?;
+    let key = ObjPath::from("g/catalog/writer_lease.json");
+    let mut lease = read_lease(&bucket, "g/catalog/writer_lease.json").await?;
+    lease["expires_at_ms"] = serde_json::json!(0);
+    store.put(&key, serde_json::to_vec(&lease)?.into()).await?;
+
+    let b = Uni::open(&uri)
+        .cloud_storage(cfg.clone())
+        .config(lease_config(std::time::Duration::from_secs(10)))
+        .build()
+        .await?;
+    let tx = b.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'FromB'})").await?;
+    tx.commit().await?;
+    b.flush().await?;
+
+    // a finds out on its next renewal and stops writing.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let result = async {
+        let tx = a.session().tx().await?;
+        tx.execute("CREATE (:Person {name: 'FromA'})").await?;
+        tx.commit().await
+    }
+    .await;
+    match result {
+        Err(uni_db::UniError::WriterFenced { .. }) => {}
+        other => anyhow::bail!("expected WriterFenced, got {other:?}"),
+    }
+    assert!(a.flush().await.is_err(), "a fenced writer flushed");
+    assert_eq!(names(&b).await?, ["Alice", "FromB"]);
+    Ok(())
+}
+
+/// Two hosts in hybrid mode (two local directories) on one remote store.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_hybrid_stores_on_two_hosts_cannot_both_write() -> Result<()> {
+    configure_localstack_env();
+    let bucket = unique_bucket("hylease");
+    create_localstack_bucket(&bucket).await?;
+    let cfg = localstack_cloud_config(&bucket);
+    let remote = format!("s3://{bucket}/g");
+    let (one, two) = (tempdir()?, tempdir()?);
+    let open = |dir: &std::path::Path| {
+        Uni::open(dir.to_string_lossy().to_string())
+            .hybrid(&remote)
+            .cloud_storage(cfg.clone())
+            .config(lease_config(std::time::Duration::from_secs(10)))
+            .build()
+    };
+    let a = open(one.path()).await?;
+    seed(&a, &["Alice"]).await?;
+    match open(two.path()).await {
+        Err(uni_db::UniError::StoreLocked { .. }) => {}
+        Err(e) => anyhow::bail!("expected StoreLocked, got {e}"),
+        Ok(_) => anyhow::bail!("a second host opened the store for writing"),
+    }
+    Ok(())
+}
+
 fn localstack_cloud_config(bucket: &str) -> CloudStorageConfig {
     CloudStorageConfig::S3 {
         bucket: bucket.to_string(),

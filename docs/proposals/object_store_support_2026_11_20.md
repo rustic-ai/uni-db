@@ -1,7 +1,7 @@
 # Proposal: correct, complete object-store support
 
 - **Date:** 2026-11-20
-- **Status:** Phase A implemented (2026-11-21); Phases B–E proposed
+- **Status:** Phase A implemented (2026-11-21); Phase B implemented; BACKUP part of Phase E implemented; Phases C, D proposed
 - **Issues:** #349 (schema ignores the URL prefix), #350 (remote-only open
   can't take an endpoint or credentials). Related: #348 (no store lock).
 - **Scope:** S3 and S3-compatibles (MinIO, Cloudflare R2, LocalStack), GCS,
@@ -32,12 +32,16 @@ Finished after the first commit:
 - Storage options registered for Lance's by-URI opens live only as long as the database that registered them.
 - A remote store's resilience layer keeps its timeouts and circuit breaker but no longer retries on top of the client, which retries with the same settings.
 - Unlocked compaction on an object store logs a warning, once per store.
-- `WriteLease` is documented as recorded-only, and a non-`Local` strategy logs a warning.
 - BACKUP is rebuilt on `StoreLocation` (most of Phase E). Before, a backup to an object store copied no tables yet reported success, and a local backup could not be opened. That was reproduced on LocalStack.
 - AWS named profiles are supported for uni's client.
 - When `id_allocator.json` is missing and a manifest exists, the ID floor is the higher of the manifest's marks and a scan of the tables. A manifest published by bulk-load recovery carries the marks from before the load (reproduced with a failpoint).
 
 **Behaviour and API changes for release notes:**
+
+- A second writable handle on a store fails with `UniError::StoreLocked`. A handle that loses its lease, or was closed, fails writes with `UniError::WriterFenced`. Read-only handles are unaffected, and no longer run recovery or compaction.
+- `WriteLease` is enforced. `Local`, the default, is an OS lock or an object-store lease. `Custom` providers are called. `DynamoDB` fails the open. The new `Unenforced` opts out. An object store without conditional writes needs `Unenforced`.
+- Writes to `catalog/latest`, the schema, named snapshots and the fork registry are compare-and-swap on object stores.
+- New `UniConfig::writer_lease`.
 
 - `CloudStorageConfig::azure_from_env` returns `anyhow::Result<Self>` instead of panicking.
 - `uni_store::cloud::build_store_from_url` is `async` and resolves through `StoreLocation`.
@@ -592,6 +596,37 @@ stale `id_allocator.json`.
 | **C** | Hybrid semantics. Recommendation: hybrid means "local WAL for low-latency durable commits; everything else remote". Document it as single-host, with unflushed commits living on that host; the Phase B lease prevents a second host. Fix the docs. | doc drift | Low |
 | **D** | Make the manifest the commit point: record real Lance versions in `lance_version`, have readers check out those versions, and remove the `0` sentinel. This is the only way to fence out a stale writer's table appends, and it also makes flush visibility atomic. Gets its own proposal. | fencing, atomic flush | High |
 | **E** | COPY and BACKUP through `StoreLocation`: snapshot-consistent (pinned to the named manifest), correct source paths, streaming multipart, and a non-zero exit when nothing was copied. | backup correctness | Medium |
+
+## 8b. Phase B design (as implemented)
+
+Decisions:
+
+- Read-only handles take no lock and coexist with the writer. A read-only open no longer writes anything: no staging, bulk-load, restore or fork recovery, and no background compaction.
+- A second writable open waits a short grace period (5 s), then fails with `UniError::StoreLocked`, which names the holder.
+- An object store without conditional writes fails the open, unless `WriteLease::Unenforced` is chosen. `WriteLease::DynamoDB` fails the open as not implemented. A `WriteLease::Custom` provider is called: `acquire` at open, `heartbeat` on the renew interval, `release` at close.
+- Lease timing is a 30 s TTL with renewal every 10 s. Both are configurable in `UniConfig.writer_lease`.
+
+Mechanism (`uni_store::lease`):
+
+| Store | Exclusion |
+|---|---|
+| Plain path, `file://` | OS lock (`flock`) on `R/writer.lock`, released when the handle closes or the process dies. The holder's pid and host are written into the file for the error message. |
+| Remote-only, hybrid | Lease object `R/catalog/writer_lease.json` `{owner, host, pid, epoch, expires_at_ms, released}`. Acquired with `PutMode::Create`. Taken over with `Update(version)` once released, or once expired (plus a 5 s clock-skew allowance). Renewed with `Update(version)`. Released by writing `released: true`. |
+
+**Fencing.** A shared `WriteFence` is checked before every commit, every flush publish, every catalog publish and every compaction pass. It trips when:
+
+- a renewal finds the lease taken over (`Precondition`);
+- a renewal cannot succeed before the lease would expire;
+- a catalog compare-and-swap fails;
+- the handle is closed.
+
+Once tripped, the handle refuses writes with `UniError::WriterFenced`. Lingering sessions of a closed handle can therefore never write.
+
+**Compare-and-swap.** Writes to `catalog/latest`, `catalog/schema.json`, `catalog/named_snapshots.json` and `catalog/fork_registry.json` use `Update(version)` on stores that support it. A `Precondition` trips the fence. Local filesystems lack `Update`, so they rely on the OS lock.
+
+**Release points.** The lease is released at the end of `Uni::shutdown`, in `Drop for Uni` after its bounded wait, and in `Drop for UniInner` as a fallback.
+
+**Limits.** Lance table appends are not fenced: a stalled holder that resumes after a takeover can still append to a table before its fence trips. Closing that needs Phase D. The lease relies on holders' clocks agreeing within the skew allowance.
 
 ## 9. Test plan
 

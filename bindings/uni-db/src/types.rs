@@ -2501,11 +2501,14 @@ pub(crate) enum WriteLeaseVariant {
     /// Before this existed, such a lease reported as `Local`, i.e. "no external
     /// coordination" for a lease that has it.
     Custom,
+    /// No lease or lock: one writer by convention.
+    Unenforced,
 }
 
 #[pymethods]
 impl PyWriteLease {
-    /// Create a local (single-process) write lease.
+    /// The default: an OS lock for a local store, a renewed lease object for
+    /// an object store.
     #[staticmethod]
     #[pyo3(name = "LOCAL")]
     fn local() -> Self {
@@ -2514,7 +2517,18 @@ impl PyWriteLease {
         }
     }
 
-    /// Create a DynamoDB-based distributed write lease.
+    /// Open without a lease or lock: one writer by convention. Needed for an
+    /// object store without conditional writes; logs a warning.
+    #[staticmethod]
+    #[pyo3(name = "UNENFORCED")]
+    fn unenforced() -> Self {
+        Self {
+            variant: WriteLeaseVariant::Unenforced,
+        }
+    }
+
+    /// Create a DynamoDB-based distributed write lease (not implemented: the
+    /// open fails).
     #[staticmethod]
     #[pyo3(name = "DYNAMODB")]
     fn dynamodb(table: String) -> Self {
@@ -2527,6 +2541,7 @@ impl PyWriteLease {
         match &self.variant {
             WriteLeaseVariant::Local => "WriteLease.LOCAL".to_string(),
             WriteLeaseVariant::Custom => "WriteLease.CUSTOM".to_string(),
+            WriteLeaseVariant::Unenforced => "WriteLease.UNENFORCED".to_string(),
             WriteLeaseVariant::DynamoDB { table } => {
                 format!("WriteLease.DYNAMODB(table={:?})", table)
             }

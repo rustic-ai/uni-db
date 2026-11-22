@@ -504,7 +504,7 @@ Simple: `STRING()`, `INT32()`, `INT64()`, `FLOAT32()`, `FLOAT64()`, `BOOL()`, `T
 
 ### WriteLease
 
-`WriteLease.LOCAL()` (single-process), `WriteLease.DYNAMODB(table: str)` (distributed).
+`WriteLease.LOCAL()` (default: OS lock for a local store, renewed lease for an object store), `WriteLease.UNENFORCED()` (no lock; one writer by convention), `WriteLease.DYNAMODB(table: str)` (not implemented; the open fails). A second writable open raises `UniStoreLockedError`.
 
 ### Schema Info Types
 

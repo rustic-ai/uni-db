@@ -555,7 +555,7 @@ let db = Uni::open("./local_wal")
 - Scalable storage via cloud object store
 - Cost-effective for large datasets
 
-A hybrid store has one host. Commits not yet flushed live only in its local WAL.
+A hybrid store is held by its object-store lease, so a second host's writable open fails with `StoreLocked`. Commits not yet flushed live only in the first host's local WAL.
 
 ### S3 Configuration
 
@@ -648,6 +648,17 @@ let db = Uni::open("az://my-container/data")
 ```
 
 Managed identity, workload identity and client-secret credentials are configured with their `object_store` keys (`azure_msi_endpoint`, `azure_federated_token_file`, `azure_storage_client_id`, `azure_storage_client_secret`, `azure_storage_tenant_id`), either as storage options or through the environment.
+
+### Writer lease (`UniConfig::writer_lease`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ttl` | 30 s | Object-store lease lifetime without renewal. A crashed writer blocks others this long. |
+| `renew_interval` | 10 s | Lease renewal and `WriteLeaseProvider::heartbeat` period. Must be above zero and below `ttl`. |
+| `acquire_grace` | 5 s | How long a writable open waits for a held store before `StoreLocked`. |
+| `clock_skew` | 5 s | Allowance added before a takeover, and subtracted from a holder's own deadline. |
+
+Local stores use an OS lock, so only `acquire_grace` applies to them. In Python these are `config({"writer_lease": {"acquire_grace": 0.5, ...}})`, in seconds.
 
 ### Cloud Storage with BACKUP/COPY
 

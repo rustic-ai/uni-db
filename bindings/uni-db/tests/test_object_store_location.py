@@ -11,6 +11,7 @@ the instance metadata service (issue #350).
 import json
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -133,3 +134,67 @@ def test_a_new_local_store_records_the_standard_layout():
 def test_unsupported_scheme_is_refused():
     with pytest.raises(Exception, match="Unsupported"):
         uni_db.UniBuilder.open("ftp://host/x").build()
+
+
+def test_a_second_writable_open_is_refused():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        path = os.path.join(tmpdir, "db")
+        first = uni_db.UniBuilder.open(path).build()
+        try:
+            with pytest.raises(Exception, match="open for writing elsewhere"):
+                uni_db.UniBuilder.open(path).build()
+            reader = uni_db.UniBuilder.open(path).read_only().build()
+            reader.shutdown()
+        finally:
+            first.shutdown()
+        # Free once the first handle is shut down.
+        uni_db.UniBuilder.open(path).build().shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_second_writable_open_is_refused():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        path = os.path.join(tmpdir, "db")
+        first = await uni_db.AsyncUniBuilder.open(path).build()
+        try:
+            with pytest.raises(Exception, match="open for writing elsewhere"):
+                await uni_db.AsyncUniBuilder.open(path).build()
+        finally:
+            await first.shutdown()
+
+
+def test_store_locked_is_a_typed_exception_and_grace_is_configurable():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        path = os.path.join(tmpdir, "db")
+        first = uni_db.UniBuilder.open(path).build()
+        try:
+            started = time.monotonic()
+            with pytest.raises(uni_db.UniStoreLockedError) as excinfo:
+                uni_db.UniBuilder.open(path).config(
+                    {"writer_lease": {"acquire_grace": 0.2}}
+                ).build()
+            assert time.monotonic() - started < 3
+            assert str(os.getpid()) in excinfo.value.holder
+        finally:
+            first.shutdown()
+
+
+def test_unenforced_takes_no_lock():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        path = os.path.join(tmpdir, "db")
+        lease = uni_db.WriteLease.UNENFORCED()
+        assert repr(lease) == "WriteLease.UNENFORCED"
+        a = uni_db.UniBuilder.open(path).write_lease(lease).build()
+        b = uni_db.UniBuilder.open(path).write_lease(lease).build()
+        b.shutdown()
+        a.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_read_only_coexists_with_the_writer():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        path = os.path.join(tmpdir, "db")
+        w = await uni_db.AsyncUniBuilder.open(path).build()
+        r = await uni_db.AsyncUniBuilder.open(path).read_only().build()
+        await r.shutdown()
+        await w.shutdown()

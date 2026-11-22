@@ -5,6 +5,7 @@ pub mod backend;
 pub mod cloud;
 pub mod compaction;
 pub mod fork;
+pub mod lease;
 pub mod location;
 pub mod runtime;
 pub mod storage;

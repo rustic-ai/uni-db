@@ -586,6 +586,9 @@ pub fn write_lease_to_py(
         ::uni_db::api::multi_agent::WriteLease::Local => crate::types::PyWriteLease {
             variant: crate::types::WriteLeaseVariant::Local,
         },
+        ::uni_db::api::multi_agent::WriteLease::Unenforced => crate::types::PyWriteLease {
+            variant: crate::types::WriteLeaseVariant::Unenforced,
+        },
         _ => crate::types::PyWriteLease {
             variant: crate::types::WriteLeaseVariant::Custom,
         },
@@ -1930,6 +1933,7 @@ pub const UNI_CONFIG_KEYS: &[&str] = &[
     "lance_metadata_cache_bytes",
     "lance_index_cache_bytes",
     "object_store",
+    "writer_lease",
     "index_rebuild",
     "strict_schema",
     "defer_embeddings",
@@ -1975,6 +1979,9 @@ pub const OBJECT_STORE_CONFIG_KEYS: &[&str] = &[
     "retry_backoff_base",
     "retry_backoff_max",
 ];
+
+pub const WRITER_LEASE_CONFIG_KEYS: &[&str] =
+    &["ttl", "renew_interval", "acquire_grace", "clock_skew"];
 
 pub const INDEX_REBUILD_CONFIG_KEYS: &[&str] = &[
     "max_retries",
@@ -2192,6 +2199,17 @@ pub fn apply_uni_config(
                 }
                 "retry_backoff_max" => uni_config.object_store.retry_backoff_max = py_duration(&v)?,
                 _ => unreachable!("nested_config admits only OBJECT_STORE_CONFIG_KEYS"),
+            }
+        }
+    }
+    if let Some(v) = config.get("writer_lease") {
+        for (key, v) in nested_config(py, "writer_lease", v, WRITER_LEASE_CONFIG_KEYS)? {
+            match key.as_str() {
+                "ttl" => uni_config.writer_lease.ttl = py_duration(&v)?,
+                "renew_interval" => uni_config.writer_lease.renew_interval = py_duration(&v)?,
+                "acquire_grace" => uni_config.writer_lease.acquire_grace = py_duration(&v)?,
+                "clock_skew" => uni_config.writer_lease.clock_skew = py_duration(&v)?,
+                _ => unreachable!("nested_config admits only WRITER_LEASE_CONFIG_KEYS"),
             }
         }
     }
@@ -2556,6 +2574,18 @@ pub fn uni_config_to_py(py: Python, config: &uni_common::UniConfig) -> PyResult<
         config.object_store.retry_backoff_max.as_secs_f64(),
     )?;
     dict.set_item("object_store", nested)?;
+    let nested = PyDict::new(py);
+    nested.set_item("ttl", config.writer_lease.ttl.as_secs_f64())?;
+    nested.set_item(
+        "renew_interval",
+        config.writer_lease.renew_interval.as_secs_f64(),
+    )?;
+    nested.set_item(
+        "acquire_grace",
+        config.writer_lease.acquire_grace.as_secs_f64(),
+    )?;
+    nested.set_item("clock_skew", config.writer_lease.clock_skew.as_secs_f64())?;
+    dict.set_item("writer_lease", nested)?;
     let nested = PyDict::new(py);
     nested.set_item("max_retries", config.index_rebuild.max_retries)?;
     nested.set_item(

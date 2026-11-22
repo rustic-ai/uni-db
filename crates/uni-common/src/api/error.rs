@@ -54,6 +54,17 @@ pub enum UniError {
     #[error("Operation '{operation}' not supported on read-only database")]
     ReadOnly { operation: String },
 
+    /// Another handle holds the store open for writing.
+    #[error(
+        "The store at {store} is open for writing elsewhere ({holder}). Close that handle, open \
+         this one read-only, or wait for its lease to expire."
+    )]
+    StoreLocked { store: String, holder: String },
+
+    /// This handle may no longer write: its lease was lost or it was closed.
+    #[error("This handle can no longer write to the store: {reason}")]
+    WriterFenced { reason: String },
+
     /// Label not found in schema
     #[error("Label '{label}' not found in schema")]
     LabelNotFound { label: String },

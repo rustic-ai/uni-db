@@ -1441,6 +1441,17 @@ impl Schema {
     }
 }
 
+/// What a catalog save expects to replace.
+#[derive(Debug, Clone)]
+enum StoredCatalog {
+    /// Not known: overwrite.
+    Unknown,
+    /// There was none: create only.
+    Absent,
+    /// Replace only this version.
+    Version(object_store::UpdateVersion),
+}
+
 pub struct SchemaManager {
     store: Arc<dyn ObjectStore>,
     path: ObjectStorePath,
@@ -1460,6 +1471,12 @@ pub struct SchemaManager {
     /// The catalog file on the local filesystem, when the store is local;
     /// see [`SchemaManager::set_local_file`].
     local_file: std::sync::OnceLock<std::path::PathBuf>,
+    /// The catalog object as this manager last read or wrote it: saves
+    /// replace only that version (compare-and-swap), so a stale handle cannot
+    /// overwrite another writer's catalog. `None` until known.
+    stored: std::sync::Mutex<StoredCatalog>,
+    /// Whether the handle may still write; consulted by every save.
+    gate: std::sync::RwLock<Option<Arc<dyn crate::core::write_gate::WriteGate>>>,
     /// Orders [`SchemaManager::save`]s: held from reading the catalog to the
     /// end of its write, so writes reach the store in the order their
     /// contents were taken and the last one holds the newest catalog.
@@ -1490,6 +1507,10 @@ impl SchemaManager {
     ) -> Result<Self> {
         match store.get(path).await {
             Ok(result) => {
+                let stored = StoredCatalog::Version(object_store::UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                });
                 let bytes = result.bytes().await?;
                 let content = String::from_utf8(bytes.to_vec())?;
                 let mut schema: Schema = serde_json::from_str(&content)?;
@@ -1531,6 +1552,8 @@ impl SchemaManager {
                     persisted_version: AtomicU32::new(loaded_version),
                     loaded_writer_features,
                     local_file: std::sync::OnceLock::new(),
+                    stored: std::sync::Mutex::new(stored),
+                    gate: std::sync::RwLock::new(None),
                     save_order: tokio::sync::Mutex::new(()),
                 })
             }
@@ -1543,6 +1566,8 @@ impl SchemaManager {
                 persisted_version: AtomicU32::new(0),
                 loaded_writer_features: current_writer_features(),
                 local_file: std::sync::OnceLock::new(),
+                stored: std::sync::Mutex::new(StoredCatalog::Absent),
+                gate: std::sync::RwLock::new(None),
                 save_order: tokio::sync::Mutex::new(()),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
@@ -1563,7 +1588,22 @@ impl SchemaManager {
     /// # Errors
     /// Propagates the object-store write failure, a serialization failure, or
     /// a poisoned schema lock.
+    /// Gates every save on `gate`: once it refuses, the catalog is not
+    /// written, and a lost compare-and-swap trips it.
+    pub fn set_write_gate(&self, gate: Arc<dyn crate::core::write_gate::WriteGate>) {
+        if let Ok(mut held) = self.gate.write() {
+            *held = Some(gate);
+        }
+    }
+
+    fn write_gate(&self) -> Option<Arc<dyn crate::core::write_gate::WriteGate>> {
+        self.gate.read().ok().and_then(|g| g.clone())
+    }
+
     pub async fn save(&self) -> Result<()> {
+        if let Some(gate) = self.write_gate() {
+            gate.check()?;
+        }
         let _ordered = self.save_order.lock().await;
         let (content, version) = {
             let schema_guard = acquire_read(&self.schema, "schema")?;
@@ -1575,10 +1615,73 @@ impl SchemaManager {
         // Test-only seam (no-op without `fail/failpoints`): a save holding a
         // serialized catalog that has not reached the store yet.
         fail::fail_point!("schema::save::before-put");
-        self.store
-            .put(&self.path, content.into())
+        let expected = self
+            .stored
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schema catalog state poisoned"))?
+            .clone();
+        let mode = match &expected {
+            StoredCatalog::Unknown => object_store::PutMode::Overwrite,
+            StoredCatalog::Absent => object_store::PutMode::Create,
+            StoredCatalog::Version(v) => object_store::PutMode::Update(v.clone()),
+        };
+        let written_bytes = content.clone().into_bytes();
+        let bytes = object_store::PutPayload::from(content);
+        let written = match self
+            .store
+            .put_opts(&self.path, bytes.clone(), mode.into())
             .await
-            .map_err(anyhow::Error::from)?;
+        {
+            Ok(result) => StoredCatalog::Version(object_store::UpdateVersion {
+                e_tag: result.e_tag,
+                version: result.version,
+            }),
+            // A local filesystem cannot swap; its OS lock keeps a second
+            // writer out instead.
+            Err(object_store::Error::NotImplemented { .. })
+            | Err(object_store::Error::NotSupported { .. }) => {
+                self.store
+                    .put(&self.path, bytes)
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                StoredCatalog::Unknown
+            }
+            Err(object_store::Error::Precondition { .. })
+            | Err(object_store::Error::AlreadyExists { .. }) => {
+                // Our own earlier attempt may have landed with its response lost.
+                let adopted = match self.store.get(&self.path).await {
+                    Ok(current) => {
+                        let version = object_store::UpdateVersion {
+                            e_tag: current.meta.e_tag.clone(),
+                            version: current.meta.version.clone(),
+                        };
+                        match current.bytes().await {
+                            Ok(held) if held.as_ref() == written_bytes.as_slice() => Some(version),
+                            _ => None,
+                        }
+                    }
+                    Err(_) => None,
+                };
+                match adopted {
+                    Some(version) => StoredCatalog::Version(version),
+                    None => {
+                        let reason = format!(
+                            "{} was changed by another writer since this handle read it",
+                            self.path
+                        );
+                        if let Some(gate) = self.write_gate() {
+                            gate.trip(reason.clone());
+                        }
+                        anyhow::bail!("{reason}; this handle's schema change was not saved")
+                    }
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+        *self
+            .stored
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schema catalog state poisoned"))? = written;
         // Recorded only after the PUT succeeds, and it is the version that was
         // actually serialized rather than the live one, so a concurrent bump
         // between the two leaves the manager dirty instead of falsely clean.
@@ -1769,6 +1872,8 @@ impl SchemaManager {
             loaded_writer_features: self.loaded_writer_features.clone(),
             // Never saved, so never synced.
             local_file: std::sync::OnceLock::new(),
+            stored: std::sync::Mutex::new(StoredCatalog::Unknown),
+            gate: std::sync::RwLock::new(None),
             save_order: tokio::sync::Mutex::new(()),
         })
     }
@@ -2751,6 +2856,58 @@ fn validate_reserved_property_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::value::{TemporalValue, Value};
+
+    /// A catalog another writer changed since this manager read it is not
+    /// overwritten: on a store with conditional writes the save fails.
+    #[tokio::test]
+    async fn a_save_does_not_overwrite_a_catalog_changed_by_another_writer() {
+        use object_store::ObjectStoreExt;
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let path = ObjectStorePath::from("catalog/schema.json");
+        let a = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        a.add_label("A").unwrap();
+        a.save().await.unwrap();
+        let b = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        b.add_label("B").unwrap();
+        b.save().await.unwrap();
+        // `a` still holds the catalog as it last wrote it.
+        a.add_label("A2").unwrap();
+        let err = a
+            .save()
+            .await
+            .expect_err("a stale save overwrote the catalog");
+        assert!(format!("{err:#}").contains("another writer"), "{err:#}");
+        let on_disk = store.get(&path).await.unwrap().bytes().await.unwrap();
+        let text = String::from_utf8(on_disk.to_vec()).unwrap();
+        assert!(text.contains("\"B\"") && !text.contains("A2"), "{text}");
+        // Successive saves by one manager keep working.
+        b.add_label("B2").unwrap();
+        b.save().await.unwrap();
+    }
+
+    /// Two managers that both found no catalog cannot both create it.
+    #[tokio::test]
+    async fn only_one_of_two_fresh_managers_creates_the_catalog() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let path = ObjectStorePath::from("catalog/schema.json");
+        let a = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        let b = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        a.add_label("A").unwrap();
+        a.save().await.unwrap();
+        b.add_label("B").unwrap();
+        assert!(
+            b.save().await.is_err(),
+            "the second creator overwrote the first"
+        );
+    }
 
     /// A declaration types a property only on the labels in scope. `F` and
     /// `G` declare `v` as `Float64`, `H` as `Int64`; `S` declares nothing.

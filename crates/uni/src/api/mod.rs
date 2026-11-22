@@ -72,6 +72,7 @@ pub mod sync;
 pub mod template;
 pub mod transaction;
 pub(crate) mod wal_recovery;
+pub(crate) mod writer_lock;
 /// Trigger dispatch engine — moved to `uni-plugin-host`; re-exported to keep
 /// the `uni_db::api::triggers::*` path stable.
 pub mod triggers {
@@ -194,6 +195,10 @@ pub struct UniInner {
     pub(crate) cdc_runtime: Option<Arc<crate::cdc_runtime::CdcRuntime>>,
     /// Write lease configuration for multi-agent access.
     pub(crate) write_lease: Option<multi_agent::WriteLease>,
+    /// The writable handle's hold on its store (lock, lease or custom
+    /// provider). `None` for read-only handles, derived views and
+    /// `WriteLease::Unenforced`.
+    pub(crate) writer_hold: Option<Arc<writer_lock::WriterHold>>,
     /// Host plugin trust policy — signature enforcement + trust root.
     /// Consulted at every plugin-load site. Default: Disabled + empty root
     /// (accept everything, as before).
@@ -602,6 +607,7 @@ impl UniInner {
             // No CDC runtime reads a derived inner's `commit_tx`.
             cdc_runtime: None,
             write_lease: None,
+            writer_hold: None,
             plugin_trust: self.plugin_trust.clone(),
             active_session_count: AtomicUsize::new(0),
             total_queries: AtomicU64::new(0),
@@ -1317,7 +1323,10 @@ impl Uni {
                 .flush_to_l1(None)
                 .await
                 .map(|_| ())
-                .map_err(UniError::Internal)
+                .map_err(|e| match e.downcast::<UniError>() {
+                    Ok(typed) => typed,
+                    Err(other) => UniError::Internal(other),
+                })
         } else {
             Err(UniError::ReadOnly {
                 operation: "flush".to_string(),
@@ -1341,7 +1350,7 @@ impl Uni {
             writer
                 .create_snapshot(Some(name.to_string()))
                 .await
-                .map_err(UniError::Internal)?
+                .map_err(typed_or_internal)?
         } else {
             return Err(UniError::ReadOnly {
                 operation: "create_snapshot".to_string(),
@@ -1353,7 +1362,7 @@ impl Uni {
             .snapshot_manager()
             .save_named_snapshot(name, &snapshot_id)
             .await
-            .map_err(UniError::Internal)?;
+            .map_err(typed_or_internal)?;
 
         Ok(snapshot_id)
     }
@@ -1525,6 +1534,11 @@ impl Uni {
             .await
             .map_err(UniError::Internal)?;
 
+        // Every task has stopped: give the store up for the next writer.
+        if let Some(hold) = &self.inner.writer_hold {
+            hold.release().await;
+        }
+
         self.reap_scratch_dir();
         Ok(())
     }
@@ -1679,7 +1693,23 @@ impl Drop for Uni {
                  `Uni::shutdown` to wait for them"
             );
         }
+        // Give the store up for the next writer. Sessions still holding this
+        // handle's data can read, but no longer write. The WAL is sealed
+        // first: after the release another writer may own it.
+        if let Some(hold) = &self.inner.writer_hold {
+            self.inner.seal_wal_on_drop();
+            hold.release_blocking();
+        }
         tracing::debug!("Uni dropped, background tasks signalled");
+    }
+}
+
+/// A storage error as its typed `UniError` when it carries one (a fenced
+/// writer, a conflict), `Internal` otherwise.
+fn typed_or_internal(e: anyhow::Error) -> UniError {
+    match e.downcast::<UniError>() {
+        Ok(typed) => typed,
+        Err(other) => UniError::Internal(other),
     }
 }
 
@@ -1820,6 +1850,11 @@ impl Drop for UniInner {
     /// a `Session` still holds a reference to the data underneath it.
     fn drop(&mut self) {
         self.seal_wal_on_drop();
+        // Fallback: a handle torn down without `Drop for Uni` (released
+        // there and in `shutdown` already; release is idempotent).
+        if let Some(hold) = &self.writer_hold {
+            hold.release_blocking();
+        }
         // Stop the tasks this view started; nothing can reach them any more. A
         // fork's last session going away is the common case. Tasks of views
         // derived from this one (a nested fork) are left alone, and the tasks
@@ -1996,17 +2031,9 @@ impl UniBuilder {
 
     /// Set the write lease strategy for multi-agent access.
     ///
-    /// Recorded only: no lease is acquired or enforced yet (see
-    /// [`multi_agent::WriteLease`]), so a non-`Local` strategy logs a warning.
-    /// Open at most one writable handle per store.
+    /// The default, [`WriteLease::Local`](multi_agent::WriteLease::Local),
+    /// is the built-in lock or lease; see [`multi_agent::WriteLease`].
     pub fn write_lease(mut self, lease: multi_agent::WriteLease) -> Self {
-        if !matches!(lease, multi_agent::WriteLease::Local) {
-            tracing::warn!(
-                lease = ?lease,
-                "Write leases are not enforced yet: this strategy is recorded but no lease \
-                 is acquired. Open at most one writable handle per store."
-            );
-        }
         self.write_lease = Some(lease);
         self
     }
@@ -2031,7 +2058,26 @@ impl UniBuilder {
     }
 
     /// Open the database (async).
-    pub async fn build(mut self) -> Result<Uni> {
+    pub async fn build(self) -> Result<Uni> {
+        let mut taken = None;
+        let result = self.build_holding(&mut taken).await;
+        // A failed open gives the store back before it returns, so the
+        // caller can retry at once. Awaited here rather than left to the
+        // hold's drop, which on a `current_thread` runtime cannot finish the
+        // release until the caller's runtime runs again.
+        if result.is_err()
+            && let Some(hold) = taken
+        {
+            hold.release().await;
+        }
+        result
+    }
+
+    /// [`build`](Self::build), reporting the store hold it takes in `taken`.
+    async fn build_holding(
+        mut self,
+        taken: &mut Option<Arc<writer_lock::WriterHold>>,
+    ) -> Result<Uni> {
         self.config.warn_deprecated_options();
         let uri = self.uri.clone();
         // Share one guard between `UniInner` and every background task that can
@@ -2109,20 +2155,13 @@ impl UniBuilder {
         }
 
         // Decide the layout before anything writes.
-        let layout = match location.probe_layout().await.map_err(UniError::Internal)? {
-            uni_store::location::LayoutProbe::Recorded(layout) => layout,
-            uni_store::location::LayoutProbe::Inferred(layout) => {
-                if !self.read_only {
-                    location
-                        .write_layout_marker(layout)
-                        .await
-                        .map_err(UniError::Internal)?;
-                }
-                layout
-            }
-            uni_store::location::LayoutProbe::LegacyPrefixed { root_files } => {
-                return Err(UniError::Internal(anyhow::anyhow!(
-                    "The store at {root} looks like one written by uni-db 5.3.0 or older, \
+        let (layout, record_layout) =
+            match location.probe_layout().await.map_err(UniError::Internal)? {
+                uni_store::location::LayoutProbe::Recorded(layout) => (layout, false),
+                uni_store::location::LayoutProbe::Inferred(layout) => (layout, !self.read_only),
+                uni_store::location::LayoutProbe::LegacyPrefixed { root_files } => {
+                    return Err(UniError::Internal(anyhow::anyhow!(
+                        "The store at {root} looks like one written by uni-db 5.3.0 or older, \
                      which kept a prefixed store's metadata at the bucket root: its tables \
                      are under the prefix, but its catalog is not, and the bucket root holds \
                      {files}. Several prefixes may share those files, so they are not \
@@ -2130,11 +2169,41 @@ impl UniBuilder {
                      catalog/ (and, for a remote-only store, wal/ and id_allocator.json) \
                      under the prefix, then open it again. See the storage documentation \
                      on stores written before 5.4.",
-                    root = location.root_uri(),
-                    files = root_files.join(", "),
-                )));
-            }
+                        root = location.root_uri(),
+                        files = root_files.join(", "),
+                    )));
+                }
+            };
+
+        // One writer per store: take the lock (local) or lease (object store)
+        // before the first write. Read-only handles take neither.
+        let fence = uni_store::lease::WriteFence::new();
+        let mut write_lease = self.write_lease.take();
+        let writer_hold = if self.read_only {
+            None
+        } else {
+            let lease_cfg = &self.config.writer_lease;
+            writer_lock::acquire(
+                &mut write_lease,
+                &location,
+                is_hybrid.then(|| Path::new(&uri)),
+                uni_store::lease::LeaseSettings {
+                    ttl: lease_cfg.ttl,
+                    renew_interval: lease_cfg.renew_interval,
+                    acquire_grace: lease_cfg.acquire_grace,
+                    clock_skew: lease_cfg.clock_skew,
+                },
+                &fence,
+            )
+            .await?
         };
+        taken.clone_from(&writer_hold);
+        if record_layout {
+            location
+                .write_layout_marker(layout)
+                .await
+                .map_err(UniError::Internal)?;
+        }
 
         let data_store = location.meta_store();
         // The store the WAL and ID allocator use, when it is not `data_store`.
@@ -2207,6 +2276,17 @@ impl UniBuilder {
         if !is_hybrid && let Some(root) = location.fs_root() {
             schema_manager.set_local_file(root.join(schema_obj_path.as_ref()));
         }
+        // The primary catalog (schema, Locy rules) is written only by a
+        // handle that holds the store: a read-only handle's gate is closed
+        // from the start, a writer's closes with its fence.
+        let catalog_gate = if self.read_only {
+            let closed = uni_store::lease::WriteFence::new();
+            closed.trip("the handle is read-only");
+            closed
+        } else {
+            Arc::clone(&fence)
+        };
+        schema_manager.set_write_gate(Arc::clone(&catalog_gate) as _);
 
         // Hoisted above the persisted-Locy-rule load below, which needs the
         // registry to compile rules against a registry-backed monotonicity
@@ -2248,10 +2328,10 @@ impl UniBuilder {
             self.skip_invalid_locy_rules,
             &plugin_registry,
         )?;
-        let locy_rule_persister = Arc::new(locy_rule_catalog::LocyRulePersister::new(
-            data_store.clone(),
-            locy_rules_obj_path,
-        ));
+        let locy_rule_persister = Arc::new(
+            locy_rule_catalog::LocyRulePersister::new(data_store.clone(), locy_rules_obj_path)
+                .with_fence(Arc::clone(&catalog_gate)),
+        );
 
         // Declarations (and the restore and recovery paths that redo their
         // storage half on open) judge the values a property already holds by
@@ -2260,17 +2340,19 @@ impl UniBuilder {
 
         // Tables, indexes and snapshot manifests, under the location's table
         // root, with both object-store clients configured from one map.
-        let mut storage = StorageManager::new_with_location(
+        let mut storage = StorageManager::new_with_location_opts(
             &location,
             layout,
             schema_manager.clone(),
             self.config.clone(),
+            self.read_only,
         )
         .await
         .map_err(UniError::Internal)?;
         if let Some(local) = &local_store_opt {
             storage.set_local_store(Arc::clone(local));
         }
+        storage.set_write_fence(Arc::clone(&fence));
 
         // Stamp the registry onto the owned StorageManager (before it is
         // shared) so compaction and L0 flush route custom CRDT merges through
@@ -2301,10 +2383,17 @@ impl UniBuilder {
         let shutdown_handle = Arc::new(ShutdownHandle::new(Duration::from_secs(30)));
 
         // Start background compaction with shutdown signal
-        let compaction_handle = storage
-            .clone()
-            .start_background_compaction(shutdown_handle.subscribe());
-        track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), compaction_handle);
+        // Compaction rewrites tables: the writer's job, never a reader's.
+        if !self.read_only {
+            let compaction_handle = storage
+                .clone()
+                .start_background_compaction(shutdown_handle.subscribe());
+            track_task_with_scratch_claim(
+                &shutdown_handle,
+                scratch_dir.as_ref(),
+                compaction_handle,
+            );
+        }
 
         // Initialize property manager
         let prop_cache_capacity = self.config.cache_size / 1024;
@@ -2331,15 +2420,23 @@ impl UniBuilder {
         // so it must run first). A no-op when no marker is present (H9). The
         // loads it completes whose events were not delivered are delivered
         // once the database's event machinery exists, below.
-        let recovered_loads = uni_bulk::recover_interrupted_bulk_load(&storage)
-            .await
-            .map_err(UniError::Internal)?;
+        // Recovery writes, so it is the writer's; a reader sees the store as
+        // the crash left it until a writer opens.
+        let recovered_loads = if self.read_only {
+            Vec::new()
+        } else {
+            uni_bulk::recover_interrupted_bulk_load(&storage)
+                .await
+                .map_err(UniError::Internal)?
+        };
         // A snapshot restore cut short rewinds the rest of the store and
         // publishes its manifest, so it too runs before the latest snapshot is
         // read.
-        uni_store::snapshot::restore::recover_interrupted_restore(&storage)
-            .await
-            .map_err(UniError::Internal)?;
+        if !self.read_only {
+            uni_store::snapshot::restore::recover_interrupted_restore(&storage)
+                .await
+                .map_err(UniError::Internal)?;
+        }
 
         // Determine start version and WAL high water mark from latest snapshot.
         // Detects and recovers from a lost manifest pointer.
@@ -2501,7 +2598,10 @@ impl UniBuilder {
                     floor: id_floor,
                     // Only a local directory has no other writer that a lost
                     // update could race.
-                    allow_unconditional: wal_fs_root.is_some(),
+                    // `Unenforced` is one writer by convention, on a store
+                    // that may have no conditional writes at all.
+                    allow_unconditional: wal_fs_root.is_some()
+                        || matches!(write_lease, Some(multi_agent::WriteLease::Unenforced)),
                 },
             )
             .await
@@ -2847,6 +2947,7 @@ impl UniBuilder {
                     other => UniError::Internal(anyhow::anyhow!(other.to_string())),
                 })?,
         );
+        fork_registry.set_write_fence(Arc::clone(&fence));
         // Phase 4a: apply the configured fork budget cap.
         fork_registry.set_max_forks(self.config.max_forks).await;
         // Let storage-side DDL reach the registry, so declaring a property
@@ -2859,17 +2960,21 @@ impl UniBuilder {
         // by a create that crashed before recording them in the registry.
         let recovery_candidates =
             crate::api::fork::fork_candidate_dataset_names(&schema_manager.schema());
-        let recovered = uni_store::fork::recovery::recover_forks(
-            &fork_registry,
-            &recovery_store,
-            &recovery_candidates,
-            recovery_branching.as_deref(),
-        )
-        .await
-        .map_err(|e| match e {
-            UniError::Internal(inner) => UniError::Internal(inner),
-            other => UniError::Internal(anyhow::anyhow!(other.to_string())),
-        })?;
+        let recovered = if self.read_only {
+            0
+        } else {
+            uni_store::fork::recovery::recover_forks(
+                &fork_registry,
+                &recovery_store,
+                &recovery_candidates,
+                recovery_branching.as_deref(),
+            )
+            .await
+            .map_err(|e| match e {
+                UniError::Internal(inner) => UniError::Internal(inner),
+                other => UniError::Internal(anyhow::anyhow!(other.to_string())),
+            })?
+        };
         if recovered > 0 {
             tracing::info!(reconciled = recovered, "fork registry recovery completed");
         }
@@ -2877,12 +2982,12 @@ impl UniBuilder {
         // Phase 4a: capture sweeper config + a shutdown subscription
         // before the config is consumed into UniInner.
         let sweeper_interval = self.config.fork_sweeper_interval;
-        let sweeper_disabled = self.config.disable_fork_sweeper;
+        let sweeper_disabled = self.config.disable_fork_sweeper || self.read_only;
         let sweeper_shutdown_rx = shutdown_handle.subscribe();
         // Phase 5a-impl Step 7: same for the fork index builder.
         let index_builder_interval = self.config.fork_index_builder_interval;
         let index_builder_threshold = self.config.fork_index_build_threshold;
-        let index_builder_disabled = self.config.disable_fork_index_builder;
+        let index_builder_disabled = self.config.disable_fork_index_builder || self.read_only;
         let index_builder_shutdown_rx = shutdown_handle.subscribe();
 
         // Build the cached DataFusion SessionContext template once with all
@@ -3130,7 +3235,8 @@ impl UniBuilder {
                 start_time: Instant::now(),
                 commit_tx,
                 cdc_runtime: Some(cdc_runtime),
-                write_lease: self.write_lease,
+                write_lease,
+                writer_hold,
                 plugin_trust: self.plugin_trust,
                 active_session_count: AtomicUsize::new(0),
                 total_queries: AtomicU64::new(0),

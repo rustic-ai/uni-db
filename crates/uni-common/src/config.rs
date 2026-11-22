@@ -123,7 +123,36 @@ impl Default for WriteThrottleConfig {
     }
 }
 
+/// Single-writer lease and lock timing.
 #[derive(Clone, Debug)]
+pub struct WriterLeaseConfig {
+    /// How long an object-store writer lease lasts without renewal. A writer
+    /// that crashed blocks new writers for at most this long.
+    pub ttl: Duration,
+    /// How often the holder renews its lease (and heartbeats a custom
+    /// `WriteLeaseProvider`).
+    pub renew_interval: Duration,
+    /// How long a writable open waits for a store held by another handle
+    /// before failing with `StoreLocked`.
+    pub acquire_grace: Duration,
+    /// Allowance for clocks disagreeing between hosts when judging whether a
+    /// lease has expired.
+    pub clock_skew: Duration,
+}
+
+impl Default for WriterLeaseConfig {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(30),
+            renew_interval: Duration::from_secs(10),
+            acquire_grace: Duration::from_secs(5),
+            clock_skew: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Object store resilience configuration.
+#[derive(Debug, Clone)]
 pub struct ObjectStoreConfig {
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
@@ -582,6 +611,9 @@ pub struct UniConfig {
     /// Object store resilience configuration
     pub object_store: ObjectStoreConfig,
 
+    /// Single-writer lease and lock timing.
+    pub writer_lease: WriterLeaseConfig,
+
     /// Background index rebuild configuration
     pub index_rebuild: IndexRebuildConfig,
 
@@ -824,6 +856,7 @@ impl Default for UniConfig {
             lance_metadata_cache_bytes: None,
             lance_index_cache_bytes: None,
             object_store: ObjectStoreConfig::default(),
+            writer_lease: WriterLeaseConfig::default(),
             index_rebuild: IndexRebuildConfig::default(),
             strict_schema: false,
             #[expect(

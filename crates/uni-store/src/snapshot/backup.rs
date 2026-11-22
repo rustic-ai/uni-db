@@ -121,6 +121,8 @@ pub async fn backup_store(storage: &StorageManager, dest: &StoreLocation) -> Res
         let path = meta.location.as_ref();
         if is_fork_object(path)
             || path == "compaction.lock"
+            || path == crate::lease::LOCK_FILE
+            || path == crate::lease::LEASE_PATH
             || path == "catalog/latest"
             || (flat && is_flat_root_metadata(path))
         {

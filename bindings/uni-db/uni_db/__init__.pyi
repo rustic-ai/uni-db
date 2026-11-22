@@ -269,6 +269,17 @@ class UniReadOnlyError(UniError):
 
     ...
 
+class UniStoreLockedError(UniError):
+    """The store is open for writing by another handle."""
+
+    store: str
+    holder: str
+
+class UniWriterFencedError(UniError):
+    """This handle can no longer write: its writer lease was lost or it was closed."""
+
+    reason: str
+
 class UniPermissionDeniedError(UniError):
     """Permission denied."""
 
@@ -1380,7 +1391,8 @@ class CancellationToken:
 class WriteLease:
     """Write lease configuration for multi-agent coordination.
 
-    ``repr()`` is one of ``WriteLease.LOCAL``, ``WriteLease.DYNAMODB(...)`` or
+    ``repr()`` is one of ``WriteLease.LOCAL`` (the default lock or lease),
+    ``WriteLease.UNENFORCED``, ``WriteLease.DYNAMODB(...)`` or
     ``WriteLease.CUSTOM``. ``CUSTOM`` has no constructor and is read-back only:
     it denotes a lease provider configured in Rust, which is a trait object
     Python cannot supply. Passing one back to a builder raises ``ValueError``.
@@ -1388,6 +1400,8 @@ class WriteLease:
 
     @staticmethod
     def LOCAL() -> WriteLease: ...
+    @staticmethod
+    def UNENFORCED() -> WriteLease: ...
     @staticmethod
     def DYNAMODB(table: str) -> WriteLease: ...
 

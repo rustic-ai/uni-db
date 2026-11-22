@@ -450,6 +450,10 @@ impl IndexRebuildManager {
         // commit anything after it. While a restore runs this waits, and the
         // queued tasks run afterwards against the restored store.
         let _permit = self.storage.index_build_permit().await;
+        // A handle that may no longer write builds nothing.
+        if self.storage.write_fence().is_tripped() {
+            return;
+        }
         // Find and claim a pending task
         let task_to_process = {
             let mut tasks = self.tasks.write();

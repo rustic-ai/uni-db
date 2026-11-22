@@ -22,6 +22,7 @@ pub mod core {
     pub mod id;
     pub mod schema;
     pub mod snapshot;
+    pub mod write_gate;
 }
 
 pub mod graph {

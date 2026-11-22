@@ -52,6 +52,7 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 uuid = { workspace = true }
+thiserror = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
 bytes = { workspace = true }

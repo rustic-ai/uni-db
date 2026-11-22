@@ -446,6 +446,9 @@ impl DatabaseBuilder {
                 crate::types::WriteLeaseVariant::Local => {
                     ::uni_db::api::multi_agent::WriteLease::Local
                 }
+                crate::types::WriteLeaseVariant::Unenforced => {
+                    ::uni_db::api::multi_agent::WriteLease::Unenforced
+                }
                 crate::types::WriteLeaseVariant::DynamoDB { table } => {
                     ::uni_db::api::multi_agent::WriteLease::DynamoDB {
                         table: table.clone(),

@@ -2467,6 +2467,11 @@ impl BulkWriter {
     ///
     /// As listed above, and `UniError::BulkLoadBlockedByTrigger`.
     pub async fn commit(mut self) -> Result<BulkStats> {
+        // A handle that lost its writer lease, or was closed, loads nothing.
+        if let Err(e) = self.backend.storage.write_fence().check() {
+            self.discard_after_failed_commit().await;
+            return Err(e);
+        }
         if let Err(e) = self.check_before_triggers_for_load() {
             self.discard_after_failed_commit().await;
             return Err(e);

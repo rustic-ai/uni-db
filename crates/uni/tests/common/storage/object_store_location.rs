@@ -871,6 +871,13 @@ async fn a_backup_to_a_local_directory_opens_as_a_store() -> Result<()> {
         files_under(&dest).iter().all(|f| !f.contains("/tree/")),
         "fork branches were copied"
     );
+    for held in [
+        "writer.lock",
+        "catalog/writer_lease.json",
+        "storage/writer.lock",
+    ] {
+        assert!(!dest.join(held).exists(), "the source's {held} was copied");
+    }
     drop(db);
     assert_backup_opens(dest.to_str().unwrap()).await
 }

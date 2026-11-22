@@ -73,12 +73,14 @@ pub struct SessionCapabilities {
 /// variant without carrying the actual provider trait object.
 #[derive(Debug, Clone)]
 pub enum WriteLeaseSummary {
-    /// Local single-process lock.
+    /// The built-in lock (local store) or lease (object store).
     Local,
     /// DynamoDB-based distributed lease.
     DynamoDB { table: String },
     /// Custom lease provider (opaque).
     Custom,
+    /// No lease: one writer by convention.
+    Unenforced,
 }
 
 /// Internal atomic counters for session-level metrics.
@@ -1406,6 +1408,7 @@ impl Session {
                 table: table.clone(),
             },
             WriteLease::Custom(_) => WriteLeaseSummary::Custom,
+            WriteLease::Unenforced => WriteLeaseSummary::Unenforced,
         });
         SessionCapabilities {
             can_write: self.db.writer.is_some() && !self.is_pinned(),

@@ -2,7 +2,8 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use crate::store_utils::{
-    DEFAULT_TIMEOUT, get_with_timeout, is_not_found, list_with_timeout, put_with_timeout,
+    DEFAULT_TIMEOUT, get_with_timeout, is_not_found, list_with_timeout, put_opts_with_timeout,
+    put_with_timeout,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -78,6 +79,26 @@ pub struct SnapshotManager {
     /// The store's ID allocator, whose reserved ranges every saved manifest
     /// records (`next_vid` / `next_eid`). Set once the allocator exists.
     id_allocator: std::sync::OnceLock<Arc<crate::runtime::id_allocator::IdAllocator>>,
+    /// Checked before every publish; a lost compare-and-swap trips it.
+    fence: parking_lot::RwLock<Option<Arc<crate::lease::WriteFence>>>,
+    /// The `latest` pointer as this manager last read or wrote it, for
+    /// compare-and-swap.
+    latest_version: parking_lot::Mutex<Expected>,
+    /// Serializes this manager's compare-and-swap publishes, so two of its
+    /// own concurrent writes never race each other into a false conflict.
+    publish: tokio::sync::Mutex<()>,
+}
+
+/// What a compare-and-swap write expects to replace.
+#[derive(Debug, Clone, Default)]
+enum Expected {
+    /// Never read: overwrite (a manager that has not loaded the object).
+    #[default]
+    Unknown,
+    /// Read, and absent: create only.
+    Absent,
+    /// Read at this version: replace only that.
+    Version(object_store::UpdateVersion),
 }
 
 impl SnapshotManager {
@@ -87,6 +108,9 @@ impl SnapshotManager {
             store,
             fork_id: None,
             id_allocator: std::sync::OnceLock::new(),
+            fence: parking_lot::RwLock::new(None),
+            latest_version: parking_lot::Mutex::new(Expected::Unknown),
+            publish: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -95,6 +119,80 @@ impl SnapshotManager {
     /// whose allocator file is gone restarts above them. First call wins.
     pub fn set_id_allocator(&self, allocator: Arc<crate::runtime::id_allocator::IdAllocator>) {
         let _ = self.id_allocator.set(allocator);
+    }
+
+    /// The fence every publish checks; a lost compare-and-swap trips it.
+    pub fn set_write_fence(&self, fence: Arc<crate::lease::WriteFence>) {
+        *self.fence.write() = Some(fence);
+    }
+
+    fn check_fence(&self) -> Result<()> {
+        match self.fence.read().as_ref() {
+            Some(fence) => fence.check(),
+            None => Ok(()),
+        }
+    }
+
+    /// Writes `bytes` to `path` only if it still is what `expected` says;
+    /// returns the new version. A store without conditional writes (a local
+    /// filesystem, guarded by its OS lock instead) is written plainly. A lost
+    /// swap trips the fence: another writer is active.
+    async fn put_expecting(
+        &self,
+        path: &ObjectStorePath,
+        bytes: Bytes,
+        expected: Expected,
+    ) -> Result<Expected> {
+        let mode = match &expected {
+            Expected::Unknown => object_store::PutMode::Overwrite,
+            Expected::Absent => object_store::PutMode::Create,
+            Expected::Version(v) => object_store::PutMode::Update(v.clone()),
+        };
+        match put_opts_with_timeout(
+            &self.store,
+            path,
+            bytes.clone(),
+            mode.into(),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(result) => Ok(Expected::Version(object_store::UpdateVersion {
+                e_tag: result.e_tag,
+                version: result.version,
+            })),
+            Err(e) => match e.downcast_ref::<object_store::Error>() {
+                Some(
+                    object_store::Error::NotImplemented { .. }
+                    | object_store::Error::NotSupported { .. },
+                ) => {
+                    put_with_timeout(&self.store, path, bytes, DEFAULT_TIMEOUT).await?;
+                    Ok(Expected::Unknown)
+                }
+                Some(
+                    object_store::Error::Precondition { .. }
+                    | object_store::Error::AlreadyExists { .. },
+                ) => {
+                    // This handle's own earlier attempt may have landed with its
+                    // response lost (a retried request then sees itself).
+                    if let Ok(current) = self.store.get(path).await {
+                        let version = object_store::UpdateVersion {
+                            e_tag: current.meta.e_tag.clone(),
+                            version: current.meta.version.clone(),
+                        };
+                        if current.bytes().await.is_ok_and(|held| held == bytes) {
+                            return Ok(Expected::Version(version));
+                        }
+                    }
+                    let reason = format!("{path} was changed by another writer");
+                    if let Some(fence) = self.fence.read().as_ref() {
+                        fence.trip(reason.clone());
+                    }
+                    anyhow::bail!("{reason}; this handle has stopped writing")
+                }
+                _ => Err(e),
+            },
+        }
     }
 
     /// Construct a fork-scoped snapshot manager.
@@ -107,6 +205,9 @@ impl SnapshotManager {
             store,
             fork_id: Some(fork_id),
             id_allocator: std::sync::OnceLock::new(),
+            fence: parking_lot::RwLock::new(None),
+            latest_version: parking_lot::Mutex::new(Expected::Unknown),
+            publish: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -143,6 +244,7 @@ impl SnapshotManager {
 
     #[instrument(skip(self, manifest), fields(snapshot_id = %manifest.snapshot_id, size_bytes), level = "info")]
     pub async fn save_snapshot(&self, manifest: &SnapshotManifest) -> Result<()> {
+        self.check_fence()?;
         let path = self.manifest_path(&manifest.snapshot_id);
         // Every manifest this binary writes records its writer features, also
         // one cloned from a manifest an older binary wrote: an open that finds
@@ -227,6 +329,17 @@ impl SnapshotManager {
         let latest_path = self.latest_ptr_path();
         match get_with_timeout(&self.store, &latest_path, DEFAULT_TIMEOUT).await {
             Ok(result) => {
+                // The first read sets the version this manager swaps from;
+                // later reads must not adopt another writer's pointer.
+                {
+                    let mut held = self.latest_version.lock();
+                    if matches!(*held, Expected::Unknown) {
+                        *held = Expected::Version(object_store::UpdateVersion {
+                            e_tag: result.meta.e_tag.clone(),
+                            version: result.meta.version.clone(),
+                        });
+                    }
+                }
                 let bytes = result.bytes().await.map_err(anyhow::Error::from)?;
                 let snapshot_id = String::from_utf8(bytes.to_vec())?;
                 let snapshot_id = snapshot_id.trim();
@@ -235,21 +348,41 @@ impl SnapshotManager {
                 }
                 Ok(Some(self.load_snapshot(snapshot_id).await?))
             }
-            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) if is_not_found(&e) => {
+                let mut held = self.latest_version.lock();
+                if matches!(*held, Expected::Unknown) {
+                    *held = Expected::Absent;
+                }
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }
 
     #[instrument(skip(self), level = "info")]
     pub async fn set_latest_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        self.check_fence()?;
+        let _publishing = self.publish.lock().await;
         let path = self.latest_ptr_path();
-        put_with_timeout(
-            &self.store,
-            &path,
-            Bytes::from(snapshot_id.to_string()),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        // A manager that never read the pointer learns where it stands first.
+        let expected = {
+            let held = self.latest_version.lock().clone();
+            match held {
+                Expected::Unknown => match self.store.head(&path).await {
+                    Ok(meta) => Expected::Version(object_store::UpdateVersion {
+                        e_tag: meta.e_tag,
+                        version: meta.version,
+                    }),
+                    Err(object_store::Error::NotFound { .. }) => Expected::Absent,
+                    Err(e) => return Err(e.into()),
+                },
+                known => known,
+            }
+        };
+        let written = self
+            .put_expecting(&path, Bytes::from(snapshot_id.to_string()), expected)
+            .await?;
+        *self.latest_version.lock() = written;
         Ok(())
     }
 
@@ -271,18 +404,31 @@ impl SnapshotManager {
         }
     }
 
-    pub async fn save_named_snapshot(&self, name: &str, snapshot_id: &str) -> Result<()> {
-        let mut map = self.load_named_snapshots().await?;
-        map.insert(name.to_string(), snapshot_id.to_string());
+    /// The named-snapshot map and the version it was read at.
+    async fn load_named_snapshots_versioned(&self) -> Result<(HashMap<String, String>, Expected)> {
+        let path = self.named_snapshots_path();
+        match get_with_timeout(&self.store, &path, DEFAULT_TIMEOUT).await {
+            Ok(result) => {
+                let version = Expected::Version(object_store::UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                });
+                let bytes = result.bytes().await?;
+                Ok((serde_json::from_slice(&bytes)?, version))
+            }
+            Err(e) if is_not_found(&e) => Ok((HashMap::new(), Expected::Absent)),
+            Err(e) => Err(e),
+        }
+    }
 
+    pub async fn save_named_snapshot(&self, name: &str, snapshot_id: &str) -> Result<()> {
+        self.check_fence()?;
+        let _publishing = self.publish.lock().await;
+        let (mut map, expected) = self.load_named_snapshots_versioned().await?;
+        map.insert(name.to_string(), snapshot_id.to_string());
         let json = serde_json::to_string_pretty(&map)?;
-        put_with_timeout(
-            &self.store,
-            &self.named_snapshots_path(),
-            Bytes::from(json),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        self.put_expecting(&self.named_snapshots_path(), Bytes::from(json), expected)
+            .await?;
         Ok(())
     }
 
@@ -425,20 +571,17 @@ impl SnapshotManager {
     ///
     /// When the names cannot be read or written back.
     pub async fn remove_snapshot_names(&self, snapshot_id: &str) -> Result<bool> {
-        let mut map = self.load_named_snapshots().await?;
+        self.check_fence()?;
+        let _publishing = self.publish.lock().await;
+        let (mut map, expected) = self.load_named_snapshots_versioned().await?;
         let before = map.len();
         map.retain(|_, id| id != snapshot_id);
         if map.len() == before {
             return Ok(false);
         }
         let json = serde_json::to_string_pretty(&map)?;
-        put_with_timeout(
-            &self.store,
-            &self.named_snapshots_path(),
-            Bytes::from(json),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        self.put_expecting(&self.named_snapshots_path(), Bytes::from(json), expected)
+            .await?;
         Ok(true)
     }
 
@@ -587,6 +730,77 @@ pub fn fsync_catalog_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `latest` pointer is compare-and-swapped: a manager whose view of it
+    /// is stale cannot move it, and its fence trips.
+    #[tokio::test]
+    async fn a_stale_latest_pointer_is_not_overwritten() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let a = SnapshotManager::new(store.clone());
+        let fence = crate::lease::WriteFence::new();
+        a.set_write_fence(Arc::clone(&fence));
+        a.set_latest_snapshot("s1").await.unwrap();
+        // Another writer moves it.
+        let b = SnapshotManager::new(store.clone());
+        assert!(b.load_latest_snapshot().await.is_err()); // s1 has no manifest
+        b.set_latest_snapshot("s2").await.unwrap();
+        let err = a
+            .set_latest_snapshot("s3")
+            .await
+            .expect_err("a stale writer moved latest");
+        assert!(format!("{err:#}").contains("another writer"), "{err:#}");
+        assert!(fence.is_tripped());
+        let held = store
+            .get(&ObjectStorePath::from("catalog/latest"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&held[..], b"s2");
+        // A fenced manager refuses to publish at all.
+        assert!(a.set_latest_snapshot("s4").await.is_err());
+    }
+
+    /// Concurrent publishes through one manager are this handle's own writes,
+    /// not another writer's: none of them trips the fence.
+    #[tokio::test]
+    async fn concurrent_publishes_by_one_manager_do_not_fence_it() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let m = Arc::new(SnapshotManager::new(store.clone()));
+        let fence = crate::lease::WriteFence::new();
+        m.set_write_fence(Arc::clone(&fence));
+        assert!(m.load_latest_snapshot().await.unwrap().is_none());
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let m = Arc::clone(&m);
+                tokio::spawn(async move {
+                    m.set_latest_snapshot(&format!("s{i}")).await?;
+                    m.save_named_snapshot(&format!("n{i}"), &format!("s{i}"))
+                        .await
+                })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        assert!(!fence.is_tripped(), "{:?}", fence.reason_if_tripped());
+        assert_eq!(m.load_named_snapshots().await.unwrap().len(), 8);
+    }
+
+    /// The pointer a manager read at open is the one it swaps from.
+    #[tokio::test]
+    async fn a_manager_moves_the_pointer_it_read() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let first = SnapshotManager::new(store.clone());
+        let manifest = SnapshotManifest::new("s1".into(), 1);
+        first.save_snapshot(&manifest).await.unwrap();
+        first.set_latest_snapshot("s1").await.unwrap();
+        let reopened = SnapshotManager::new(store.clone());
+        assert!(reopened.load_latest_snapshot().await.unwrap().is_some());
+        reopened.set_latest_snapshot("s2").await.unwrap();
+        reopened.set_latest_snapshot("s3").await.unwrap();
+    }
 
     /// Remote/object stores have no local root — the barrier is a no-op and
     /// must never error (durability is the backend's responsibility there).
