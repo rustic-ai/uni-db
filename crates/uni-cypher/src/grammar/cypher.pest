@@ -928,7 +928,7 @@ show_config = { SHOW ~ CONFIG }
 show_statistics = { SHOW ~ STATISTICS }
 vacuum_command = { VACUUM }
 checkpoint_command = { CHECKPOINT }
-backup_command = { BACKUP ~ TO ~ string }
+backup_command = { BACKUP ~ TO ~ string ~ (WITH ~ map_literal)? }
 
 copy_to = { COPY ~ identifier_or_keyword ~ TO ~ string ~ (WITH ~ map_literal)? }
 copy_from = { COPY ~ identifier_or_keyword ~ FROM ~ string ~ (WITH ~ map_literal)? }

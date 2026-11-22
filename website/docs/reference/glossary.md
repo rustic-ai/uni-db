@@ -307,7 +307,7 @@ A 64-bit identifier for vertices. Encoded as `label_id (16 bits) | local_offset 
 A durability mechanism that logs mutations before applying them. Enables recovery after crashes.
 
 ### WriteLease
-A coordination mechanism for multi-agent database access. Ensures only one writer can commit at a time in distributed or multi-process deployments. Variants include `Local` (in-process mutex), `DynamoDB` (distributed lock via AWS DynamoDB), and `Custom` (user-provided implementation).
+How a store keeps to one writable handle at a time. `Local` (the default) holds a local store with an OS lock and an object store with a renewed lease object, `catalog/writer_lease.json`. `Custom` calls a user-provided `WriteLeaseProvider`. `Unenforced` takes nothing (one writer by convention). `DynamoDB` is not implemented and fails the open. A second writable open fails with `StoreLocked`; a handle that loses its lease fails writes with `WriterFenced`.
 
 ### UniId
 A content-addressed identifier using SHA3-256 hash (32 bytes). Used for provenance tracking and distributed synchronization with CRDT systems. See [Identity Model](../concepts/identity.md).

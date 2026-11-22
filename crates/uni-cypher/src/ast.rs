@@ -51,7 +51,12 @@ pub enum SchemaCommand {
     ShowStatistics,
     Vacuum,
     Checkpoint,
-    Backup { path: String },
+    /// `BACKUP TO 'url' [WITH {option: value, ...}]`: the options are
+    /// object-store options for the destination, over those it inherits.
+    Backup {
+        path: String,
+        options: HashMap<String, Value>,
+    },
     CopyTo(CopyToCommand),
     CopyFrom(CopyFromCommand),
 }

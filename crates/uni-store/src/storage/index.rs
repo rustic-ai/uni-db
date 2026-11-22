@@ -240,7 +240,7 @@ impl UidIndex {
             }
         };
 
-        let ticket = self.cut.begin();
+        let ticket = self.cut.begin()?;
         match ds
             .create_index(
                 &["_uid_hex"],
@@ -254,6 +254,8 @@ impl UidIndex {
             Ok(_) => {
                 crate::storage::index_datasets::finish_commit(ticket, None, ds.version().version)?
             }
+            // The ticket drops, marking the dataset uncertain: the commit may
+            // have landed with its acknowledgement lost.
             Err(e) => crate::storage::record_default_index_failure(&self.uri, "_uid_hex", &e),
         }
 

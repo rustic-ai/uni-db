@@ -69,6 +69,11 @@ DEDICATED_LANES: list[tuple[str, str, str]] = [
         "binary_id(uni-db::integration)",
     ),
     (
+        ".github/workflows/nightly.yml",  # cloud (MinIO, Azurite, fake-gcs-server)
+        "test(/^emulator_smoke::/)",
+        "binary_id(uni-db::integration)",
+    ),
+    (
         ".github/workflows/pr.yml",  # failpoint crash suite, --run-ignored all
         "test(/resilience|recovery|durability|crash_harness/)",
         "package(uni-db) | package(uni-store)",

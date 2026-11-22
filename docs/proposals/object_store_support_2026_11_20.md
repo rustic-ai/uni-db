@@ -14,6 +14,12 @@
 
 ## Implementation status (Phase A)
 
+Deviations from §5 not shipped, recorded here:
+- **Typed config not reshaped.** The §5.3 reshape of `CloudStorageConfig` (`options`, the GCS and Azure `endpoint`/`use_emulator`/identity fields, `virtual_hosted_style: Option<bool>`, `#[non_exhaustive]`) did not ship; GCS and Azure emulator and identity settings go through `storage_options`. §6's "struct literals break" therefore does not apply.
+- **No `--hybrid-remote`.** The CLI flag (§5.2) did not ship.
+- **Session token kept.** An `AWS_SESSION_TOKEN` in the environment is kept beside explicit keys, as Lance keeps it (documented in storage-cloud.md), rather than dropped as amendment 2 proposed.
+- **No emulator CI lanes at first.** MinIO, Azurite and fake-gcs-server lanes (goal 6) were added only in the review fixes of 2026-11-22.
+
 Phase A shipped with one change from §5, made at review: **one layout for every store kind**. Plain paths, `file://` and object stores all use today's local layout under the store root `R` (`R/catalog`, `R/wal`, `R/id_allocator.json`, `R/storage/…`). §5.4's flat remote layout is kept only for stores written before 5.4 (`catalog/layout.json` = `flat`). Lance writes full table URIs into fork `BasePath`s, so existing tables are never moved. Stores written by ≤ 5.3.0 under a prefix are refused with an actionable error. Automatic adoption (§5.5) was not shipped: the case was already corrupt-prone, and a manual copy is documented in `website/docs/features/storage-cloud.md`.
 
 Where it lives:
@@ -31,7 +37,7 @@ Finished after the first commit:
 
 - Storage options registered for Lance's by-URI opens live only as long as the database that registered them.
 - A remote store's resilience layer keeps its timeouts and circuit breaker but no longer retries on top of the client, which retries with the same settings.
-- Unlocked compaction on an object store logs a warning, once per store.
+- Unlocked compaction on an object store logged a warning, once per store; Phase B removed it, since the writer lease now admits one compacting handle.
 - BACKUP is rebuilt on `StoreLocation` (most of Phase E). Before, a backup to an object store copied no tables yet reported success, and a local backup could not be opened. That was reproduced on LocalStack.
 - AWS named profiles are supported for uni's client.
 - When `id_allocator.json` is missing and a manifest exists, the ID floor is the higher of the manifest's marks and a scan of the tables. A manifest published by bulk-load recovery carries the marks from before the load (reproduced with a failpoint).
@@ -52,23 +58,43 @@ Finished after the first commit:
 - CLI `--path` takes a URI string.
 - `cloud_storage` (or Python `cloud_config`) on a plain local path now fails the open. Python used to ignore `cloud_config` outside hybrid mode.
 - Python `hybrid(local_path, …)` raises when `local_path` is not the opened path.
-- `az://account/container` is deprecated.
+- `az://account/container` is no longer read: the host is always the container (it was ambiguous for a container named like its account).
 - `CloudStorageConfig`'s `Debug` output redacts secrets.
 - `uni_db::CloudStorageConfig` is now re-exported.
 - On an object store without conditional writes, ID reservation fails instead of overwriting the counter file.
 - Without an endpoint, a region lookup failure fails the open. It used to fall back silently to `us-east-1`.
 - BACKUP and COPY URLs of the database's own provider inherit its endpoint and credentials.
-- uni's client now reads a named AWS profile (`AWS_PROFILE`), as Lance already did.
 - `BACKUP` writes a standard-layout store that `Uni::open` reads, instead of a flat copy (local) or a copy without tables (object store). It is refused in a fork session, and for a destination holding any of a store. An interrupted copy is refused at open. Forks are not backed up. `file://` destinations are sandbox-checked. The result row adds `objects` and `bytes`.
-- With `AWS_PROFILE` set, uni's client reads that profile. An undefined profile is ignored.
-- A new remote store keeps its tables under `R/storage/`. Bucket-root stores written before 5.4 open as `flat`. Prefixed stores written before 5.4 are refused until their catalog is copied under the prefix.
+- With `AWS_PROFILE` set, uni's client reads that profile, as Lance already did (its `services` section's S3 endpoint ahead of its `endpoint_url`). An undefined profile is ignored.
+- A new remote store keeps its tables under `R/storage/`. Bucket-root stores written before 5.4 open as `flat`. Prefixed stores written before 5.4 are refused until their catalog is copied under the prefix. A store with tables under its root and no catalog anywhere is refused instead of opening empty.
+- New APIs:
+  - builder: `UniBuilder::{cloud_storage, storage_option, storage_options, hybrid, set_aside_stale_wal}`;
+  - config: `UniConfig::read_cut_refresh`;
+  - CLI: `--storage-option k=v`;
+  - Python: `storage_options`, `set_aside_stale_wal`, `WriteLease.UNENFORCED()`, `read_cut_refresh`, and the errors `UniStoreLockedError`, `UniWriterFencedError` and `UniStaleWalError`;
+  - Cypher: `BACKUP TO 'url' WITH {…}` (destination object-store options).
+- New errors: `UniError::StaleWal`. Fork create and drop on a read-only handle now fail with `UniError::ReadOnly`; a read-only handle writes nothing.
+- Reads see the table versions the latest manifest names. Another handle sees a flush or bulk load only once its manifest is published, all at once.
+- A read-only handle picks up new flushes at query start: every query for a local store, once a second by default for an object store.
+- A writable open now rolls back, or empties, table and index-dataset versions no manifest names (a crashed flush's commits, which the WAL replays, or a stale writer's), and logs what it discarded. Indexes over affected labels are rebuilt.
+- A writer that meets a table version it did not write stops with `WriterFenced`.
+- Async flush streams run one at a time, in rotation order; rotation and finalize stay pipelined.
+- Every store now holds `catalog/layout.json`, and `writer.lock` (local stores) or `catalog/writer_lease.json` (object stores). A hybrid store also holds `wal_id.json` and `catalog/wal_claim.json`.
+- The outer resilience layer no longer retries on top of the object-store client. Raw `client_max_retries` / `client_retry_timeout` options now set uni's client too.
+- `UniConfig::writer_lease` requires `renew_interval < ttl`, and for an object store's lease `clock_skew + renew_interval < ttl`.
+- BACKUP holds WAL truncation while it copies, and copies the WAL before the tables. A flush during a backup no longer loses commits from it. A compaction that starts while a backup runs keeps every table version (one already running when the backup starts cleans up as configured).
+- BACKUP to another endpoint than the database's (one given in `WITH`, or one the destination's environment names), for any provider and any endpoint option (S3, STS, Azure, GCS), no longer inherits the database's credentials.
+- A prefix with a literal `%` (or another character a URL path encodes) now names the same object key for uni's client and Lance's. Lance's root URI used to carry the raw character while uni's client encoded it, so a store written under such a prefix by an earlier release may have its tables under a different key than its catalog: move them to the encoded key, or open it with the prefix it was written under.
+- With `AWS_PROFILE` naming a role to assume, the STS call uses the profile's region, else `us-east-1`. An account outside the commercial partition (GovCloud, China) must set the region in the profile or `AWS_REGION`.
+- `az://X/...` where `X` equals the configured storage account logs a warning, since it most likely meant the removed `az://account/container` form.
+- A hybrid directory's WAL is told from a copy by its inode. A file-level copy (rsync, cp) into a subdirectory is refused as another writer's WAL; a block-level copy (a cloned disk), or a copy of a volume's root directory onto another volume, is not detected (the open warns when the directory is a mount root).
 
 **Follow-ups not in Phase A:**
 
 - Phases B–E.
 - Fork allocator bootstrap seeds from the primary's cursor, not its reserved batch end (`fork.rs`, review note).
 - Fork snapshot managers do not stamp ID marks.
-- BACKUP is not snapshot-consistent: it copies the live store. Pinning the copy to the manifest's versions needs Phase D's real `lance_version`s.
+- BACKUP is consistent with the manifest it names: the WAL is held from truncation and copied before the tables, and opening the copy rolls the tables back to that manifest (the read cut, `SnapshotManifest::tables`) and replays the WAL. Commits after the WAL copy are not in it.
 - BACKUP leaves forks out.
 - Fork allocators still allow an unconditional put on remote stores.
 - `CLOUD_STORAGE_OPTIONS` in `lance_directory.rs` is keyed by base URI: while two databases are open at one URI with different credentials, datasets opened by URI use the later one's. Entries now go away when their database closes.
@@ -564,7 +590,7 @@ stale `id_allocator.json`.
 | Remote store under a prefix, written by ≤ 5.3.0 | Fails at open with a clear error until the user opts in (§5.5). This is deliberate: silently adopting shared root metadata could graft another store's schema and snapshots onto this one. |
 | Older binary opening a store written after the change | A bucket-root store opens fine. For a prefixed store, the older binary reads the root as before (and is unsafe as before). Release notes recommend against mixed versions. |
 | `CloudStorageConfig` struct literals | Break (§5.3). Constructors are provided. |
-| Azure `az://account/container` URLs | Accepted for one release with a deprecation `warn!`, rewritten to the object_store form; removed after that. |
+| Azure `az://account/container` URLs | Accepted with a deprecation `warn!` in 5.4; no longer read since the review fixes (the host is always the container). |
 | Environment newly honored by uni's client | Settings that only Lance used to honor now apply to metadata too. Real behavior changes only for setups that were already split-brained. |
 
 ## 7. Alternatives considered
@@ -654,7 +680,7 @@ Tests: `crates/uni/tests/common/storage/hybrid_wal_lineage.rs` (refusal after an
 **Decisions** (user, 2026-11-21): a full read cut; read-only handles refresh on an interval; the index datasets are inside the cut.
 
 **The cut.** `SnapshotManifest.tables` maps every table to the Lance version readers read:
-- keys are the backend table names, plus `indexes/...` paths for the UID, JSON, inverted and sparse index datasets;
+- keys are the backend table names, plus `indexes/...` paths for the UID, inverted, sparse and JSON index datasets (the last has no production writer yet);
 - an empty map is a manifest from an older binary: readers then read every table's newest version, as before;
 - `EntitySnapshot.lance_version` stays 0, because its consumers (`get_edge_version_by_id`) read it as a row ceiling.
 
@@ -698,7 +724,13 @@ What is discarded is a crashed flush's partial commits, which WAL replay rewrite
 - A commit that fails after Lance may have committed (an optimize whose cleanup fails, a late acknowledgement) marks its table uncertain. The next commit adopts the version it reads rather than fence.
 - An open's reconciliation first publishes what its recoveries completed. Without that, a bulk load found already published, but not named by any manifest, would be rolled back.
 
-**Known limit:** two async flush streams (up to `max_pending_flushes`) committing to one table stack. No version holds the earlier flush's rows without the later one's. The earlier manifest names the combined version, so a crash before the later flush finalizes replays its rows a second time, as before Phase D.
+**Review fixes (2026-11-22):**
+- **One stream at a time.** Flush streams run one at a time (`ReadCut::stream_lock`, held only for a stream's table writes), so no flush's commits stack under another's. This replaces the earlier known limit, where two streams committing to one table published part of each other.
+- **Bulk and restore are units.** A bulk publish is a unit named by its manifest: this handle reads it at once, other handles once that manifest is published, and it is kept loose if it is never published, since no WAL holds it. Bulk recovery records the published load's versions. A bulk publish takes no stream lock, so a flush may run while a load publishes. Restore's rewind and flip are a unit.
+- **Units close on drop.** A unit's guard travels with the flush outcome, so a cancelled flush closes it.
+- **Streams read the newest versions.** A flush stream's own reads use `head_backend()`.
+- **Rolled-back indexes are rebuilt.** Indexes over tables that a reconcile rolled back are marked stale and rebuilt.
+- **Every commit checks the fence.** Every Lance commit checks the write fence, and a read-only handle's fence starts tripped.
 
 **Read-only handles** re-read `catalog/latest` at query start, at most once per `UniConfig::read_cut_refresh`, and switch `published` when it names a new manifest. The default (`None`) is every query for a local store, where the check is a file read and the 1 s default reopened issue #168 (a second handle not seeing a writer's flush), and 1 s for an object store.
 
@@ -770,12 +802,9 @@ The repro crate and logs are in the session scratchpad, not the repo.
 
 ## 11. Open questions
 
-1. **Hybrid (Phase C):** keep it with the semantics above, or deprecate it in
-   favor of remote-only with an optional local WAL?
-2. **Fencing:** is the Phase B lease plus CAS on `latest` enough until Phase D,
-   given that a stale writer's Lance appends stay visible?
-3. **Azure URLs:** a one-release deprecation window for
-   `az://account/container`, or a hard break?
+1. ~~**Hybrid (Phase C):** keep it, or deprecate it?~~ Kept, with the semantics in §8c.
+2. ~~**Fencing:** is the lease plus CAS on `latest` enough until Phase D?~~ Phase D (§8d) answered it: a stale writer's table commits are never read, and every table commit checks the fence.
+3. ~~**Azure URLs:** a deprecation window or a hard break?~~ A hard break (review, 2026-11-22): the old form was ambiguous.
 4. **Client unification:** do the object_store 0.14 upgrade and the shared
    Lance client (Alternative 2) right after Phase A, or wait for the next
    Lance bump?

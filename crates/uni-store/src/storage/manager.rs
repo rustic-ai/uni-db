@@ -35,7 +35,7 @@ use object_store::ObjectStore;
 #[cfg(feature = "lance-backend")]
 use object_store::local::LocalFileSystem;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -273,6 +273,21 @@ pub struct StorageManager {
     /// index builds, schema evolution, restore, the writer) reads here, so it
     /// keeps the rows a flush has committed but not yet published.
     head: Arc<dyn StorageBackend>,
+    /// Holds that keep flushes from truncating the WAL (a BACKUP copying it):
+    /// a flush skips the truncation while one is held, and a later flush
+    /// truncates.
+    wal_holds: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Keeps the WAL from being truncated while held; see
+/// [`StorageManager::hold_wal_truncation`].
+#[must_use = "the WAL is truncated again as soon as the hold is dropped"]
+pub struct WalTruncationHold(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for WalTruncationHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// RAII counter increment for `StorageManager.flush_in_progress`.
@@ -283,6 +298,26 @@ pub struct StorageManager {
 /// gate skips while this counter is non-zero, so the counter must
 /// reflect "flush has started, has not completed" — including any
 /// async stream phase running on a spawned task.
+/// The label or edge type whose user indexes live in `name`, a table name
+/// or an index dataset's key: `vertices_{label}`, `deltas_{type}_{dir}`,
+/// `adjacency_{type}_{dir}`, `indexes/{label}/{property}_inverted|_sparse`.
+fn indexed_entity_of(name: &str) -> Option<String> {
+    if let Some(rest) = name.strip_prefix("indexes/") {
+        let entity = rest.split('/').next()?;
+        return (entity != "uni_id_to_vid").then(|| entity.to_string());
+    }
+    if let Some(label) = name.strip_prefix("vertices_") {
+        return Some(label.to_string());
+    }
+    for prefix in ["deltas_", "adjacency_"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let (entity, _dir) = rest.rsplit_once('_')?;
+            return Some(entity.to_string());
+        }
+    }
+    None
+}
+
 /// See [`StorageManager::catalog_publisher`].
 #[derive(Debug)]
 struct CutPublisher(std::sync::Weak<StorageManager>);
@@ -443,7 +478,7 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
                 uri,
                 crate::backend::lance_directory::write_params(mode),
             );
-            let ticket = cut.begin();
+            let ticket = cut.begin()?;
             let mut read = None;
             let destination = match crate::backend::lance_directory::open_dataset_uri(uri).await {
                 Ok(dataset) => {
@@ -899,6 +934,55 @@ fn label_backfill_marker_path(label: &str) -> object_store::path::Path {
     object_store::path::Path::from(format!("{LABEL_BACKFILL_MARKER_DIR}/{name}"))
 }
 
+/// Whether storage option `key` carries a credential (an access key, secret,
+/// token, SAS, password or service account), for any provider. Errs towards
+/// dropping: an option dropped by mistake is resolved again from the
+/// destination's own environment.
+fn is_credential_option(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "key",
+        "secret",
+        "token",
+        "sas",
+        "password",
+        "credential",
+        "service_account",
+    ]
+    .iter()
+    .any(|part| key.contains(part))
+}
+
+/// Whether storage option `key` says where requests go.
+fn is_endpoint_option(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("endpoint") || key.ends_with("_url") || key.contains("_url_")
+}
+
+/// `aws_endpoint` and `aws_endpoint_url_s3` name one endpoint.
+fn canonical_endpoint_key(key: &str) -> String {
+    match key {
+        "aws_endpoint_url_s3" => "aws_endpoint".to_string(),
+        k => k.to_string(),
+    }
+}
+
+/// Whether `endpoint` (lowercased, no trailing `/`) is AWS's own S3 service,
+/// virtual-hosted or not, which an unset endpoint also reaches.
+fn is_provider_endpoint(endpoint: &str) -> bool {
+    // `https://x.amazonaws.com@evil.example` goes to evil.example.
+    if endpoint.contains('@') {
+        return false;
+    }
+    let host = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest)
+        .split(['/', ':', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    host == "amazonaws.com" || host.ends_with(".amazonaws.com")
+}
+
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -963,6 +1047,7 @@ impl StorageManager {
         let mut sm = Self {
             read_cut,
             head,
+            wal_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requires_adjacency_revalidation: false,
             fs_root: (!base_uri.contains("://")).then(|| std::path::PathBuf::from(base_uri)),
             origin: None,
@@ -1154,20 +1239,83 @@ impl StorageManager {
         &self,
         uri: &str,
     ) -> Result<crate::location::StoreLocation> {
-        let options = self
+        self.resolve_foreign_location_with(uri, &BTreeMap::new())
+            .await
+    }
+
+    /// [`Self::resolve_foreign_location`] with `extra` raw object-store
+    /// options for `uri`, over the inherited ones (`BACKUP … WITH {…}`).
+    ///
+    /// Inherited credentials go only with the inherited endpoint: when this
+    /// store uses its provider's own service and `uri` resolves to another
+    /// endpoint (one the environment names), they are not sent there.
+    ///
+    /// # Errors
+    /// The URI cannot be resolved.
+    pub async fn resolve_foreign_location_with(
+        &self,
+        uri: &str,
+        extra: &BTreeMap<String, String>,
+    ) -> Result<crate::location::StoreLocation> {
+        let inherited = self
             .origin
             .as_ref()
             .map(|o| o.location.inheritable_options_for(uri))
             .unwrap_or_default();
-        crate::location::StoreLocation::resolve_from_env(
-            &crate::location::LocationSpec {
+        let resolve = |inherited: &BTreeMap<String, String>| {
+            let mut options = inherited.clone();
+            options.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+            crate::location::LocationSpec {
                 uri: uri.to_string(),
                 cloud: None,
                 options,
-            },
+            }
+        };
+        let location = crate::location::StoreLocation::resolve_from_env(
+            &resolve(&inherited),
             &self.config.object_store,
         )
-        .await
+        .await?;
+        // Credentials go only where they came from: when the destination
+        // reaches another endpoint than this store's (one named in `extra`,
+        // one its environment resolves, or the provider's own where this
+        // store used a custom virtual-hosted one), inherited credentials are
+        // dropped and the destination's own (from `extra` or its environment)
+        // are used.
+        // Every option that says where requests go (S3, STS, Azure, GCS,
+        // metadata endpoints), with AWS's own S3 endpoints as unset.
+        let endpoint_of = |options: &crate::location::StorageOptions| {
+            options
+                .iter()
+                .filter(|(k, _)| is_endpoint_option(k))
+                .map(|(k, v)| {
+                    let v = v.trim_end_matches('/').to_ascii_lowercase();
+                    let v = (!is_provider_endpoint(&v)).then_some(v);
+                    (canonical_endpoint_key(k), v)
+                })
+                .filter(|(_, v)| v.is_some())
+                .collect::<BTreeMap<_, _>>()
+        };
+        let source_endpoint = self
+            .origin
+            .as_ref()
+            .map(|o| endpoint_of(o.location.options()))
+            .unwrap_or_default();
+        if !inherited.is_empty()
+            && endpoint_of(location.options()) != source_endpoint
+            && inherited.keys().any(|k| is_credential_option(k))
+        {
+            let without: BTreeMap<String, String> = inherited
+                .into_iter()
+                .filter(|(k, _)| !is_credential_option(k))
+                .collect();
+            return crate::location::StoreLocation::resolve_from_env(
+                &resolve(&without),
+                &self.config.object_store,
+            )
+            .await;
+        }
+        Ok(location)
     }
 
     /// Create a new StorageManager using an already-constructed object store.
@@ -1312,6 +1460,9 @@ impl StorageManager {
         }
         if writable {
             self.read_cut.start_recording(Arc::clone(&self.write_fence));
+        } else {
+            // Tripped for a read-only handle: it commits nothing.
+            self.read_cut.set_fence(Arc::clone(&self.write_fence));
         }
         Ok(())
     }
@@ -1340,13 +1491,21 @@ impl StorageManager {
     ///
     /// # Errors
     /// A table could not be read or rolled back.
-    pub async fn reconcile_read_cut(&self, resume: Option<&SnapshotManifest>) -> Result<()> {
+    ///
+    /// Returns the labels and edge types whose tables or index datasets it
+    /// rolled back: their user indexes may have been recorded built over a
+    /// version that is gone, so the caller rebuilds them
+    /// ([`Self::mark_indexes_stale`]).
+    pub async fn reconcile_read_cut(
+        &self,
+        resume: Option<&SnapshotManifest>,
+    ) -> Result<Vec<String>> {
         // A recovery above completed commits (a bulk load's publish, a
         // restore's rewind) without always saving a manifest that names
         // them; they are this store's now, so publish them before anything
         // above the cut is discarded.
         let published;
-        let resume = if self.read_cut.has_loose()
+        let resume = if self.read_cut.has_publishable_loose()
             && resume.is_some_and(|m| !m.tables.is_empty())
             && let Some(id) = self.snapshot_manager.publish_successor().await?
         {
@@ -1358,10 +1517,11 @@ impl StorageManager {
         let Some(manifest) = resume.filter(|m| !m.tables.is_empty()) else {
             self.read_cut.hold(self.head_versions().await?);
             self.read_cut.start_checking();
-            return Ok(());
+            return Ok(Vec::new());
         };
         let target = &manifest.tables;
         let mut undone = Vec::new();
+        let mut affected = std::collections::BTreeSet::new();
         for table in self.head.table_names().await? {
             let Some(version) = self.head.get_table_version(&table).await? else {
                 continue;
@@ -1370,6 +1530,7 @@ impl StorageManager {
                 Some(&named) if version > named => {
                     self.head.rollback_table(&table, named).await?;
                     undone.push(format!("{table} v{} to v{named}", version));
+                    affected.extend(indexed_entity_of(&table));
                 }
                 Some(_) => {}
                 None => {
@@ -1383,11 +1544,16 @@ impl StorageManager {
                             .replace_table_atomic(&table, Vec::new(), schema)
                             .await?;
                         undone.push(format!("{table} (named by no manifest)"));
+                        affected.extend(indexed_entity_of(&table));
                     }
                 }
             }
         }
-        undone.extend(crate::storage::index_datasets::reconcile(self, target).await?);
+        let datasets = crate::storage::index_datasets::reconcile(self, target).await?;
+        for key in &datasets {
+            affected.extend(indexed_entity_of(key));
+        }
+        undone.extend(datasets);
         if !undone.is_empty() {
             tracing::warn!(
                 snapshot = %manifest.snapshot_id,
@@ -1399,7 +1565,39 @@ impl StorageManager {
         self.read_cut.adopt(&manifest.snapshot_id, target.clone());
         self.read_cut.hold(self.head_versions().await?);
         self.read_cut.start_checking();
-        Ok(())
+        Ok(affected.into_iter().collect())
+    }
+
+    /// Marks every user index on `entities` (labels or edge types) `Stale`, so
+    /// the rebuild worker rebuilds it, and saves the catalog; returns the
+    /// entities that have one. A no-op on a fork, whose catalog is never
+    /// saved.
+    ///
+    /// # Errors
+    /// The catalog could not be updated or saved.
+    pub async fn mark_indexes_stale(&self, entities: &[String]) -> Result<Vec<String>> {
+        if entities.is_empty() || self.fork_scope.is_some() {
+            return Ok(Vec::new());
+        }
+        let schema = self.schema_manager.schema();
+        let stale: Vec<(String, String)> = schema
+            .indexes
+            .iter()
+            .filter(|idx| entities.iter().any(|e| e == idx.label()))
+            .map(|idx| (idx.name().to_string(), idx.label().to_string()))
+            .collect();
+        for (name, _) in &stale {
+            self.schema_manager.update_index_metadata(name, |m| {
+                m.status = uni_common::core::schema::IndexStatus::Stale;
+            })?;
+        }
+        if !stale.is_empty() {
+            self.schema_manager.save().await?;
+        }
+        let mut labels: Vec<String> = stale.into_iter().map(|(_, l)| l).collect();
+        labels.sort();
+        labels.dedup();
+        Ok(labels)
     }
 
     /// For a read-only handle, at most once per
@@ -1469,7 +1667,9 @@ impl StorageManager {
         if wait {
             self.read_cut.wait_for_open_units().await;
         }
-        if !self.read_cut.has_loose() {
+        // Nothing a manifest would name that the published one does not
+        // (every loose commit waits on an open flush).
+        if !self.read_cut.has_publishable_loose() {
             return Ok(());
         }
         self.snapshot_manager.publish_successor().await?;
@@ -1587,6 +1787,7 @@ impl StorageManager {
             backend: self.backend.clone(),
             read_cut: Arc::clone(&self.read_cut),
             head: Arc::clone(&self.head),
+            wal_holds: Arc::clone(&self.wal_holds),
             // Its own copy, not the shared lock: a fork/pin must get its OWN
             // label index so its flushes/relabels don't mutate the parent's, nor
             // the parent's reach it (review H1/L2). The clone is copy-on-write
@@ -1698,6 +1899,7 @@ impl StorageManager {
             backend: self.backend.clone(),
             read_cut: Arc::clone(&self.read_cut),
             head: Arc::clone(&self.head),
+            wal_holds: Arc::clone(&self.wal_holds),
             // Its own copy, not the shared lock: a fork/pin must get its OWN
             // label index so its flushes/relabels don't mutate the parent's, nor
             // the parent's reach it (review H1/L2). The clone is copy-on-write
@@ -1788,6 +1990,7 @@ impl StorageManager {
             // recorded.
             read_cut: Arc::clone(&self.read_cut),
             head: Arc::clone(&branched_backend),
+            wal_holds: Arc::clone(&self.wal_holds),
             backend: branched_backend,
             // Its own copy, not the shared lock: a fork/pin must get its OWN
             // label index so its flushes/relabels don't mutate the parent's, nor
@@ -3023,12 +3226,11 @@ impl StorageManager {
         if self.head.table_exists(table).await? {
             let report = self
                 .backend
-                .optimize_table(table, self.config.compaction.version_retention)
+                .optimize_table(table, self.version_retention())
                 .await?;
             stats.absorb(&report);
             self.head.invalidate_cache(table);
         }
-        self.publish_cut().await?;
         Ok(())
     }
 
@@ -3149,6 +3351,7 @@ impl StorageManager {
 
         stats.duration = start.elapsed();
         self.record_run(&stats)?;
+        self.publish_cut().await?;
         Ok(stats)
     }
 
@@ -3171,6 +3374,7 @@ impl StorageManager {
 
         stats.duration = start.elapsed();
         self.record_run(&stats)?;
+        self.publish_cut().await?;
         Ok(stats)
     }
 
@@ -3450,7 +3654,7 @@ impl StorageManager {
             log::debug!("Background compaction deferred: a bulk load is being published");
             return Ok(CompactionStats::default());
         }
-        if this.write_fence.is_tripped() {
+        if this.write_fence.check().is_err() {
             log::debug!("Background compaction skipped: this handle can no longer write");
             return Ok(CompactionStats::default());
         }
@@ -3546,9 +3750,10 @@ impl StorageManager {
                     at: "compaction::before-optimize",
                 }));
             }
+            // A handle that lost the store stops between tables.
+            this.write_fence.check()?;
             if let Some(report) =
-                Self::try_optimize_table(backend, &table, this.config.compaction.version_retention)
-                    .await
+                Self::try_optimize_table(backend, &table, this.version_retention()).await
             {
                 stats.absorb(&report);
                 backend.invalidate_cache(&table);
@@ -3718,6 +3923,34 @@ impl StorageManager {
     /// [`Self::head_backend`] as an Arc.
     pub fn head_backend_arc(&self) -> Arc<dyn StorageBackend> {
         Arc::clone(&self.head)
+    }
+
+    /// Keeps flushes from truncating the WAL until the hold is dropped: a
+    /// BACKUP copying the WAL then gets every commit since the manifest it
+    /// copies, whatever flushes run meanwhile.
+    pub fn hold_wal_truncation(&self) -> WalTruncationHold {
+        self.wal_holds
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        WalTruncationHold(Arc::clone(&self.wal_holds))
+    }
+
+    /// How long a compaction keeps superseded table versions: the configured
+    /// retention, or (about) forever while a BACKUP holds the WAL, since the
+    /// backup copies table versions its manifest names, which a cleanup
+    /// during the copy would delete.
+    #[must_use]
+    pub fn version_retention(&self) -> std::time::Duration {
+        if self.wal_truncation_held() {
+            std::time::Duration::from_secs(100 * 365 * 24 * 3600)
+        } else {
+            self.config.compaction.version_retention
+        }
+    }
+
+    /// Whether a [`Self::hold_wal_truncation`] hold is held.
+    #[must_use]
+    pub fn wal_truncation_held(&self) -> bool {
+        self.wal_holds.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
     /// The store's read cut.
@@ -7333,6 +7566,19 @@ mod label_backfill_tests {
         (schema_manager, sm)
     }
 
+    /// While a backup holds the WAL, compactions keep every table version;
+    /// once it is released, the configured retention applies again.
+    #[tokio::test]
+    async fn a_backup_hold_keeps_every_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_schema, sm) = manager(&dir).await;
+        let configured = sm.version_retention();
+        let hold = sm.hold_wal_truncation();
+        assert!(sm.version_retention() > configured * 1000);
+        drop(hold);
+        assert_eq!(sm.version_retention(), configured);
+    }
+
     fn declare_l(schema_manager: &SchemaManager) {
         schema_manager.add_label("L").unwrap();
         schema_manager
@@ -7534,5 +7780,90 @@ mod label_backfill_tests {
                 .await
                 .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod indexed_entity_tests {
+    use super::indexed_entity_of;
+
+    #[test]
+    fn a_rolled_back_table_or_dataset_names_its_indexed_entity() {
+        assert_eq!(
+            indexed_entity_of("vertices_Person").as_deref(),
+            Some("Person")
+        );
+        assert_eq!(
+            indexed_entity_of("deltas_KNOWS_fwd").as_deref(),
+            Some("KNOWS")
+        );
+        assert_eq!(
+            indexed_entity_of("adjacency_HAS_PART_bwd").as_deref(),
+            Some("HAS_PART")
+        );
+        assert_eq!(
+            indexed_entity_of("indexes/Doc/content_inverted").as_deref(),
+            Some("Doc")
+        );
+        assert_eq!(
+            indexed_entity_of("indexes/uni_id_to_vid/Doc/index.lance"),
+            None
+        );
+        assert_eq!(indexed_entity_of("vertices"), None);
+        assert_eq!(indexed_entity_of("edges"), None);
+    }
+}
+
+#[cfg(test)]
+mod foreign_endpoint_tests {
+    use super::{is_credential_option, is_provider_endpoint};
+
+    /// Every provider's credential options are recognized; locating ones
+    /// are not.
+    #[test]
+    fn credential_options_are_recognized_for_every_provider() {
+        for key in [
+            "aws_access_key_id",
+            "aws_secret_access_key",
+            "aws_session_token",
+            "azure_storage_account_key",
+            "azure_storage_sas_key",
+            "azure_client_secret",
+            "google_service_account",
+            "google_service_account_key",
+            "google_application_credentials",
+        ] {
+            assert!(is_credential_option(key), "{key}");
+        }
+        for key in [
+            "aws_region",
+            "aws_endpoint",
+            "azure_storage_account_name",
+            "google_base_url",
+            "allow_http",
+        ] {
+            assert!(!is_credential_option(key), "{key}");
+        }
+    }
+
+    /// AWS's own S3 endpoints, path-style or virtual-hosted, are the one an
+    /// unset endpoint reaches; any other host is a custom endpoint.
+    #[test]
+    fn provider_endpoints_are_told_from_custom_ones() {
+        assert!(is_provider_endpoint("https://s3.us-east-1.amazonaws.com"));
+        assert!(is_provider_endpoint(
+            "https://bucket.s3.eu-west-1.amazonaws.com"
+        ));
+        assert!(is_provider_endpoint("https://s3.amazonaws.com:443/x"));
+        assert!(!is_provider_endpoint("http://127.0.0.1:9000"));
+        assert!(!is_provider_endpoint("https://bucket.minio.example"));
+        assert!(!is_provider_endpoint("https://amazonaws.com.evil.example"));
+        assert!(!is_provider_endpoint(
+            "https://evil.example?x=.amazonaws.com"
+        ));
+        assert!(!is_provider_endpoint("https://evil.example#.amazonaws.com"));
+        assert!(!is_provider_endpoint(
+            "https://s3.amazonaws.com@evil.example"
+        ));
     }
 }

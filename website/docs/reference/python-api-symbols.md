@@ -2473,7 +2473,25 @@ Constraint violation.
 
 ## `UniDatabaseLockedError` — extends `UniError`
 
-Database is locked by another process.
+Kept for compatibility; nothing raises it. A store held by another writer raises `UniStoreLockedError`.
+
+---
+
+## `UniStoreLockedError` — extends `UniError`
+
+Another handle holds the store open for writing; `holder` names it (process and host).
+
+---
+
+## `UniWriterFencedError` — extends `UniError`
+
+This handle may no longer write: its lease was taken over or lapsed, it was closed, it is read-only, or it met a table version another writer committed. `reason` says which.
+
+---
+
+## `UniStaleWalError` — extends `UniError`
+
+A hybrid store's local WAL belongs to an earlier writer: another host, or a copy of this directory, has opened the store since. `store`, `wal` and `segments` describe it; `set_aside_stale_wal()` moves it aside.
 
 ---
 
@@ -3001,7 +3019,8 @@ Write lease configuration for multi-agent coordination.
 | Signature | Description |
 |---|---|
 | `LOCAL() -> WriteLease` *(static)* | — |
-| `DYNAMODB(table: str) -> WriteLease` *(static)* | — |
+| `DYNAMODB(table: str) -> WriteLease` *(static)* | Not implemented: the open fails. |
+| `UNENFORCED() -> WriteLease` *(static)* | No lock or lease: one writer by convention. |
 
 ---
 

@@ -65,10 +65,11 @@ pub enum UniError {
     /// a state another writer has since moved on from. Replaying them would
     /// corrupt the store.
     #[error(
-        "The WAL at {wal} belongs to an earlier writer of {store}: another writer has opened \
-         the store since, so its {segments} segment(s) may hold commits that were never \
-         flushed and cannot be replayed safely. Open with `set_aside_stale_wal()` to move them \
-         to wal_set_aside/ and open the store as it is."
+        "The WAL at {wal} belongs to an earlier writer of {store}: another writer (or a copy \
+         of this directory) has opened the store since, so its {segments} segment(s) may hold \
+         commits that were never flushed and cannot be replayed safely. Some may be flushed \
+         already (a flush whose WAL cleanup was cut short). Open with `set_aside_stale_wal()` \
+         to move them to wal_set_aside/ and open the store as it is."
     )]
     StaleWal {
         store: String,

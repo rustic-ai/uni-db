@@ -4560,8 +4560,24 @@ impl Executor {
     pub(crate) async fn execute_backup(
         &self,
         destination: &str,
-        _options: &HashMap<String, Value>,
+        options: &HashMap<String, Value>,
     ) -> Result<Vec<HashMap<String, Value>>> {
+        // `WITH {…}`: object-store options for the destination.
+        let mut extra = std::collections::BTreeMap::new();
+        for (key, value) in options {
+            let value = match value {
+                Value::String(s) => s.clone(),
+                Value::Int(i) => i.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Bool(b) => b.to_string(),
+                other => {
+                    return Err(anyhow!(
+                        "BACKUP option '{key}' must be a string, number or boolean, not {other:?}"
+                    ));
+                }
+            };
+            extra.insert(key.clone(), value);
+        }
         // Flush L0, so the copy's snapshot holds every commit made so far.
         if let Some(writer_arc) = &self.writer {
             let writer: &uni_store::Writer = writer_arc.as_ref();
@@ -4571,7 +4587,9 @@ impl Executor {
         // The destination: a URL (inheriting this store's endpoint and
         // credentials for the same provider) or a sandbox-checked local path.
         let dest = if uni_store::cloud::is_cloud_url(destination) {
-            self.storage.resolve_foreign_location(destination).await?
+            self.storage
+                .resolve_foreign_location_with(destination, &extra)
+                .await?
         } else {
             // A local path or `file://` URI: on this machine's filesystem, so
             // subject to the file sandbox.

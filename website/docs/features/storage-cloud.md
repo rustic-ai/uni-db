@@ -99,16 +99,22 @@ Also:
 | Azure | `az://container/prefix`, account from the configuration or `AZURE_STORAGE_ACCOUNT_NAME`; or `abfss://container@account.dfs.core.windows.net/prefix` |
 | Local | a path, or `file:///path` |
 
-The form `az://account/container`, documented before 5.4, is still accepted, with a deprecation warning, when the configured account (typed configuration, storage option or environment) is the URI's host.
+The form `az://account/container` documented before 5.4 is no longer read: `az://acme/data` is container `acme` with prefix `data`, whatever account is configured. Write `az://container/prefix` with the account in the configuration. (The old reading made `az://acme/data` mean container `data` only when the configured account was `acme`, so a container named like its account could not be addressed.)
+
+A store on Microsoft Fabric (`abfss://…@account.dfs.fabric.microsoft.com`) needs its endpoint as the `azure_endpoint` storage option. An `AWS_SESSION_TOKEN` in the environment is kept alongside keys you configure explicitly, as Lance keeps it too: unset it when configuring a different account's static keys (a MinIO's, say), or the service rejects the token.
 
 ## Layout
 
 Every store, local or remote, has the same layout under its root `R` (the directory, or the bucket plus prefix):
 
 ```text
-R/catalog/            schema, Locy rules, fork registry, layout.json
+R/catalog/            schema, Locy rules, fork registry, layout.json,
+                      writer_lease.json (object stores),
+                      wal_claim.json (once a hybrid writer has opened it)
 R/wal/                write-ahead log          (hybrid: local directory)
+R/wal_id.json         the WAL's id             (hybrid: local directory)
 R/id_allocator.json   ID allocator             (hybrid: local directory)
+R/writer.lock         writer lock              (local stores, and a hybrid store's directory)
 R/storage/            tables, indexes, snapshot manifests, fork WALs
 ```
 
@@ -143,7 +149,7 @@ A hybrid store has **one host at a time**: the one holding its lease. Hybrid mod
 - **Losing the local directory** loses the unflushed commits and nothing else. The store reopens from the object store with a fresh directory, and ID allocation resumes above every ID in use.
 - **A host that comes back after another took over** holds a WAL that no longer describes the store. That happens when it crashed (its lease then lapsed) or was dropped without `shutdown()`, with unflushed commits, and another host opened the store meanwhile. Its commits were made against a state the store has moved on from, so they are not replayed: the open fails with `StaleWal`, which names the WAL and how many segments hold commits. Open with `set_aside_stale_wal()` to move those segments to `wal_set_aside/` in the local directory, never deleted, and open the store as the object store has it. A read-only open ignores such a WAL.
 
-The store knows whose WAL it follows: each local directory's WAL carries an id (`wal_id.json`), and each writable open records its WAL's id in the object store (`catalog/wal_claim.json`) before its first commit, whether or not the store has ever been flushed. A store opened before this release has no record; its first open replays the local WAL as before and records it.
+The store knows whose WAL it follows: each local directory's WAL carries an id (`wal_id.json`), and each writable open records its WAL's id in the object store (`catalog/wal_claim.json`) before its first commit, whether or not the store has ever been flushed. A store opened before this release has no record; its first open replays the local WAL as before and records it. The record also names the local directory by its inode, so a file-level copy of the directory (an `rsync` or `cp` to a standby) is treated as another writer's WAL even though it carries the same id: move a hybrid directory to another host only after a clean `shutdown()`. A block-level copy (a cloned VM disk or a volume snapshot) keeps the inode and is not detected, and neither is a copy of a directory that is a volume's root onto another volume (roots share an inode number; keep the hybrid directory in a subdirectory of the mount, and the open warns if it is not). Never run two hosts from copies of one hybrid directory.
 
 ## Concurrency
 
@@ -157,7 +163,7 @@ A store, local or remote, has **one writable handle at a time**, and any number 
 
 This needs conditional writes (`If-Match` / `If-None-Match`, which S3, GCS, Azure, MinIO and R2 provide). An object store without them is refused. A service that silently ignores those headers cannot be detected, so check yours before relying on the lease. `WriteLease::Unenforced` opens a store with no lock or lease, which means one writer by convention, and logs a warning. It also lets the ID allocator write without conditional writes. `WriteLease::Custom` uses your own provider: it is acquired before the first write, heartbeated, and released on close.
 
-A writer stops on its own once its lease could have lapsed (expiry minus `clock_skew`), even if a stalled renewal never told it so. Lease expiry assumes hosts' clocks agree to within `clock_skew` (5 seconds). Forks created from a read-only handle still write their own fork state.
+A writer stops on its own once its lease could have lapsed (expiry minus `clock_skew`), even if a stalled renewal never told it so. Lease expiry assumes hosts' clocks agree to within `clock_skew` (5 seconds); `clock_skew + renew_interval` must stay below `ttl` for an object store's lease. A read-only handle writes nothing at all: creating or dropping a fork through one fails with `ReadOnly` (it may open an existing fork and read it). Every table commit checks the lease first, so a handle that lost the store commits nothing more, from a background flush, compaction or index build either. A catalog, pointer or lease write that lands but reports an error (a timeout) is recognized as this handle's on its next swap instead of fencing it.
 
 ### The manifest is the commit point
 

@@ -465,3 +465,143 @@ async fn a_hybrid_stores_local_directory_is_held() -> Result<()> {
     );
     Ok(())
 }
+
+/// A read-only handle creates and drops no fork: either writes the store,
+/// which the writer holds. The writer is unaffected.
+#[tokio::test]
+async fn a_read_only_handle_refuses_fork_create_and_drop() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let path = path.to_str().unwrap();
+    let writer = seeded(path).await?;
+    writer.session().fork("kept").await?;
+    let reader = Uni::open(path).read_only().build().await?;
+    let Err(err) = reader.session().fork("x").await else {
+        panic!("a read-only handle created a fork");
+    };
+    assert!(matches!(err, UniError::ReadOnly { .. }), "{err:?}");
+    let err = reader
+        .drop_fork("kept")
+        .await
+        .expect_err("a read-only handle dropped a fork");
+    assert!(matches!(err, UniError::ReadOnly { .. }), "{err:?}");
+    reader.shutdown().await?;
+
+    // The writer keeps writing, forks and drops.
+    let tx = writer.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Bob'})").await?;
+    tx.commit().await?;
+    writer.flush().await?;
+    writer.session().fork("y").await?;
+    writer.drop_fork("kept").await?;
+    assert_eq!(count(&writer).await?, 2);
+    writer.shutdown().await?;
+    Ok(())
+}
+
+/// A fork opened from a read-only handle reads, but writes nothing and creates
+/// no nested fork; the writer then sees the fork unchanged.
+#[tokio::test]
+async fn a_fork_opened_read_only_writes_nothing() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let path = path.to_str().unwrap();
+    let writer = seeded(path).await?;
+    writer.session().fork("kept").await?;
+    let reader = Uni::open(path).read_only().build().await?;
+    let fork = reader.session().fork("kept").await?;
+    assert_eq!(
+        fork.query("MATCH (p:Person) RETURN count(p) AS c")
+            .await?
+            .rows()[0]
+            .get::<i64>("c")?,
+        1,
+        "the fork reads"
+    );
+    let written = async {
+        let tx = fork.tx().await?;
+        tx.execute("CREATE (:Person {name: 'Mallory'})").await?;
+        tx.commit().await?;
+        reader.flush().await?;
+        fork.flush().await
+    }
+    .await;
+    // Refused as read-only (the API's check, or the fence's reason).
+    let err = format!(
+        "{:#}",
+        written.expect_err("a read-only handle's fork wrote")
+    );
+    assert!(err.contains("read-only"), "{err}");
+    let Err(err) = fork.fork("child").await else {
+        panic!("a read-only handle created a nested fork");
+    };
+    assert!(matches!(err, UniError::ReadOnly { .. }), "{err:?}");
+    drop(fork);
+    reader.shutdown().await?;
+
+    let fork = writer.session().fork("kept").await?;
+    assert_eq!(
+        fork.query("MATCH (p:Person) RETURN count(p) AS c")
+            .await?
+            .rows()[0]
+            .get::<i64>("c")?,
+        1,
+        "nothing the read-only handle tried reached the fork"
+    );
+    drop(fork);
+    writer.shutdown().await?;
+    Ok(())
+}
+
+/// A handle whose fence has tripped commits nothing to any table, from a
+/// background job as much as from a flush.
+#[tokio::test]
+async fn a_fenced_handle_commits_no_table_version() -> Result<()> {
+    use uni_store::backend::{FilterExpr, StorageBackend};
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let path = path.to_str().unwrap();
+    let db = seeded(path).await?;
+    let backend = db.storage().head_backend_arc();
+    let before = backend.get_table_version("vertices_Person").await?;
+    assert!(before.is_some(), "premise: the seed flushed the table");
+    db.storage().write_fence().trip("lost the store (test)");
+    // Straight to the backend, below every API-level check: what a
+    // background flush, compaction or index build reaches.
+    let err = backend
+        .delete_rows("vertices_Person", &FilterExpr::Literal(true))
+        .await
+        .expect_err("a fenced handle committed a delete");
+    assert!(
+        matches!(
+            err.downcast_ref::<UniError>(),
+            Some(UniError::WriterFenced { .. })
+        ),
+        "{err:#}"
+    );
+    assert_eq!(backend.get_table_version("vertices_Person").await?, before);
+    assert!(db.flush().await.is_err());
+    assert!(db.compaction().compact("Person").await.is_err());
+    assert_eq!(backend.get_table_version("vertices_Person").await?, before);
+    let _ = db.shutdown().await;
+    Ok(())
+}
+
+/// The lease's skew allowance is checked only where a lease renews (an
+/// object store, unit-tested in `writer_lock`): a local store is held by an
+/// OS lock, which no skew can lapse, so the same timing opens it.
+#[tokio::test]
+async fn lease_skew_does_not_refuse_a_local_store() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let mut config = quick_grace();
+    config.writer_lease.ttl = Duration::from_secs(30);
+    config.writer_lease.renew_interval = Duration::from_secs(10);
+    config.writer_lease.clock_skew = Duration::from_secs(25);
+    let db = Uni::open(path.to_str().unwrap())
+        .config(config)
+        .build()
+        .await?;
+    db.shutdown().await?;
+    Ok(())
+}

@@ -344,6 +344,8 @@ impl BulkWriterBuilder {
             write_version: None,
             version_reservation: None,
             load_id,
+            manifest_id: Uuid::new_v4().to_string(),
+            unit: None,
             staged_holds: HashMap::new(),
             external_endpoints: std::collections::BTreeMap::new(),
         })
@@ -521,6 +523,12 @@ pub struct BulkWriter {
     /// Names this load's crash-recovery marker, so concurrent loads each keep
     /// their own and never overwrite or delete another's.
     load_id: String,
+    /// The id of the manifest the load will publish, which also names its
+    /// read-cut unit: the load's table commits are counted to it, so that
+    /// manifest names them whatever flush is open, and a load that never
+    /// publishes leaves them loose for the next publish (it is in no WAL).
+    manifest_id: String,
+    unit: Option<uni_store::storage::read_cut::UnitGuard>,
     /// One hold per table this load staged into, keeping its staged files
     /// from version cleanup until they are published or discarded.
     staged_holds: HashMap<String, StagedFilesHold>,
@@ -2120,7 +2128,8 @@ impl BulkWriter {
         // Update Manifest
         let parent_id = manifest.snapshot_id.clone();
         manifest.parent_snapshot = Some(parent_id);
-        manifest.snapshot_id = Uuid::new_v4().to_string();
+        // The id its read-cut unit carries, so the stamp names the load.
+        manifest.snapshot_id = self.manifest_id.clone();
         manifest.created_at = Utc::now();
         // The load's rows carry `write_version`, which no flush recorded: a
         // ceiling below it hid the load from a session pinned here, and made
@@ -2318,6 +2327,7 @@ impl BulkWriter {
                 self.write_version,
                 endpoints_checked,
                 events_interrupted.then(|| self.loaded_rows()),
+                &plan.records,
             )
             .await
         {
@@ -2509,7 +2519,22 @@ impl BulkWriter {
         // published: Lance commits each table on its own, and a reader between
         // two of them saw part of the load.
         let hold = self.hide_load().await;
-        if let Err(e) = self.complete_publish(&plan).await {
+        // The publish is a read-cut unit (a fork's load writes its branches,
+        // which the cut does not cover). It takes no stream lock: a flush may
+        // run while a load publishes (a snapshot taken then excludes the
+        // load for good), so the two may commit to one table in turn.
+        let cut = std::sync::Arc::clone(self.backend.storage.read_cut());
+        if self.backend.storage.fork_scope().is_none() {
+            self.unit = Some(cut.open_unit_keeping(&self.manifest_id));
+        }
+        let published = {
+            let id = self.manifest_id.clone();
+            let publish: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<()>> + Send + '_>,
+            > = Box::pin(self.complete_publish(&plan));
+            uni_store::storage::read_cut::in_unit(id, publish).await
+        };
+        if let Err(e) = published {
             if plan.records.is_empty() {
                 // Unreachable while the backend records whatever it staged;
                 // kept so one that does not cannot claim a completion it has
@@ -2549,7 +2574,15 @@ impl BulkWriter {
             EventDelivery::Finished
         };
 
-        self.finalize(&plan, events).await;
+        {
+            let id = self.manifest_id.clone();
+            let finalize: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> =
+                Box::pin(self.finalize(&plan, events));
+            uni_store::storage::read_cut::in_unit(id, finalize).await;
+        }
+        // Published (the flip closed the unit), or left loose for the next
+        // publish.
+        self.unit = None;
 
         self.committed = true;
         self.stats.duration = self.start_time.elapsed();
@@ -2682,6 +2715,10 @@ impl BulkWriter {
     pub(crate) fn redrive(&mut self, plan: &PublishPlan, hold: Option<GateHold>) -> Redrive {
         self.staged.clear();
         Redrive {
+            // The re-drive's publish continues the load's unit, so what both
+            // commit is named together, by a manifest published after them.
+            unit: self.unit.take(),
+            manifest_id: self.manifest_id.clone(),
             version: self.write_version,
             storage: Arc::clone(&self.backend.storage),
             writer: self.backend.writer.clone(),
@@ -2848,6 +2885,9 @@ pub(crate) fn show_load(
 /// writes the receipt and deletes the marker. It stops when the database shuts
 /// down, leaving the load hidden and its marker for the next open.
 pub(crate) struct Redrive {
+    /// The load's read-cut unit, kept open until its publish completes.
+    unit: Option<uni_store::storage::read_cut::UnitGuard>,
+    manifest_id: String,
     /// The load's `_version`, which the snapshot ceiling is raised to.
     version: Option<u64>,
     storage: Arc<StorageManager>,
@@ -2878,7 +2918,7 @@ pub(crate) struct Redrive {
 impl Redrive {
     /// Retry until the load is published, then finish it; or stop on the
     /// database's shutdown or compaction cancel.
-    pub(crate) async fn run(self, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
+    pub(crate) async fn run(mut self, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
         let cancel = self.storage.compaction_cancel_token().clone();
         let mut delay = REDRIVE_INITIAL_BACKOFF;
         let mut attempt = 0u32;
@@ -2899,6 +2939,9 @@ impl Redrive {
                     return;
                 }
                 Some(Ok(published)) => {
+                    // Every table is committed: the unit's commits go loose,
+                    // for the save below to name.
+                    self.unit = None;
                     tracing::warn!(
                         load_id = %self.load_id,
                         attempt,
@@ -2926,7 +2969,19 @@ impl Redrive {
         fail::fail_point!("bulk::redrive::attempt", |_| Err(anyhow!(
             "injected bulk re-drive failure"
         )));
-        flush_intent::publish_records(&self.storage, &self.tables, &self.records, |_| Ok(())).await
+        let publish: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<usize>> + Send + '_>,
+        > = Box::pin(flush_intent::publish_records(
+            &self.storage,
+            &self.tables,
+            &self.records,
+            |_| Ok(()),
+        ));
+        if self.unit.is_some() {
+            uni_store::storage::read_cut::in_unit(self.manifest_id.clone(), publish).await
+        } else {
+            publish.await
+        }
     }
 
     /// Shut down part way: the load stays hidden, and its staged files stay

@@ -425,11 +425,19 @@ pub use crate::storage::manager::FlushInProgressGuard;
 /// captured WAL LSN, current_version, and the in-progress guard whose
 /// lifetime spans the full flush (including the future async stream
 /// phase that runs on a spawned task).
+/// How long a flush stream waits for an earlier rotation's stream before
+/// running out of order: a safety valve for an earlier stream that is never
+/// polled. A stalled one is ended sooner, by its own stream timeout, which
+/// passes the turn on.
+pub(crate) const STREAM_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 struct RotateOutput {
     old_l0_arc: Arc<RwLock<L0Buffer>>,
     wal_lsn: u64,
     current_version: u64,
     flush_in_progress_guard: FlushInProgressGuard,
+    /// This flush's place in the order streams run in, taken at rotation.
+    stream_turn: crate::storage::read_cut::StreamTicket,
 }
 
 /// Reject a write whose property map is keyed by a storage column name
@@ -452,6 +460,10 @@ fn check_property_names(
 struct FlushOutcome {
     manifest: SnapshotManifest,
     snapshot_id: String,
+    /// The flush's commit unit, open until its manifest is published. Whoever
+    /// holds the outcome holds the unit: dropping it (a cancelled flush, a
+    /// finalize that never runs) closes the unit.
+    unit: Option<crate::storage::read_cut::UnitGuard>,
 }
 
 pub struct Writer {
@@ -2481,16 +2493,20 @@ impl Writer {
                                         parent_manifest,
                                         permit,
                                         flush_in_progress_guard: rotate_out.flush_in_progress_guard,
+                                        stream_turn: rotate_out.stream_turn.waiter(),
                                     };
                                     let writer = self.clone();
+                                    let turn = rotate_out.stream_turn;
                                     let _ticket = coord.submit_for_stream(
                                         rotated,
                                         move |old_l0, wal, ver, n| async move {
-                                            let outcome =
-                                                writer.flush_stream_l1(old_l0, wal, ver, n).await?;
+                                            let outcome = writer
+                                                .flush_stream_l1(old_l0, wal, ver, n, turn)
+                                                .await?;
                                             Ok(crate::runtime::flush_coordinator::FlushOutcome {
                                                 new_manifest: outcome.manifest,
                                                 snapshot_id: outcome.snapshot_id,
+                                                unit: outcome.unit,
                                             })
                                         },
                                     );
@@ -6399,13 +6415,32 @@ impl Writer {
         ])
         .await?;
 
-        // 4.
-        restore::rewind_storage(&self.storage, &point, &target).await?;
-
-        // 5. Saved again: the manifest names the rewound tables' versions
-        // (the read cut), known only now.
-        sm.save_snapshot(&manifest).await?;
-        sm.set_latest_snapshot(&manifest.snapshot_id).await?;
+        // 4. and 5. The rewind is a read-cut unit named by the manifest it
+        // publishes: its rollbacks are read only once that manifest is, and
+        // a catalog save in between publishes nothing (no successor naming
+        // rewound tables under the pre-restore manifest).
+        let unit = self.storage.read_cut().open_unit(&manifest.snapshot_id);
+        let rewind: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =
+            Box::pin(async {
+                restore::rewind_storage(&self.storage, &point, &target).await?;
+                // Saved again: the manifest names the rewound tables'
+                // versions (the read cut), known only now.
+                sm.save_snapshot(&manifest).await?;
+                sm.set_latest_snapshot(&manifest.snapshot_id).await
+            });
+        if let Err(e) =
+            crate::storage::read_cut::in_unit(manifest.snapshot_id.clone(), rewind).await
+        {
+            // Some tables may be rewound and others not, and only the next
+            // open (which finds the intent) completes the restore: this handle
+            // must write nothing more over the half-rewound store.
+            self.storage.write_fence().trip(format!(
+                "restore of snapshot {snapshot_id} failed part way ({e}); reopen the database to \
+                 complete it"
+            ));
+            return Err(e);
+        }
+        drop(unit);
         let local_root = self.storage.local_fs_root();
         let barrier_id = manifest.snapshot_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -6689,6 +6724,7 @@ impl Writer {
                 wal_lsn,
                 current_version,
                 flush_in_progress_guard,
+                stream_turn,
             },
             seq,
         ) = {
@@ -6710,16 +6746,20 @@ impl Writer {
             parent_manifest,
             permit,
             flush_in_progress_guard,
+            stream_turn: stream_turn.waiter(),
         };
         // 4. Spawn the stream phase via the coordinator. The closure
         //    captures Arc<Writer> transiently — drops when stream
         //    completes (bounded, ~50-500 ms).
         let writer = self.clone();
         let ticket = coord.submit_for_stream(rotated, move |old_l0, wal, ver, n| async move {
-            let outcome = writer.flush_stream_l1(old_l0, wal, ver, n).await?;
+            let outcome = writer
+                .flush_stream_l1(old_l0, wal, ver, n, stream_turn)
+                .await?;
             Ok(crate::runtime::flush_coordinator::FlushOutcome {
                 new_manifest: outcome.manifest,
                 snapshot_id: outcome.snapshot_id,
+                unit: outcome.unit,
             })
         });
         Ok(ticket)
@@ -6818,6 +6858,8 @@ impl Writer {
             wal_lsn,
             current_version,
             flush_in_progress_guard,
+            // Under `flush_lock` (held by every caller): turns follow rotations.
+            stream_turn: self.storage.read_cut().stream_ticket(),
         })
     }
 
@@ -6837,6 +6879,7 @@ impl Writer {
         wal_lsn: u64,
         current_version: u64,
         name: Option<String>,
+        turn: crate::storage::read_cut::StreamTicket,
     ) -> Result<FlushOutcome> {
         // The flush is a commit unit of the read cut, named by the manifest
         // it will publish: its table commits stay unread until that manifest
@@ -6848,6 +6891,21 @@ impl Writer {
         // primary's own datasets (the shared UID index) is loose there.
         let forked = self.storage.fork_scope().is_some();
         let cut = Arc::clone(self.storage.read_cut());
+        // One stream at a time, in rotation order: a stream's commits never
+        // interleave with another's, and an earlier rotation's rows commit
+        // first. A later flush may still commit a table on top of an earlier
+        // flush's unpublished commit (the earlier one's finalize can run
+        // after it) and its manifest then names those rows early; nothing is
+        // lost, since the WAL floor and truncation follow the oldest pending
+        // flush and stamping keeps the newer version. The lock is held for
+        // the Lance writes only; finalize runs without it, and no stream needs
+        // `flush_lock`, so a synchronous flush waiting here under `flush_lock`
+        // cannot deadlock. The turn passes on when `turn` drops, as this
+        // stream ends. (An async stream has already waited for its turn, in
+        // the coordinator, before its timeout started.)
+        turn.wait_turn(STREAM_TURN_TIMEOUT).await;
+        let _stream = cut.stream_lock().await;
+        let _turn = turn;
         let unit = (!forked).then(|| cut.open_unit(&snapshot_id));
         // Boxed as `dyn`: one more layer of nesting around the stream's
         // future overflows the Send proof of every future holding a flush
@@ -6861,14 +6919,11 @@ impl Writer {
             name,
             snapshot_id.clone(),
         ));
-        let outcome = match unit {
-            Some(unit) => {
-                let outcome = crate::storage::read_cut::in_unit(snapshot_id, stream).await?;
-                unit.keep_open();
-                outcome
-            }
+        let mut outcome = match unit {
+            Some(_) => crate::storage::read_cut::in_unit(snapshot_id, stream).await?,
             None => stream.await?,
         };
+        outcome.unit = unit;
         Ok(outcome)
     }
 
@@ -7094,7 +7149,7 @@ impl Writer {
             // which is the #233 property below, preserved.
             let orphan_vids: Vec<Vid> = orphaned_tombstones.iter().map(|(vid, _)| *vid).collect();
             let orphan_labels = MainVertexDataset::find_batch_labels_by_vids(
-                self.storage.backend(),
+                self.storage.head_backend(),
                 &orphan_vids,
                 None,
             )
@@ -7225,8 +7280,8 @@ impl Writer {
                 Some(&edge_created_at_map),
                 Some(&edge_updated_at_map),
             )?;
-            MainEdgeDataset::write_batch(self.storage.backend(), main_edge_batch).await?;
-            MainEdgeDataset::ensure_default_indexes(self.storage.backend()).await?;
+            MainEdgeDataset::write_batch(self.storage.head_backend(), main_edge_batch).await?;
+            MainEdgeDataset::ensure_default_indexes(self.storage.head_backend()).await?;
         }
 
         // 2.2 Main vertices table
@@ -7300,13 +7355,13 @@ impl Writer {
         // versions itself rather than filtering on one.
         let relabel_vids: Vec<Vid> = overwrite_only.iter().map(|(vid, ..)| *vid).collect();
         let relabel_props = MainVertexDataset::find_batch_props_by_vids(
-            self.storage.backend(),
+            self.storage.head_backend(),
             &relabel_vids,
             self.storage.version_high_water_mark(),
         )
         .await?;
         let relabel_old_labels = MainVertexDataset::find_batch_labels_by_vids(
-            self.storage.backend(),
+            self.storage.head_backend(),
             &relabel_vids,
             None,
         )
@@ -7364,8 +7419,8 @@ impl Writer {
                 Some(&vertex_created_at),
                 Some(&vertex_updated_at),
             )?;
-            MainVertexDataset::write_batch(self.storage.backend(), main_vertex_batch).await?;
-            MainVertexDataset::ensure_default_indexes(self.storage.backend()).await?;
+            MainVertexDataset::write_batch(self.storage.head_backend(), main_vertex_batch).await?;
+            MainVertexDataset::ensure_default_indexes(self.storage.head_backend()).await?;
         }
         main_vertices.truncate(live_main_rows);
 
@@ -7394,7 +7449,7 @@ impl Writer {
             // Every edge flushes as a full-row Append; see
             // `Writer::insert_edge_partial_full` for why the delta log
             // cannot take a partial MergeInsert.
-            let backend = self.storage.backend();
+            let backend = self.storage.head_backend();
 
             // FWD run (sorted by src_vid)
             let mut fwd_entries = entries.clone();
@@ -7555,7 +7610,7 @@ impl Writer {
                 ver_data.push(version);
             }
 
-            let backend = self.storage.backend();
+            let backend = self.storage.head_backend();
 
             // Tombstones are appended as rows of their own, in the same
             // append as the live rows: `_deleted = true` at the delete's
@@ -7675,6 +7730,7 @@ impl Writer {
         Ok(FlushOutcome {
             manifest,
             snapshot_id,
+            unit: None,
         })
     }
 
@@ -7709,6 +7765,7 @@ impl Writer {
             wal_lsn,
             current_version,
             flush_in_progress_guard: _flush_guard,
+            stream_turn,
         } = self.flush_l0_rotate().await?;
 
         // Phases D (L1 collect), E (orphan resolve), F (manifest seed),
@@ -7716,9 +7773,24 @@ impl Writer {
         let FlushOutcome {
             manifest,
             snapshot_id,
+            unit: _unit,
         } = self
-            .flush_stream_l1(old_l0_arc.clone(), wal_lsn, current_version, name)
+            .flush_stream_l1(
+                old_l0_arc.clone(),
+                wal_lsn,
+                current_version,
+                name,
+                stream_turn,
+            )
             .await?;
+
+        // Test-only seam: an async stall between the stream and the finalize,
+        // so a test can drop the flush's future in that window (a cancelled
+        // commit, a timed-out `flush()`).
+        #[cfg(feature = "failpoints")]
+        if fail::eval("flush::after-stream-stall", |_| ()).is_some() {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
 
         // Phases H..S: publish manifest, complete_flush, WAL truncate,
         // property cache clear, last_flush_time, metrics, l1_runs++,
@@ -7807,9 +7879,6 @@ impl Writer {
         initial_count: usize,
         start: std::time::Instant,
     ) -> Result<String> {
-        // Closes the flush's commit unit however the finalize ends; a
-        // publish closes it first.
-        let _unit = shared.storage.read_cut().closing_unit(&snapshot_id);
         // Flushed row counts have just moved, so forget them (#260). Placed in
         // the shared finalize body rather than in `flush_to_l1`, because the
         // sync and async paths both land here and a hook on either alone would
@@ -7930,6 +7999,9 @@ impl Writer {
         // in L1, so truncating to its high watermark would delete its own data
         // (the lost-commit-on-graceful-close bug).
         let wal_handle = shared.l0_manager.get_current().read().wal.clone();
+        // A BACKUP copying the WAL holds truncation off; a later flush
+        // truncates what this one leaves.
+        let wal_handle = wal_handle.filter(|_| !shared.storage.wal_truncation_held());
         if let Some(w) = wal_handle {
             let safe_lsn = shared
                 .l0_manager
@@ -8152,6 +8224,9 @@ impl FinalizeFn for WriterFinalizer {
                 let l0 = rotated.old_l0_arc.read();
                 (l0.estimated_size, l0.mutation_count)
             };
+            // Held across the finalize: its publish closes the unit, and a
+            // finalize that fails or never completes closes it on drop.
+            let _unit = outcome.unit;
             let result = Writer::flush_finalize_now(
                 shared,
                 rotated.old_l0_arc.clone(),

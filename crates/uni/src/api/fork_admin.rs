@@ -103,6 +103,11 @@ impl Uni {
     /// # }
     /// ```
     pub async fn drop_fork(&self, name: &str) -> Result<()> {
+        if self.inner.is_read_only() {
+            return Err(UniError::ReadOnly {
+                operation: format!("drop fork '{name}' from a read-only handle"),
+            });
+        }
         // Hold the per-name lock for the whole drop sequence. `fork(name).build()`
         // holds the same lock for its entire open-or-create flow (api/fork.rs),
         // so create/open and drop are mutually exclusive per name: a concurrent
@@ -297,6 +302,11 @@ impl Uni {
     /// - [`UniError::ForkSubtreeInUse`] if any node in the subtree has
     ///   live sessions or open transactions.
     pub async fn drop_fork_cascade(&self, name: &str) -> Result<()> {
+        if self.inner.is_read_only() {
+            return Err(UniError::ReadOnly {
+                operation: format!("drop fork '{name}' from a read-only handle"),
+            });
+        }
         // 1. Resolve the root and walk descendants depth-first.
         let root = self.inner.fork_registry.get(name).await?;
         let mut order: Vec<uni_common::core::fork::ForkInfo> = Vec::new();
@@ -685,6 +695,18 @@ impl Uni {
     /// - [`UniError::ForkLifecycle`] (stage = `tag`) on Lance failures
     ///   (tag-name conflict, IO).
     pub async fn tag_fork(&self, fork_name: &str, tag: &str) -> Result<()> {
+        // A tag is a Lance ref written to the store: a read-only handle
+        // writes none, and a fenced one no longer may.
+        if self.inner.is_read_only() {
+            return Err(UniError::ReadOnly {
+                operation: format!("tag fork '{fork_name}' from a read-only handle"),
+            });
+        }
+        self.inner
+            .storage
+            .write_fence()
+            .check()
+            .map_err(crate::api::storage_error)?;
         let info = self.inner.fork_registry.get(fork_name).await?;
         let branching =
             self.inner
@@ -755,6 +777,18 @@ impl Uni {
     /// - [`UniError::ForkNotFound`] if the fork is unknown.
     /// - [`UniError::ForkLifecycle`] (stage = `untag`) on Lance failures.
     pub async fn untag_fork(&self, fork_name: &str, tag: &str) -> Result<()> {
+        // A tag is a Lance ref written to the store: a read-only handle
+        // writes none, and a fenced one no longer may.
+        if self.inner.is_read_only() {
+            return Err(UniError::ReadOnly {
+                operation: format!("untag fork '{fork_name}' from a read-only handle"),
+            });
+        }
+        self.inner
+            .storage
+            .write_fence()
+            .check()
+            .map_err(crate::api::storage_error)?;
         let info = self.inner.fork_registry.get(fork_name).await?;
         let branching =
             self.inner

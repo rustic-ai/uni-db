@@ -20,16 +20,19 @@
 //! snapshot the backup reports. A copy that fails part way therefore never
 //! opens as a store: delete it and back up again.
 //!
-//! The copy is of the store as it is while the copy runs. A flush or
-//! compaction that commits during it can leave the copy at a mix of versions,
-//! so take a backup while the store is quiet.
+//! The copy is of the store as of the manifest it names. Flushes keep
+//! running while it copies, but none truncates the WAL until the copy is done
+//! ([`StorageManager::hold_wal_truncation`]), and the WAL is copied before the
+//! tables: opening the copy rolls every table back to that manifest's
+//! versions and replays the copied WAL, which holds every commit since. The
+//! commits after the WAL was copied are not in the backup.
 
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use futures::TryStreamExt;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::location::{StoreLayout, StoreLocation};
 use crate::storage::manager::StorageManager;
@@ -50,6 +53,12 @@ pub use crate::location::IN_PROGRESS_MARKER;
 
 /// Objects at or above this size are copied in parts rather than in memory.
 const MULTIPART_THRESHOLD: u64 = 16 * 1024 * 1024;
+
+/// The size of each part of a multipart copy.
+const PART_SIZE: usize = 8 * 1024 * 1024;
+
+/// Parts of one multipart copy in flight at once.
+const PARTS_IN_FLIGHT: usize = 8;
 
 /// Catalog files under the store root that belong in a backup. The rest of
 /// the root catalog is the fork registry, which a backup leaves out.
@@ -76,6 +85,9 @@ fn is_flat_root_metadata(path: &str) -> bool {
         || path == crate::runtime::wal_lineage::WAL_ID_FILE
         || path.starts_with("wal_set_aside/")
         || path == "catalog/layout.json"
+        || path == crate::runtime::wal_lineage::CLAIM_FILE
+        || path == IN_PROGRESS_MARKER
+        || path == "schema.json"
         || ROOT_CATALOG_FILES.contains(&path)
 }
 
@@ -89,11 +101,17 @@ pub async fn backup_store(storage: &StorageManager, dest: &StoreLocation) -> Res
     if storage.fork_scope().is_some() {
         bail!("BACKUP copies the primary store; run it from a primary session, not a fork");
     }
+    // Before the manifest is read: every commit since it stays in the WAL
+    // until the WAL is copied.
+    let _wal_hold = storage.hold_wal_truncation();
     let snapshot = storage
         .snapshot_manager()
         .load_latest_snapshot()
         .await?
         .ok_or_else(|| anyhow!("No snapshot to back up: the store has never been flushed"))?;
+    // Test seam: the manifest is read, nothing is copied yet; a flush here
+    // used to truncate the WAL the copy then missed.
+    fail::fail_point!("backup::after-latest");
 
     let dest_meta = dest.meta_store();
     let dest_tables = dest.table_store(StoreLayout::Standard)?;
@@ -111,6 +129,56 @@ pub async fn backup_store(storage: &StorageManager, dest: &StoreLocation) -> Res
         objects: 0,
         bytes: 0,
     };
+
+    // The WAL first, with the ID allocator and the WAL's id: in the local
+    // directory of a hybrid store, at the root otherwise. Copied before the
+    // tables, so it holds every commit the tables copied after it may carry
+    // above the manifest (which the open rolls back and replays).
+    let mut wal_id_copied = false;
+    if let Some(origin) = storage.origin() {
+        let src_meta = origin.location.meta_store();
+        {
+            // The WAL and ID allocator: in the local directory of a hybrid
+            // store, at the root otherwise.
+            let src_aux = origin
+                .local
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&src_meta));
+            copy_if_present(
+                &src_aux,
+                "id_allocator.json",
+                "id_allocator.json",
+                &dest_meta,
+                &mut report,
+            )
+            .await?;
+            // The WAL's id goes with it, and the copy's claim names it below,
+            // so a hybrid host bringing another WAL to the copy is refused.
+            wal_id_copied = copy_if_present(
+                &src_aux,
+                crate::runtime::wal_lineage::WAL_ID_FILE,
+                crate::runtime::wal_lineage::WAL_ID_FILE,
+                &dest_meta,
+                &mut report,
+            )
+            .await?;
+            let mut prefixes = vec!["wal"];
+            // Plugin, scheduler and trigger sidecars live in the local
+            // directory: a hybrid store's, or a local store's root.
+            if origin.local.is_some() || origin.location.fs_root().is_some() {
+                prefixes.push("_system");
+            }
+            for prefix in prefixes {
+                let listed: Vec<object_store::ObjectMeta> = src_aux
+                    .list(Some(&Path::from(prefix)))
+                    .try_collect()
+                    .await?;
+                for meta in listed {
+                    copy_object(&src_aux, &meta, &dest_meta, &meta.location, &mut report).await?;
+                }
+            }
+        }
+    }
 
     // Tables, indexes and the snapshot catalog, from the table root. The
     // `latest` pointer is written last, below.
@@ -162,45 +230,6 @@ pub async fn backup_store(storage: &StorageManager, dest: &StoreLocation) -> Res
                 )
                 .await?;
             }
-            // The WAL and ID allocator: in the local directory of a hybrid
-            // store, at the root otherwise.
-            let src_aux = origin
-                .local
-                .clone()
-                .unwrap_or_else(|| Arc::clone(&src_meta));
-            copy_if_present(
-                &src_aux,
-                "id_allocator.json",
-                "id_allocator.json",
-                &dest_meta,
-                &mut report,
-            )
-            .await?;
-            // The WAL's id goes with it: the copied manifest names it, and a
-            // WAL whose id the manifest does not name is an earlier writer's.
-            copy_if_present(
-                &src_aux,
-                crate::runtime::wal_lineage::WAL_ID_FILE,
-                crate::runtime::wal_lineage::WAL_ID_FILE,
-                &dest_meta,
-                &mut report,
-            )
-            .await?;
-            let mut prefixes = vec!["wal"];
-            // Plugin, scheduler and trigger sidecars live in the local
-            // directory: a hybrid store's, or a local store's root.
-            if origin.local.is_some() || origin.location.fs_root().is_some() {
-                prefixes.push("_system");
-            }
-            for prefix in prefixes {
-                let listed: Vec<object_store::ObjectMeta> = src_aux
-                    .list(Some(&Path::from(prefix)))
-                    .try_collect()
-                    .await?;
-                for meta in listed {
-                    copy_object(&src_aux, &meta, &dest_meta, &meta.location, &mut report).await?;
-                }
-            }
         }
         None => {
             // A manager built without a resolved location knows only its
@@ -211,6 +240,12 @@ pub async fn backup_store(storage: &StorageManager, dest: &StoreLocation) -> Res
                 .await?;
             report.objects += 1;
         }
+    }
+
+    // The copy follows the WAL it was given: a hybrid host that opens it
+    // with another local WAL holding commits is refused (`StaleWal`).
+    if wal_id_copied && let Some(wal_id) = crate::runtime::wal_lineage::load(&dest_meta).await? {
+        crate::runtime::wal_lineage::claim_new(&dest_meta, &wal_id, "wal").await?;
     }
 
     // Last: the snapshot pointer, the layout, and then the copy is a store.
@@ -253,7 +288,7 @@ async fn copy_if_present(
     to: &str,
     dst: &Arc<dyn ObjectStore>,
     report: &mut BackupReport,
-) -> Result<()> {
+) -> Result<bool> {
     let from = Path::from(from);
     match src.head(&from).await {
         // Copy from the path asked for: a prefixed local store's `head` can
@@ -263,9 +298,10 @@ async fn copy_if_present(
                 location: from,
                 ..meta
             };
-            copy_object(src, &meta, dst, &Path::from(to), report).await
+            copy_object(src, &meta, dst, &Path::from(to), report).await?;
+            Ok(true)
         }
-        Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(object_store::Error::NotFound { .. }) => Ok(false),
         Err(e) => Err(e.into()),
     }
 }
@@ -284,29 +320,50 @@ async fn copy_object(
         report.bytes += bytes.len() as u64;
         dst.put(to, bytes.into()).await?;
     } else {
-        let upload = dst.put_multipart(to).await?;
-        let mut writer = WriteMultipart::new(upload);
-        let mut stream = got.into_stream();
+        // Parts are put with a bounded number in flight, so a fast source
+        // cannot buffer a whole large object in memory; any failure, the
+        // final completion's included, aborts the upload so no orphaned parts
+        // stay behind.
+        let mut upload = dst.put_multipart(to).await?;
         let copied: Result<()> = async {
+            let mut stream = got.into_stream();
+            let mut part: Vec<u8> = Vec::with_capacity(PART_SIZE);
+            let mut in_flight = futures::stream::FuturesUnordered::new();
             while let Some(chunk) = stream.try_next().await? {
-                // Bound the parts in flight, so a fast source cannot buffer a
-                // whole large object in memory.
-                writer.wait_for_capacity(8).await?;
                 report.bytes += chunk.len() as u64;
-                writer.write(&chunk);
+                part.extend_from_slice(&chunk);
+                // Every part but the last is exactly `PART_SIZE`: some
+                // providers (R2) refuse uneven parts.
+                while part.len() >= PART_SIZE {
+                    let rest = part.split_off(PART_SIZE);
+                    let payload =
+                        object_store::PutPayload::from(std::mem::replace(&mut part, rest));
+                    in_flight.push(upload.put_part(payload));
+                    if in_flight.len() >= PARTS_IN_FLIGHT {
+                        futures::StreamExt::next(&mut in_flight).await.transpose()?;
+                    }
+                }
+            }
+            if !part.is_empty() {
+                in_flight.push(upload.put_part(object_store::PutPayload::from(part)));
+            }
+            while let Some(done) = futures::StreamExt::next(&mut in_flight).await {
+                done?;
             }
             Ok(())
         }
         .await;
-        match copied {
-            Ok(()) => {
-                writer.finish().await?;
-            }
-            Err(e) => {
-                // Leave no orphaned parts behind.
-                let _ = writer.abort().await;
-                return Err(e);
-            }
+        let completed = match copied {
+            Ok(()) => upload
+                .complete()
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = completed {
+            let _ = upload.abort().await;
+            return Err(e);
         }
     }
     report.objects += 1;

@@ -661,7 +661,7 @@ Managed identity, workload identity and client-secret credentials are configured
 | `acquire_grace` | 5 s | How long a writable open waits for a held store before `StoreLocked`. |
 | `clock_skew` | 5 s | Allowance added before a takeover, and subtracted from a holder's own deadline. |
 
-Local stores use an OS lock, so only `acquire_grace` applies to them. In Python these are `config({"writer_lease": {"acquire_grace": 0.5, ...}})`, in seconds.
+`renew_interval` must be below `ttl` for every store, and `clock_skew + renew_interval` below `ttl` for an object store's lease (the open fails otherwise). Local stores use an OS lock, so of the timings only `acquire_grace` affects them. In Python these are `config({"writer_lease": {"acquire_grace": 0.5, ...}})`, in seconds.
 
 ### Read cut (`UniConfig::read_cut_refresh`)
 

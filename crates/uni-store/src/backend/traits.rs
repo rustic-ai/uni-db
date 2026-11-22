@@ -202,6 +202,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Check if a table exists.
     async fn table_exists(&self, name: &str) -> Result<bool>;
 
+    /// Fails once the handle's write fence has tripped (a lost lease, a
+    /// closed or read-only handle). A backend whose commits do not pass
+    /// through one that checks it (a fork's branches) checks it here before
+    /// each write.
+    fn check_write_fence(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Create a new table with initial data batches.
     async fn create_table(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()>;
 

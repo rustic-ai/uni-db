@@ -110,6 +110,10 @@ impl StorageBackend for ReadCutBackend {
         self.inner.table_exists(name).await
     }
 
+    fn check_write_fence(&self) -> Result<()> {
+        self.inner.check_write_fence()
+    }
+
     async fn create_table(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
         self.inner.create_table(name, batches).await
     }

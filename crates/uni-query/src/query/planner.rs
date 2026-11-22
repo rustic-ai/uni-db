@@ -11970,9 +11970,9 @@ impl QueryPlanner {
             SchemaCommand::ShowStatistics => Ok(LogicalPlan::ShowStatistics),
             SchemaCommand::Vacuum => Ok(LogicalPlan::Vacuum),
             SchemaCommand::Checkpoint => Ok(LogicalPlan::Checkpoint),
-            SchemaCommand::Backup { path } => Ok(LogicalPlan::Backup {
+            SchemaCommand::Backup { path, options } => Ok(LogicalPlan::Backup {
                 destination: path,
-                options: HashMap::new(),
+                options,
             }),
             SchemaCommand::CopyTo(cmd) => Ok(LogicalPlan::CopyTo {
                 label: cmd.label,

@@ -2762,8 +2762,9 @@ fn build_backup_command(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // TO
     let path_pair = inner.next().unwrap();
     let path = build_string_literal(path_pair)?;
+    let options = parse_with_options(&mut inner)?;
 
-    Ok(SchemaCommand::Backup { path })
+    Ok(SchemaCommand::Backup { path, options })
 }
 
 /// Parse WITH options clause if present.

@@ -91,8 +91,10 @@ class Uni:
 
 ## 4. UniBuilder / AsyncUniBuilder
 
-`.config(dict)` accepts all 44 active `UniConfig` fields, including nested
-`compaction`, `throttle`, `file_sandbox`, `object_store`, and `index_rebuild`.
+`.config(dict)` accepts every active `UniConfig` field (the Python parity test
+checks the set against the Rust struct), including nested `compaction`,
+`throttle`, `file_sandbox`, `object_store`, `index_rebuild` and
+`writer_lease`.
 Unknown fields and deprecated `partial_lance_writes` raise `ValueError`.
 Durations accept seconds or `datetime.timedelta`; optional durations accept
 `None`. Nested overrides merge and later setters win. `db.config()` returns
@@ -130,6 +132,7 @@ class UniBuilder:
     def schema_file(self, path: str) -> UniBuilder: ...
     def hybrid(self, local_path: str, remote_url: str) -> UniBuilder: ...
     def cloud_config(self, config: dict[str, Any]) -> UniBuilder: ...
+    def storage_options(self, options: dict[str, str]) -> UniBuilder: ...  # raw object-store options, over cloud_config and the environment
     def xervo_catalog_from_str(self, json: str) -> UniBuilder: ...
     def xervo_catalog_from_file(self, path: str) -> UniBuilder: ...
     def read_only(self) -> UniBuilder: ...
@@ -618,7 +621,10 @@ class TokenUsage:
 ```
 UniError (base)
   +-- UniNotFoundError
-  +-- UniDatabaseLockedError
+  +-- UniDatabaseLockedError   (compatibility only; never raised)
+  +-- UniStoreLockedError      (another writer holds the store; .holder)
+  +-- UniWriterFencedError     (this handle lost the store; .reason)
+  +-- UniStaleWalError         (hybrid: an earlier writer's WAL; .store, .wal, .segments)
   +-- UniSchemaError
   |     +-- UniLabelNotFoundError
   |     +-- UniEdgeTypeNotFoundError

@@ -550,7 +550,9 @@ target.
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `DatabaseLocked` | Another process holds the lock | Close other process or use a different path |
+| `StoreLocked` | Another handle holds the store open for writing (an OS lock locally, a lease on an object store); the error names the holder | Close it, open this handle `read_only()`, or wait for its lease to lapse (`ttl` plus `clock_skew` after its last renewal: 35 s by default) |
+| `WriterFenced` | This handle lost the store: its lease was taken over or could not be renewed, it was closed, it is read-only, or it met a table version another writer committed | Reopen; the WAL keeps this handle's unflushed commits |
+| `StaleWal` | A hybrid store's local WAL belongs to an earlier writer (another host, or a copy of this directory, has opened the store since) | Open with `set_aside_stale_wal()` to move it to `wal_set_aside/`, or open on the host that wrote last |
 | `ReadOnly` | Write attempted on a read-only database | Open in write mode or avoid writes |
 | `Storage` | Underlying storage failure | Check storage config/permissions |
 | `Io` | OS I/O error (e.g., disk full) | Fix disk/permissions |

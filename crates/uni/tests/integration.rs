@@ -36,6 +36,8 @@ mod fork;
 // renderer (`querygen`) and the TLP/NoREC oracles + seed (`metamorphic`), plus
 // the shared order-insensitive row-bag comparator (`diff`) they depend on.
 // (`gen` is a reserved keyword in edition 2024, hence `querygen`.)
+#[path = "common/emulator_smoke.rs"]
+mod emulator_smoke;
 #[path = "common/hybrid_localstack_e2e.rs"]
 mod hybrid_localstack_e2e;
 #[path = "common/index/mod.rs"]

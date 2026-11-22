@@ -681,7 +681,9 @@ pub enum UniError {
     Transaction { message }, TransactionConflict { message }, TransactionAlreadyCompleted,
     TransactionExpired { tx_id, hint }, CommitTimeout { tx_id, hint },
     // Access control
-    ReadOnly { operation }, PermissionDenied { action }, DatabaseLocked,
+    ReadOnly { operation }, PermissionDenied { action }, DatabaseLocked /* never raised */,
+    // Single writer and hybrid lineage
+    StoreLocked { store, holder }, WriterFenced { reason }, StaleWal { store, wal, segments },
     WriteContextAlreadyActive { session_id, hint },
     // Resource limits
     MemoryLimitExceeded { limit_bytes }, Timeout { timeout_ms }, Cancelled,

@@ -95,6 +95,10 @@ struct State {
     committed: BTreeMap<String, u64>,
     loose: BTreeMap<String, u64>,
     units: HashMap<String, BTreeMap<String, u64>>,
+    /// Units whose commits this handle reads at once (a bulk load's: the
+    /// bulk visibility gate hides them from this handle until shown), while
+    /// other handles read them once the unit's manifest is published.
+    visible_units: BTreeSet<String>,
     /// Tables dropped since the last publish.
     dropped: BTreeSet<String>,
     ops: HashMap<String, TableOps>,
@@ -127,11 +131,17 @@ impl State {
     }
 
     fn refresh_view(&mut self) {
+        let mut top = self.loose.clone();
+        for id in &self.visible_units {
+            if let Some(commits) = self.units.get(id) {
+                overlay_dropping(&mut top, commits, &BTreeSet::new());
+            }
+        }
         self.view = match &self.published {
-            None if self.loose.is_empty() => None,
+            None if top.is_empty() => None,
             published => {
                 let mut tables = self.base();
-                overlay_dropping(&mut tables, &self.loose, &self.dropped);
+                overlay_dropping(&mut tables, &top, &self.dropped);
                 Some(Published {
                     snapshot_id: published
                         .as_ref()
@@ -159,6 +169,17 @@ pub struct ReadCut {
     last_refresh: Mutex<Option<Instant>>,
     /// Serializes standalone publishes.
     publishing: tokio::sync::Mutex<()>,
+    /// Held by a flush stream while it commits tables: one at a time, so no
+    /// flush's commits stack under another's. A bulk load's publish does not
+    /// take it (a snapshot during one would wait for the whole publish).
+    stream: Arc<tokio::sync::Mutex<()>>,
+    /// The next stream ticket to hand out, and the one whose turn it is.
+    next_ticket: std::sync::atomic::AtomicU64,
+    serving: std::sync::atomic::AtomicU64,
+    /// Tickets given up out of turn (a rotated flush whose stream never ran
+    /// before an earlier one finished).
+    done_out_of_turn: Mutex<BTreeSet<u64>>,
+    turn_changed: tokio::sync::Notify,
 }
 
 impl std::fmt::Debug for ReadCut {
@@ -192,6 +213,11 @@ impl ReadCut {
             fence: std::sync::OnceLock::new(),
             last_refresh: Mutex::new(None),
             publishing: tokio::sync::Mutex::new(()),
+            stream: Arc::new(tokio::sync::Mutex::new(())),
+            next_ticket: std::sync::atomic::AtomicU64::new(0),
+            serving: std::sync::atomic::AtomicU64::new(0),
+            done_out_of_turn: Mutex::new(BTreeSet::new()),
+            turn_changed: tokio::sync::Notify::new(),
         }
     }
 
@@ -200,6 +226,24 @@ impl ReadCut {
         let _ = self.fence.set(fence);
         self.recording
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Sets the fence every commit checks, for a handle that records
+    /// nothing (a read-only handle's, which is tripped).
+    pub fn set_fence(&self, fence: Arc<crate::lease::WriteFence>) {
+        let _ = self.fence.set(fence);
+    }
+
+    /// Fails once the handle may no longer write; see
+    /// [`crate::lease::WriteFence::check`].
+    ///
+    /// # Errors
+    /// The fence has tripped.
+    pub fn check_fence(&self) -> Result<()> {
+        match self.fence.get() {
+            Some(fence) => fence.check(),
+            None => Ok(()),
+        }
     }
 
     /// Whether this handle records its commits.
@@ -246,6 +290,7 @@ impl ReadCut {
         {
             let mut state = self.state.lock();
             state.units.remove(snapshot_id);
+            state.visible_units.remove(snapshot_id);
             state
                 .loose
                 .retain(|t, v| tables.get(t).is_none_or(|named| *v > *named));
@@ -292,16 +337,21 @@ impl ReadCut {
         let mut state = self.state.lock();
         let slot = state.committed.entry(table.to_string()).or_insert(0);
         *slot = (*slot).max(version);
-        let target = match unit
-            .as_ref()
-            .and_then(|u| state.units.contains_key(u).then_some(u))
-        {
+        let unit = unit.filter(|u| state.units.contains_key(u));
+        let target = match unit.as_ref() {
             Some(unit) => state.units.get_mut(unit).expect("checked"),
             None => &mut state.loose,
         };
         let slot = target.entry(table.to_string()).or_insert(0);
         *slot = (*slot).max(version);
-        state.refresh_view();
+        // A unit's commit is not read until its manifest is published, so
+        // the view only moves for a loose one.
+        if unit
+            .as_ref()
+            .is_none_or(|u| state.visible_units.contains(u))
+        {
+            state.refresh_view();
+        }
     }
 
     /// Forgets `table`: it was dropped, so a table created under its name
@@ -328,23 +378,28 @@ impl ReadCut {
     /// Closed by publishing that manifest, or by dropping the guard.
     #[must_use]
     pub fn open_unit(self: &Arc<Self>, id: &str) -> UnitGuard {
-        self.state
-            .lock()
-            .units
-            .insert(id.to_string(), BTreeMap::new());
-        UnitGuard {
-            cut: Some(Arc::clone(self)),
-            id: id.to_string(),
-        }
+        self.open_unit_with(id, false)
     }
 
-    /// A guard that closes unit `id` when dropped, for the code that ends a
-    /// unit opened elsewhere.
+    /// [`Self::open_unit`] for commits no WAL holds (a bulk load): a unit
+    /// closed without its manifest published leaves its commits loose, for
+    /// the next publish, instead of discarding them.
     #[must_use]
-    pub fn closing_unit(self: &Arc<Self>, id: &str) -> UnitGuard {
+    pub fn open_unit_keeping(self: &Arc<Self>, id: &str) -> UnitGuard {
+        self.open_unit_with(id, true)
+    }
+
+    fn open_unit_with(self: &Arc<Self>, id: &str, keep: bool) -> UnitGuard {
+        let mut state = self.state.lock();
+        state.units.insert(id.to_string(), BTreeMap::new());
+        if keep {
+            state.visible_units.insert(id.to_string());
+        }
+        drop(state);
         UnitGuard {
             cut: Some(Arc::clone(self)),
             id: id.to_string(),
+            keep,
         }
     }
 
@@ -357,10 +412,16 @@ impl ReadCut {
         let mut tables = state.base();
         // Loose commits on a table another open flush has written contain
         // that flush's rows; they wait for it.
+        // A bulk load's unit (visible) is not waited for: its commits are
+        // complete when made and need no WAL replay, so a loose commit on its
+        // table that a manifest names early shows the load early, never part
+        // of a flush.
         let busy: BTreeSet<&String> = state
             .units
             .iter()
-            .filter(|(id, _)| id.as_str() != snapshot_id)
+            .filter(|(id, _)| {
+                id.as_str() != snapshot_id && !state.visible_units.contains(id.as_str())
+            })
             .flat_map(|(_, commits)| commits.keys())
             .collect();
         let mut top: BTreeMap<String, u64> = state
@@ -376,6 +437,17 @@ impl ReadCut {
         tables
     }
 
+    /// Whether a manifest saved now outside any unit would name something
+    /// the published one does not.
+    #[must_use]
+    pub fn has_publishable_loose(&self) -> bool {
+        let stamped = self.stamp("");
+        match self.published() {
+            Some(published) => *published.tables != stamped,
+            None => !stamped.is_empty(),
+        }
+    }
+
     /// Whether loose commits are waiting for a publish.
     #[must_use]
     pub fn has_loose(&self) -> bool {
@@ -387,7 +459,18 @@ impl ReadCut {
     /// a table one of them wrote contains that unit's rows, so it may only be
     /// published once that unit is.
     pub async fn wait_for_open_units(&self) {
-        let open: Vec<String> = self.state.lock().units.keys().cloned().collect();
+        // Flushes only: a bulk load's unit is never waited for (see `stamp`),
+        // since its finalize may itself wait for `flush_lock`, which a
+        // declaration publishing here can hold.
+        let open: Vec<String> = {
+            let state = self.state.lock();
+            state
+                .units
+                .keys()
+                .filter(|id| !state.visible_units.contains(id.as_str()))
+                .cloned()
+                .collect()
+        };
         loop {
             let notified = self.units_closed.notified();
             tokio::pin!(notified);
@@ -399,6 +482,27 @@ impl ReadCut {
                 return;
             }
             notified.await;
+        }
+    }
+
+    /// Taken by a flush stream for its table commits; see the field.
+    pub async fn stream_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.stream).lock_owned().await
+    }
+
+    /// A place in the order flush streams run in, taken at rotation (under
+    /// `flush_lock`, so in rotation order): a stream waits for its turn
+    /// before taking [`Self::stream_lock`], so an earlier flush always
+    /// commits before a later one and its manifest never names a later
+    /// flush's rows.
+    #[must_use]
+    pub fn stream_ticket(self: &Arc<Self>) -> StreamTicket {
+        let turn = self
+            .next_ticket
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        StreamTicket {
+            cut: Some(Arc::clone(self)),
+            turn,
         }
     }
 
@@ -466,24 +570,110 @@ impl ReadCut {
     }
 }
 
+/// A flush stream's place in line; see [`ReadCut::stream_ticket`]. Dropped
+/// (its stream done, failed or never run), it passes the turn on.
+pub struct StreamTicket {
+    cut: Option<Arc<ReadCut>>,
+    turn: u64,
+}
+
+impl StreamTicket {
+    /// Waits until every stream rotated before this one has finished, or
+    /// `limit` passes; see [`TurnWaiter::wait`].
+    pub async fn wait_turn(&self, limit: std::time::Duration) {
+        if let Some(waiter) = self.waiter() {
+            waiter.wait(limit).await;
+        }
+    }
+
+    /// A handle that waits for this ticket's turn without holding it (for a
+    /// caller that must wait before the stream that owns the ticket starts).
+    #[must_use]
+    pub fn waiter(&self) -> Option<TurnWaiter> {
+        self.cut.as_ref().map(|cut| TurnWaiter {
+            cut: Arc::clone(cut),
+            turn: self.turn,
+        })
+    }
+}
+
+/// Waits for a [`StreamTicket`]'s turn; see [`StreamTicket::waiter`].
+#[derive(Clone)]
+pub struct TurnWaiter {
+    cut: Arc<ReadCut>,
+    turn: u64,
+}
+
+impl TurnWaiter {
+    /// Waits until every stream rotated before this one has finished, or
+    /// `limit` passes (a safety valve: an earlier stream that never runs
+    /// would otherwise hold every later one).
+    pub async fn wait(&self, limit: std::time::Duration) {
+        let cut = &self.cut;
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let notified = cut.turn_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if cut.serving.load(std::sync::atomic::Ordering::Acquire) >= self.turn {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                tracing::warn!(
+                    turn = self.turn,
+                    "an earlier flush stream did not finish in time; streaming out of order"
+                );
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for StreamTicket {
+    fn drop(&mut self) {
+        let Some(cut) = self.cut.take() else { return };
+        let mut done = cut.done_out_of_turn.lock();
+        done.insert(self.turn);
+        // Advance past every finished ticket from the one being served.
+        let mut serving = cut.serving.load(std::sync::atomic::Ordering::Acquire);
+        while done.remove(&serving) {
+            serving += 1;
+        }
+        cut.serving
+            .store(serving, std::sync::atomic::Ordering::Release);
+        drop(done);
+        cut.turn_changed.notify_waiters();
+    }
+}
+
 /// Closes a unit when dropped; see [`ReadCut::open_unit`].
 pub struct UnitGuard {
     cut: Option<Arc<ReadCut>>,
     id: String,
-}
-
-impl UnitGuard {
-    /// Leaves the unit open past this guard: a later
-    /// [`ReadCut::closing_unit`] or publish closes it.
-    pub fn keep_open(mut self) {
-        self.cut = None;
-    }
+    keep: bool,
 }
 
 impl Drop for UnitGuard {
     fn drop(&mut self) {
         if let Some(cut) = self.cut.take() {
-            let closed = cut.state.lock().units.remove(&self.id).is_some();
+            let closed = {
+                let mut state = cut.state.lock();
+                let visible = state.visible_units.remove(&self.id);
+                match state.units.remove(&self.id) {
+                    Some(commits) => {
+                        if self.keep && !commits.is_empty() {
+                            let mut loose = std::mem::take(&mut state.loose);
+                            overlay_dropping(&mut loose, &commits, &BTreeSet::new());
+                            state.loose = loose;
+                        }
+                        if visible || self.keep {
+                            state.refresh_view();
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            };
             if closed {
                 cut.units_closed.notify_waiters();
             }
@@ -559,6 +749,14 @@ impl CommitTicket {
         }
         cut.record(&self.table, version);
         Ok(())
+    }
+
+    /// Ends a commit known to have committed nothing (it failed before
+    /// writing), without marking the table uncertain.
+    pub fn abandon(mut self) {
+        if let Some(cut) = self.cut.take() {
+            Self::release(&cut, &self.table);
+        }
     }
 
     /// Records that the table is gone.
@@ -723,6 +921,115 @@ mod tests {
         cut.publish("s2", cut.stamp("s2"));
         assert_eq!(cut.view().unwrap().tables["t"], 1);
         assert_eq!(cut.stamp("s3")["t"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_kept_unit_closed_unpublished_leaves_its_commits_loose() {
+        let cut = recording();
+        cut.adopt("s", map(&[("t", 1)]));
+        let unit = cut.open_unit_keeping("bulk");
+        in_unit("bulk".to_string(), async {
+            cut.begin("t").finish(Some(1), 2).unwrap();
+        })
+        .await;
+        assert_eq!(
+            cut.view().unwrap().tables["t"],
+            2,
+            "a kept unit's commits are read by this handle at once"
+        );
+        assert_eq!(cut.published().unwrap().tables["t"], 1, "not published");
+        drop(unit);
+        assert_eq!(cut.view().unwrap().tables["t"], 2, "loose now");
+        assert_eq!(cut.stamp("next")["t"], 2);
+        let flush = cut.open_unit("flush");
+        in_unit("flush".to_string(), async {
+            cut.begin("t").finish(Some(2), 3).unwrap();
+        })
+        .await;
+        drop(flush);
+        assert_eq!(
+            cut.stamp("next")["t"],
+            2,
+            "a flush unit's commits are not kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unit_commit_does_not_rebuild_the_view() {
+        let cut = recording();
+        cut.adopt("s", map(&[("t", 1)]));
+        let before = cut.view().unwrap().tables;
+        let _unit = cut.open_unit("f");
+        in_unit("f".to_string(), async {
+            cut.begin("t").finish(Some(1), 2).unwrap();
+        })
+        .await;
+        assert!(Arc::ptr_eq(&before, &cut.view().unwrap().tables));
+    }
+
+    /// Streams take their turn in rotation order, whichever is polled first.
+    #[tokio::test]
+    async fn streams_run_in_rotation_order() {
+        let cut = recording();
+        let first = cut.stream_ticket();
+        let second = cut.stream_ticket();
+        let waiting = {
+            let second_turn = tokio::spawn(async move {
+                second.wait_turn(Duration::from_secs(5)).await;
+                second
+            });
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert!(!second_turn.is_finished(), "the later stream waits");
+            second_turn
+        };
+        first.wait_turn(Duration::from_secs(5)).await;
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A ticket dropped out of turn (its stream ended, or never ran, before
+    /// an earlier one's) passes the turn on once the earlier one ends; the
+    /// turn wait gives up at its limit.
+    #[tokio::test]
+    async fn tickets_dropped_out_of_turn_advance_in_order() {
+        let cut = recording();
+        let first = cut.stream_ticket();
+        let second = cut.stream_ticket();
+        let third = cut.stream_ticket();
+        drop(second);
+        let waited = tokio::time::Instant::now();
+        third.wait_turn(Duration::from_millis(100)).await;
+        assert!(
+            waited.elapsed() >= Duration::from_millis(100),
+            "the first stream still runs: the third waits until the limit"
+        );
+        drop(first);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            third.wait_turn(Duration::from_secs(5)),
+        )
+        .await
+        .expect("the first and the dropped second passed the turn on");
+    }
+
+    /// A bulk load's unit is neither waited for nor makes a table busy.
+    #[tokio::test]
+    async fn a_bulk_unit_blocks_no_publish() {
+        let cut = recording();
+        cut.adopt("s", map(&[("t", 1)]));
+        let _bulk = cut.open_unit_keeping("bulk");
+        in_unit("bulk".to_string(), async {
+            cut.begin("t").finish(Some(1), 2).unwrap();
+        })
+        .await;
+        cut.begin("t").finish(Some(2), 3).unwrap(); // loose, over the load
+        tokio::time::timeout(Duration::from_secs(1), cut.wait_for_open_units())
+            .await
+            .expect("not waited for");
+        assert_eq!(cut.stamp("x")["t"], 3);
     }
 
     #[test]

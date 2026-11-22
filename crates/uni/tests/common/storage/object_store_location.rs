@@ -882,6 +882,39 @@ async fn a_backup_to_a_local_directory_opens_as_a_store() -> Result<()> {
     assert_backup_opens(dest.to_str().unwrap()).await
 }
 
+/// `BACKUP TO … WITH {…}` parses and runs; an option that is not a string,
+/// number or boolean is refused before anything is copied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_takes_destination_options() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = backup_source(dir.path().join("db").to_str().unwrap()).await?;
+    let refused = dir.path().join("refused");
+    let err = db
+        .session()
+        .run(&format!(
+            "BACKUP TO '{}' WITH {{client_max_retries: [1]}}",
+            refused.display()
+        ))
+        .await
+        .expect_err("a list-valued option was accepted");
+    assert!(err.to_string().contains("client_max_retries"), "{err}");
+    assert!(!refused.exists(), "a refused backup copied something");
+    let dest = dir.path().join("backup");
+    let rows = db
+        .session()
+        .run(&format!(
+            "BACKUP TO '{}' WITH {{client_max_retries: 2, allow_http: true}}",
+            dest.display()
+        ))
+        .await?;
+    assert_eq!(
+        rows.rows()[0].value("status"),
+        Some(&uni_db::Value::String("Backup completed".into()))
+    );
+    drop(db);
+    assert_backup_opens(dest.to_str().unwrap()).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_backup_under_a_prefix_stays_under_it_and_opens() -> Result<()> {
     let dir = tempfile::tempdir()?;

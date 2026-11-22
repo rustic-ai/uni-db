@@ -455,6 +455,8 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
     max_memory: Option<usize>,
     principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
 ) -> Result<LocyResult> {
+    // A read-only handle picks up newer flushes, as a Cypher query does.
+    db.storage.refresh_read_cut().await;
     // Compile with the given registry
     let (ast, parameters) = match uni_cypher::parse_locy_with_parameters(program) {
         Ok(parsed) => parsed,
@@ -842,6 +844,7 @@ impl<'a> LocyEngine<'a> {
             program,
             &compiled,
         )?;
+        self.db.storage.refresh_read_cut().await;
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => Err(UniError::Cancelled),

@@ -184,8 +184,19 @@ impl LanceDbBackend {
     }
 
     /// Starts a commit on `table` against the read cut, if one is attached.
-    fn begin_commit(&self, table: &str) -> Option<crate::storage::read_cut::CommitTicket> {
-        self.read_cut.get().map(|cut| cut.begin(table))
+    ///
+    /// Fails, before anything is committed, once the handle's write fence
+    /// has tripped (a lost lease, a closed or read-only handle): every Lance
+    /// commit passes here, so a stale writer's background flush, compaction
+    /// or index build commits nothing.
+    fn begin_commit(&self, table: &str) -> Result<Option<crate::storage::read_cut::CommitTicket>> {
+        match self.read_cut.get() {
+            Some(cut) => {
+                cut.check_fence()?;
+                Ok(Some(cut.begin(table)))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Opens `table` at its newest version to commit to it, checking that
@@ -197,7 +208,7 @@ impl LanceDbBackend {
         lance::Dataset,
         Option<crate::storage::read_cut::CommitTicket>,
     )> {
-        let ticket = self.begin_commit(table);
+        let ticket = self.begin_commit(table)?;
         let dataset = self.directory.open(table).await?;
         if let Some(ticket) = &ticket {
             ticket.check_read(dataset.version().version)?;
@@ -250,7 +261,7 @@ impl LanceDbBackend {
         }
         let uri = self.directory.dataset_uri(table);
         let mut params = self.directory.write_params(mode);
-        let ticket = self.begin_commit(table);
+        let ticket = self.begin_commit(table)?;
         let mut read = None;
         // Resolve once, as Dataset::write does internally. Existing datasets
         // retain their exact format; only absent datasets use Uni's 2.1 policy.
@@ -540,6 +551,13 @@ pub(crate) async fn staged_append_version(
 
 #[async_trait]
 impl StorageBackend for LanceDbBackend {
+    fn check_write_fence(&self) -> Result<()> {
+        match self.read_cut.get() {
+            Some(cut) => cut.check_fence(),
+            None => Ok(()),
+        }
+    }
+
     // ========================
     // Table Lifecycle
     // ========================
@@ -636,7 +654,7 @@ impl StorageBackend for LanceDbBackend {
     async fn drop_table(&self, name: &str) -> Result<()> {
         self.ensure_writable(name)?;
         self.schema_cache.remove(name);
-        let ticket = self.begin_commit(name);
+        let ticket = self.begin_commit(name)?;
         self.directory
             .remove_table(name)
             .await
@@ -910,7 +928,7 @@ impl StorageBackend for LanceDbBackend {
             // Serialize against `write` / `merge_insert` / `create_table`,
             // which take this same per-table mutex internally.
             let _guard = self.lock_table_for_write(table_name).await;
-            let ticket = self.begin_commit(table_name);
+            let ticket = self.begin_commit(table_name)?;
 
             // Reopen *inside* the lock. `add_columns` commits an
             // `Operation::Merge` against the manifest version captured when
@@ -1072,7 +1090,7 @@ impl StorageBackend for LanceDbBackend {
         let _guard = lock.lock().await;
         // Begun before the open, so a commit of this handle overlapping it is
         // known as one.
-        let ticket = self.begin_commit(table_name);
+        let ticket = self.begin_commit(table_name)?;
         let dataset = Arc::new(self.directory.open(table_name).await?);
         self.commit_staged_append(table_name, dataset, fragments, ticket)
             .await
@@ -1136,7 +1154,7 @@ impl StorageBackend for LanceDbBackend {
         // record can interleave between the check and the commit.
         let lock = self.write_lock_for(table_name);
         let _guard = lock.lock().await;
-        let ticket = self.begin_commit(table_name);
+        let ticket = self.begin_commit(table_name)?;
         let dataset = Arc::new(self.directory.open(table_name).await?);
 
         if let Some(landed) = staged_append_version(&dataset, &paths, published_after).await {
@@ -1255,7 +1273,7 @@ impl StorageBackend for LanceDbBackend {
 
     async fn rollback_table(&self, table_name: &str, target_version: u64) -> Result<()> {
         self.ensure_writable(table_name)?;
-        let ticket = self.begin_commit(table_name);
+        let ticket = self.begin_commit(table_name)?;
         // lancedb's protocol was `checkout(v)` then `restore()`: pin the handle
         // to the target version, then commit that as a new version. Opening
         // directly at the version is the same first step, and `restore` is

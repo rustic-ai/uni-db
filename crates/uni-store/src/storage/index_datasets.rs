@@ -95,10 +95,27 @@ impl DatasetCut {
         }
     }
 
-    /// Starts a commit on the dataset; see [`ReadCut::begin`].
-    #[must_use]
-    pub fn begin(&self) -> Option<CommitTicket> {
-        self.cut.as_ref().map(|cut| cut.begin(&self.key))
+    /// Starts a commit on the dataset; see [`ReadCut::begin`]. Fails first
+    /// once the handle's write fence has tripped, so no index-dataset commit
+    /// skips it.
+    ///
+    /// # Errors
+    /// The fence has tripped.
+    pub fn begin(&self) -> Result<Option<CommitTicket>> {
+        self.check_fence()?;
+        Ok(self.cut.as_ref().map(|cut| cut.begin(&self.key)))
+    }
+
+    /// Fails once the handle's write fence has tripped; see
+    /// [`ReadCut::check_fence`].
+    ///
+    /// # Errors
+    /// The fence has tripped.
+    pub fn check_fence(&self) -> Result<()> {
+        match &self.cut {
+            Some(cut) => cut.check_fence(),
+            None => Ok(()),
+        }
     }
 
     /// Records a version of the dataset this handle produced without a

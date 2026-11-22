@@ -91,9 +91,13 @@ pub struct SnapshotManager {
     /// holds, and moving `latest` to a manifest publishes them. Unset for a
     /// fork, whose manifests name no tables.
     read_cut: std::sync::OnceLock<Arc<crate::storage::read_cut::ReadCut>>,
+    /// Bytes of a compare-and-swap write that failed without a verdict, by
+    /// path: it may have landed, and the next swap that finds it stored
+    /// adopts it instead of taking it for another writer's.
+    unconfirmed: parking_lot::Mutex<HashMap<String, Bytes>>,
     /// The cut each manifest saved by this manager named, until `latest`
-    /// moves to it.
-    /// Each entry also names the published manifest it was stamped on.
+    /// moves to it. Each entry also names the published manifest it was
+    /// stamped on.
     stamped: parking_lot::Mutex<HashMap<String, Stamp>>,
 }
 
@@ -123,6 +127,7 @@ impl SnapshotManager {
             latest_version: parking_lot::Mutex::new(Expected::Unknown),
             publish: tokio::sync::Mutex::new(()),
             read_cut: std::sync::OnceLock::new(),
+            unconfirmed: parking_lot::Mutex::new(HashMap::new()),
             stamped: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -187,7 +192,28 @@ impl SnapshotManager {
         bytes: Bytes,
         expected: Expected,
     ) -> Result<Expected> {
-        let mode = match &expected {
+        let mut expected = expected;
+        // At most twice: a second attempt follows adopting this handle's own
+        // earlier write that failed without a verdict and landed.
+        for _ in 0..2 {
+            match self.put_expecting_once(path, &bytes, &expected).await? {
+                Ok(written) => return Ok(written),
+                Err(ours) => expected = ours,
+            }
+        }
+        anyhow::bail!("{path}: the compare-and-swap did not settle")
+    }
+
+    /// One swap attempt: `Ok(Ok(version))` written, `Ok(Err(version))` this
+    /// handle's own unconfirmed write found stored at `version` (swap again
+    /// from it).
+    async fn put_expecting_once(
+        &self,
+        path: &ObjectStorePath,
+        bytes: &Bytes,
+        expected: &Expected,
+    ) -> Result<std::result::Result<Expected, Expected>> {
+        let mode = match expected {
             Expected::Unknown => object_store::PutMode::Overwrite,
             Expected::Absent => object_store::PutMode::Create,
             Expected::Version(v) => object_store::PutMode::Update(v.clone()),
@@ -201,31 +227,58 @@ impl SnapshotManager {
         )
         .await
         {
-            Ok(result) => Ok(Expected::Version(object_store::UpdateVersion {
-                e_tag: result.e_tag,
-                version: result.version,
-            })),
+            Ok(result) => {
+                // Test seam: the write landed and its acknowledgement was
+                // lost (a timeout, a dropped connection).
+                #[cfg(feature = "failpoints")]
+                if fail::eval("snapshot::swap-ack-lost", |_| ()).is_some() {
+                    self.unconfirmed
+                        .lock()
+                        .insert(path.as_ref().to_string(), bytes.clone());
+                    anyhow::bail!("injected lost acknowledgement for {path}");
+                }
+                self.unconfirmed.lock().remove(path.as_ref());
+                Ok(Ok(Expected::Version(object_store::UpdateVersion {
+                    e_tag: result.e_tag,
+                    version: result.version,
+                })))
+            }
             Err(e) => match e.downcast_ref::<object_store::Error>() {
                 Some(
                     object_store::Error::NotImplemented { .. }
                     | object_store::Error::NotSupported { .. },
                 ) => {
-                    put_with_timeout(&self.store, path, bytes, DEFAULT_TIMEOUT).await?;
-                    Ok(Expected::Unknown)
+                    put_with_timeout(&self.store, path, bytes.clone(), DEFAULT_TIMEOUT).await?;
+                    Ok(Ok(Expected::Unknown))
                 }
                 Some(
                     object_store::Error::Precondition { .. }
                     | object_store::Error::AlreadyExists { .. },
                 ) => {
                     // This handle's own earlier attempt may have landed with its
-                    // response lost (a retried request then sees itself).
+                    // response lost (a retried request then sees itself), or an
+                    // earlier write that failed without a verdict may have.
                     if let Ok(current) = self.store.get(path).await {
                         let version = object_store::UpdateVersion {
                             e_tag: current.meta.e_tag.clone(),
                             version: current.meta.version.clone(),
                         };
-                        if current.bytes().await.is_ok_and(|held| held == bytes) {
-                            return Ok(Expected::Version(version));
+                        let held = current.bytes().await.ok();
+                        if held.as_ref() == Some(bytes) {
+                            self.unconfirmed.lock().remove(path.as_ref());
+                            return Ok(Ok(Expected::Version(version)));
+                        }
+                        let ours = {
+                            let mut unconfirmed = self.unconfirmed.lock();
+                            let ours =
+                                held.is_some() && unconfirmed.get(path.as_ref()) == held.as_ref();
+                            if ours {
+                                unconfirmed.remove(path.as_ref());
+                            }
+                            ours
+                        };
+                        if ours {
+                            return Ok(Err(Expected::Version(version)));
                         }
                     }
                     let reason = format!("{path} was changed by another writer");
@@ -234,7 +287,13 @@ impl SnapshotManager {
                     }
                     anyhow::bail!("{reason}; this handle has stopped writing")
                 }
-                _ => Err(e),
+                // No verdict: it may have landed.
+                _ => {
+                    self.unconfirmed
+                        .lock()
+                        .insert(path.as_ref().to_string(), bytes.clone());
+                    Err(e)
+                }
             },
         }
     }
@@ -253,6 +312,7 @@ impl SnapshotManager {
             latest_version: parking_lot::Mutex::new(Expected::Unknown),
             publish: tokio::sync::Mutex::new(()),
             read_cut: std::sync::OnceLock::new(),
+            unconfirmed: parking_lot::Mutex::new(HashMap::new()),
             stamped: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -839,6 +899,34 @@ pub fn fsync_catalog_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pointer write that landed but reported an error is this handle's:
+    /// the next swap adopts it rather than fencing a healthy writer.
+    #[cfg(feature = "failpoints")]
+    #[tokio::test]
+    async fn recovery_from_a_landed_write_that_reported_an_error_does_not_fence() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let a = SnapshotManager::new(store.clone());
+        let fence = crate::lease::WriteFence::new();
+        a.set_write_fence(Arc::clone(&fence));
+        a.set_latest_snapshot("s1").await.unwrap();
+        fail::cfg("snapshot::swap-ack-lost", "1*return").unwrap();
+        assert!(
+            a.set_latest_snapshot("s2").await.is_err(),
+            "the ack was lost"
+        );
+        fail::cfg("snapshot::swap-ack-lost", "off").unwrap();
+        a.set_latest_snapshot("s3").await.unwrap();
+        assert!(!fence.is_tripped());
+        let held = store
+            .get(&ObjectStorePath::from("catalog/latest"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&held[..], b"s3");
+    }
 
     /// The `latest` pointer is compare-and-swapped: a manager whose view of it
     /// is stale cannot move it, and its fence trips.

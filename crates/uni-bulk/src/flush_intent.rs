@@ -313,12 +313,15 @@ pub(crate) async fn write_committed(
     version: Option<u64>,
     endpoints_checked: bool,
     pending_rows: Option<usize>,
+    publish: &[StagedTablePublish],
 ) -> Result<()> {
     let intent = BulkFlushIntent {
         phase: BulkIntentPhase::Committed,
         tables: table_map(tables),
         snapshot_id: snapshot_id.map(str::to_string),
-        publish: None,
+        // Kept: recovery reads from them the version each table's publish
+        // landed at, for the read cut (the load is in no WAL).
+        publish: (!publish.is_empty()).then(|| publish.to_vec()),
         labels,
         version,
         endpoints_checked,
@@ -760,6 +763,14 @@ async fn finish_committed(storage: &StorageManager, intent: &BulkFlushIntent) ->
     // The commit's own index step may not have finished; the labels' indexes
     // may not cover the load's rows.
     mark_indexes_stale(storage, &intent.labels).await?;
+    // Every table is published; this records, for the read cut, the version
+    // each one's publish landed at (it publishes nothing). The open's
+    // reconciliation then publishes them before it discards anything no
+    // manifest names, since the load's own manifest may never have been
+    // saved or published, and no WAL holds the load.
+    if let Some(publish) = &intent.publish {
+        publish_records(storage, &intent.tables, publish, |_| Ok(())).await?;
+    }
     let Some(snapshot_id) = &intent.snapshot_id else {
         // The commit could not save the load's snapshot.
         if let Some(version) = intent.version {

@@ -201,6 +201,13 @@ async fn index_builder_tick(weak: &Weak<UniInner>, threshold: u64) -> anyhow::Re
             if scope.has_fork_local_index(label, column, *kind) {
                 continue;
             }
+            // A branch index build commits a branch version without passing
+            // the fork backend's fence check: a handle that lost the store
+            // (or a read-only one) builds nothing.
+            if let Err(e) = fork_inner.storage.write_fence().check() {
+                debug!(fork = %fork_info.name, "skipping fork-local index builds: {e}");
+                break;
+            }
             match uni_store::fork::index_builder::build_fork_local_index(
                 &scope,
                 branching.as_ref(),

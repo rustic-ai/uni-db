@@ -121,6 +121,15 @@ impl<'a> ForkBuilder<'a> {
                     }
                 }
             }
+            Err(UniError::ForkNotFound { .. }) if parent.db.is_read_only() => {
+                // Creating a fork writes the store (the registry, branches, an
+                // allocator), which a read-only handle never does: the
+                // writer holds the store, and a registry write from here
+                // would make it fence itself.
+                return Err(UniError::ReadOnly {
+                    operation: format!("create fork '{}' from a read-only handle", self.name),
+                });
+            }
             Err(UniError::ForkNotFound { .. }) => {
                 // Resolve effective TTL: builder override > config default > None.
                 let effective_ttl = self.ttl.or(parent.db.config.fork_default_ttl);

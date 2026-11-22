@@ -149,6 +149,14 @@ pub fn indexes_needing_rebuild(current: &[IndexDefinition], point: &RestorePoint
     out.into_iter().collect()
 }
 
+/// The `restore::table-fail` seam: `Err` when it is configured to return.
+fn injected_rollback_failure() -> Result<()> {
+    fail::fail_point!("restore::table-fail", |_| Err(anyhow!(
+        "injected rollback failure"
+    )));
+    Ok(())
+}
+
 /// Rewind every table, index dataset and the catalog to `point`.
 ///
 /// Idempotent, so an interrupted restore converges when it is run again:
@@ -192,6 +200,9 @@ pub async fn rewind_storage(
             },
             None => backend.drop_table(table).await,
         };
+        // Test-only seam (no-op without the `failpoints` feature): a table
+        // whose rollback fails.
+        let result = injected_rollback_failure().and(result);
         if let Err(e) = result {
             failures.push(format!("{table}: {e:#}"));
         }
@@ -410,12 +421,20 @@ pub async fn recover_interrupted_restore(storage: &StorageManager) -> Result<boo
                 intent.snapshot_id
             )
         })?;
-    rewind_storage(storage, &point, &snapshot).await?;
-    // Saved again: the manifest names the rewound tables' versions (the
-    // read cut), known only now.
-    let manifest = sm.load_snapshot(&intent.manifest_id).await?;
-    sm.save_snapshot(&manifest).await?;
-    sm.set_latest_snapshot(&intent.manifest_id).await?;
+    // A read-cut unit named by the manifest it publishes, as in
+    // `Writer::restore_snapshot`.
+    let unit = storage.read_cut().open_unit(&intent.manifest_id);
+    let rewind: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =
+        Box::pin(async {
+            rewind_storage(storage, &point, &snapshot).await?;
+            // Saved again: the manifest names the rewound tables' versions
+            // (the read cut), known only now.
+            let manifest = sm.load_snapshot(&intent.manifest_id).await?;
+            sm.save_snapshot(&manifest).await?;
+            sm.set_latest_snapshot(&intent.manifest_id).await
+        });
+    crate::storage::read_cut::in_unit(intent.manifest_id.clone(), rewind).await?;
+    drop(unit);
     finish(storage, &intent).await?;
     storage.reload_vid_labels_index().await?;
     Ok(true)

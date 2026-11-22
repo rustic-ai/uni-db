@@ -25,6 +25,11 @@ struct CounterManifest {
     next_vid_batch: u64,
     /// Next EID value that needs to be reserved (end of current batch)
     next_eid_batch: u64,
+    /// The allocator that last wrote the file. Two allocators reserving the
+    /// same batch write the same counters; this tells one's own landed write
+    /// (an acknowledgement lost) from the other's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    writer: String,
 }
 
 /// Internal allocator state - tracks current position within reserved batch.
@@ -90,7 +95,8 @@ impl IdAllocator {
         batch_size: u64,
         options: AllocatorOptions,
     ) -> Result<Self> {
-        let (manifest, version) = load_manifest(&store, &path).await?;
+        let (mut manifest, version) = load_manifest(&store, &path).await?;
+        manifest.writer = uuid::Uuid::new_v4().to_string();
 
         // Start allocating from where the last batch ended, or the floor.
         let current_vid = manifest.next_vid_batch.max(options.floor.0);
@@ -294,6 +300,7 @@ impl IdAllocator {
         let manifest = CounterManifest {
             next_vid_batch: vid_hwm,
             next_eid_batch: eid_hwm,
+            writer: String::new(),
         };
         let bytes = Bytes::from(serde_json::to_vec(&manifest)?);
         put_with_timeout(&store, &path, bytes, DEFAULT_TIMEOUT).await?;
@@ -721,6 +728,42 @@ mod tests {
         let c = IdAllocator::new(store, path, 10).await.unwrap();
         let next = c.allocate_vid().await.unwrap().as_u64();
         assert!(next > *b_ids.iter().max().unwrap() && next > *a_ids.iter().max().unwrap());
+    }
+
+    /// Two allocators that read the same file and reserve the same batch
+    /// write the same counters: the one whose swap loses must not take the
+    /// other's write for its own landed one, or both hand out that batch.
+    #[tokio::test]
+    async fn a_rivals_identical_reservation_is_not_adopted() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("id.json");
+        let seed = IdAllocator::new(store.clone(), path.clone(), 10)
+            .await
+            .unwrap();
+        seed.allocate_vid().await.unwrap();
+        drop(seed);
+        // Both read the same version of the file.
+        let a = IdAllocator::new(store.clone(), path.clone(), 10)
+            .await
+            .unwrap();
+        let b = IdAllocator::new(store.clone(), path.clone(), 10)
+            .await
+            .unwrap();
+        let a_ids: Vec<u64> = a
+            .allocate_vids(10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64())
+            .collect();
+        match b.allocate_vids(10).await {
+            Ok(b_ids) => {
+                for id in b_ids {
+                    assert!(!a_ids.contains(&id.as_u64()), "both handed out {id:?}");
+                }
+            }
+            Err(e) => assert!(format!("{e:#}").contains("concurrent writer"), "{e:#}"),
+        }
     }
 
     #[tokio::test]

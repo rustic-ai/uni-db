@@ -101,6 +101,28 @@
   a manifest names it. Never call it from inside a flush (it returns at once there).
 - **Never roll a table back mid-session on suspicion.** A version this handle did not
   write trips the fence instead; the WAL still holds the handle's unpublished commits.
+- **A multi-table write that publishes its own manifest is a unit.** Flushes, bulk
+  publishes and restores run their table commits under `read_cut::in_unit(manifest_id)`
+  with the unit guard held until the pointer moves. Flush streams also take a
+  `ReadCut::stream_ticket` at rotation (under `flush_lock`) and then `stream_lock`, so they
+  commit one at a time in rotation order; bulk publishes take neither, and their (keeping)
+  units are never waited for and make no table busy. Commits made outside one are loose.
+  A unit's guard must travel with whatever finalizes it (a bulk re-drive's included), so
+  a dropped future closes the unit.
+- **A commit no WAL holds must not be lost by a rollback at open.** Use
+  `open_unit_keeping` for it (bulk), or make the recovery that completes it record it.
+
+## Single writer and hybrid lineage — invariants
+- **Every catalog write is a compare-and-swap from the version this handle last read
+  or wrote** (`catalog/latest`, schema, named snapshots, fork registry, WAL claim,
+  lease). A lost swap trips the fence; a write that failed without a verdict is
+  remembered and adopted if later found stored. Never add a plain `put` of one.
+- **Never write `catalog/wal_claim.json`, `wal_id.json` or `writer_lease.json`
+  directly**: go through `wal_lineage` and `lease`.
+- **A read-only handle writes nothing**: its fence starts tripped, and fork
+  create/drop on it fail with `ReadOnly`. Do not add a write path that skips the fence.
+- **Background jobs check the fence with `check()`, never `is_tripped()`**: only
+  `check()` evaluates the lease deadline.
 
 ## Fork system — current invariants (post Phase 7)
 

@@ -460,6 +460,13 @@ pub(crate) fn storage_error(e: anyhow::Error) -> UniError {
 }
 
 impl UniInner {
+    /// Whether this handle (or the read-only handle a fork was opened from)
+    /// writes nothing. A fork of a read-only handle has a writer of its own,
+    /// whose commits its fence refuses.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.writer.is_none() || self.storage.write_fence().is_read_only()
+    }
+
     /// Copy a label's rows from the main vertex table into its label table
     /// right after the label entered the live catalog (#304).
     ///
@@ -787,9 +794,15 @@ impl UniInner {
         // open never looks at. A no-op when no marker is present. Its events
         // are delivered as an ordinary fork load's are (triggers; a fork has
         // no CDC), by the caller.
-        let recovered_loads = uni_bulk::recover_interrupted_bulk_load(&forked_storage)
-            .await
-            .map_err(UniError::Internal)?;
+        // Skipped on a read-only database (no primary writer), which writes
+        // nothing: a writable open completes the load.
+        let recovered_loads = if !self.is_read_only() {
+            uni_bulk::recover_interrupted_bulk_load(&forked_storage)
+                .await
+                .map_err(UniError::Internal)?
+        } else {
+            Default::default()
+        };
 
         let prop_manager = Arc::new(PropertyManager::with_plugin_registry(
             forked_storage.clone(),
@@ -885,7 +898,7 @@ impl UniInner {
         // overlay write). Record it now, before a flush can move its edges
         // into `deltas_{type}_*` where only the name finds them. Skipped on a
         // read-only database (no primary writer), which persists nothing.
-        if self.writer.is_some() {
+        if !self.is_read_only() {
             crate::api::fork::record_fork_schemaless_edge_types(&scope, &merged_schema)
                 .await
                 .map_err(UniError::Internal)?;
@@ -897,9 +910,13 @@ impl UniInner {
             .map_err(UniError::Internal)?;
         // As on the primary: a fork load completed by recovery above has its
         // edges' declared endpoints checked once the fork's WAL is replayed.
-        uni_bulk::check_recovered_bulk_endpoints(&forked_storage, &forked_writer_arc, true)
-            .await
-            .map_err(UniError::Internal)?;
+        uni_bulk::check_recovered_bulk_endpoints(
+            &forked_storage,
+            &forked_writer_arc,
+            !self.is_read_only(),
+        )
+        .await
+        .map_err(UniError::Internal)?;
         if replayed > 0 {
             tracing::info!(
                 fork_id = %scope.fork_id(),
@@ -1713,6 +1730,32 @@ impl Drop for Uni {
 
 /// A storage error as its typed `UniError` when it carries one (a fenced
 /// writer, a conflict), `Internal` otherwise.
+/// Claims the store for the WAL `wal_id` (see
+/// `uni_store::runtime::wal_lineage`), swapping from `replacing`; a claim
+/// another writer replaced in the meantime trips the fence.
+async fn claim_store(
+    storage: &StorageManager,
+    data_store: &Arc<dyn ObjectStore>,
+    wal_id: &str,
+    wal: &str,
+    home: Option<&wal_lineage::WalHome>,
+    replacing: Option<&wal_lineage::Claim>,
+) -> Result<()> {
+    storage.write_fence().check().map_err(typed_or_internal)?;
+    match wal_lineage::claim(data_store, wal_id, wal, home, replacing).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.downcast_ref::<wal_lineage::ClaimLost>().is_some() => {
+            storage.write_fence().trip(e.to_string());
+            Err(storage
+                .write_fence()
+                .check()
+                .err()
+                .map_or_else(|| UniError::Internal(e), typed_or_internal))
+        }
+        Err(e) => Err(UniError::Internal(e)),
+    }
+}
+
 fn typed_or_internal(e: anyhow::Error) -> UniError {
     match e.downcast::<UniError>() {
         Ok(typed) => typed,
@@ -2198,8 +2241,14 @@ impl UniBuilder {
             };
 
         // One writer per store: take the lock (local) or lease (object store)
-        // before the first write. Read-only handles take neither.
-        let fence = uni_store::lease::WriteFence::new();
+        // before the first write. Read-only handles take neither, and their
+        // fence starts tripped: storage, the fork registry and every Lance
+        // commit refuse a write through them.
+        let fence = if self.read_only {
+            uni_store::lease::WriteFence::read_only()
+        } else {
+            uni_store::lease::WriteFence::new()
+        };
         let mut write_lease = self.write_lease.take();
         let writer_hold = if self.read_only {
             None
@@ -2592,6 +2641,7 @@ impl UniBuilder {
         // resumes from names, before the WAL replays: what is above them was
         // never published (a crashed flush's commits, which the replay writes
         // again, or a stale writer's). A reader reads at those versions.
+        let mut stale_index_labels: Vec<String> = Vec::new();
         if self.read_only {
             if let Some(manifest) = recovered_manifest.as_ref() {
                 storage
@@ -2599,8 +2649,14 @@ impl UniBuilder {
                     .publish(&manifest.snapshot_id, manifest.tables.clone());
             }
         } else {
-            storage
+            let undone = storage
                 .reconcile_read_cut(recovered_manifest.as_ref())
+                .await
+                .map_err(UniError::Internal)?;
+            // An index recorded built over a version the reconcile rolled
+            // back is rebuilt.
+            stale_index_labels = storage
+                .mark_indexes_stale(&undone)
                 .await
                 .map_err(UniError::Internal)?;
         }
@@ -2625,7 +2681,15 @@ impl UniBuilder {
             let claimed = wal_lineage::load_claim(&data_store)
                 .await
                 .map_err(UniError::Internal)?;
-            if claimed.is_some() && claimed != local_wal_id {
+            // The directory this WAL lives in: a copy of it (a VM image, an
+            // rsync to a standby) carries the WAL's id but not its home.
+            let home = wal_lineage::WalHome::of(Path::new(&uri));
+            let followed = match (&claimed, local_wal_id.as_deref()) {
+                (Some(claim), Some(id)) => claim.names(id, Some(&home)),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if !followed {
                 let segments = wal_lineage::segments_with_commits(&wal_store)
                     .await
                     .map_err(UniError::Internal)?;
@@ -2672,12 +2736,34 @@ impl UniBuilder {
             // committed, so an earlier writer's WAL is recognised as such even
             // if this one never flushes.
             if let Some(wal_id) = local_wal_id.as_deref().filter(|_| !self.read_only)
-                && claimed.as_deref() != Some(wal_id)
+                && claimed
+                    .as_ref()
+                    .is_none_or(|c| c.wal_id != wal_id || c.home.as_ref() != Some(&home))
             {
-                storage.write_fence().check().map_err(typed_or_internal)?;
-                wal_lineage::claim(&data_store, wal_id, &wal_dir)
+                claim_store(
+                    &storage,
+                    &data_store,
+                    wal_id,
+                    &wal_dir,
+                    Some(&home),
+                    claimed.as_ref(),
+                )
+                .await?;
+            }
+        } else if !self.read_only {
+            // The store's WAL is shared by every writer, so nothing here is
+            // checked. But a hybrid writer may have claimed the store: it
+            // must find, on return, that the store has moved on.
+            let claimed = wal_lineage::load_claim(&data_store)
+                .await
+                .map_err(UniError::Internal)?;
+            if let Some(claim) = claimed {
+                let wal_id = wal_lineage::load_or_create(&wal_store)
                     .await
                     .map_err(UniError::Internal)?;
+                if claim.wal_id != wal_id || claim.home.is_some() {
+                    claim_store(&storage, &data_store, &wal_id, "wal", None, Some(&claim)).await?;
+                }
             }
         }
 
@@ -2938,6 +3024,9 @@ impl UniBuilder {
                 .start_background_worker(shutdown_handle.subscribe());
             track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
 
+            if !stale_index_labels.is_empty() {
+                rebuild_manager.enqueue(std::mem::take(&mut stale_index_labels));
+            }
             writer
                 .set_index_rebuild_manager(Arc::clone(&rebuild_manager))
                 .map_err(UniError::Internal)?;
@@ -3053,7 +3142,7 @@ impl UniBuilder {
         // its flushed half alone, with no error.
         let l0_manager_field = Some(Arc::clone(&writer.l0_manager));
         // Lift the id allocator out for the same reason as the L0 tier above.
-        // Forking a read-only handle still needs the parent's VID/EID
+        // A fork (created from a writable handle, opened from any) needs the parent's VID/EID
         // high-water marks to bootstrap the fork's allocator above them;
         // without them the fork started allocating at 0 and its first writes
         // were shadowed by the parent's pre-existing rows at the same VID

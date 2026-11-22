@@ -141,6 +141,33 @@ impl WriteLeaseProvider for SharedProvider {
     }
 }
 
+/// Checks the lease timing; `with_skew` for the built-in remote lease, whose
+/// holder stops at expiry minus the skew allowance (an OS lock and a custom
+/// provider do not).
+fn check_timing(settings: &LeaseSettings, with_skew: bool) -> Result<()> {
+    if settings.renew_interval.is_zero() || settings.renew_interval >= settings.ttl {
+        return Err(UniError::Internal(anyhow::anyhow!(
+            "UniConfig::writer_lease.renew_interval ({:?}) must be above zero and below its \
+             ttl ({:?}), or the lease lapses between renewals",
+            settings.renew_interval,
+            settings.ttl
+        )));
+    }
+    // The holder stops writing at expiry minus the skew allowance; a renewal
+    // must land before that, or a healthy writer fences itself between
+    // renewals.
+    if with_skew && settings.clock_skew + settings.renew_interval >= settings.ttl {
+        return Err(UniError::Internal(anyhow::anyhow!(
+            "UniConfig::writer_lease: clock_skew ({:?}) plus renew_interval ({:?}) must be \
+             below ttl ({:?}), or the writer stops before its next renewal",
+            settings.clock_skew,
+            settings.renew_interval,
+            settings.ttl
+        )));
+    }
+    Ok(())
+}
+
 /// Takes the store for writing before anything is written to it.
 ///
 /// `lease` is the configured strategy; a `Custom` provider is moved into the
@@ -159,14 +186,7 @@ pub(crate) async fn acquire(
         },
         Err(e) => UniError::Internal(e),
     };
-    if settings.renew_interval.is_zero() || settings.renew_interval >= settings.ttl {
-        return Err(UniError::Internal(anyhow::anyhow!(
-            "UniConfig::writer_lease.renew_interval ({:?}) must be above zero and below its \
-             ttl ({:?}), or the lease lapses between renewals",
-            settings.renew_interval,
-            settings.ttl
-        )));
-    }
+    check_timing(&settings, false)?;
     // A hybrid store's local directory (its WAL and ID allocator) is held
     // too, so the same directory cannot be opened as a plain local store.
     let mut held: Vec<WriterGuard> = Vec::new();
@@ -243,6 +263,9 @@ pub(crate) async fn acquire(
                     hold(WriterGuard::Local(lock))
                 }
                 None => {
+                    // Only a lease runs on this timing: a local directory's
+                    // OS lock is never renewed.
+                    check_timing(&settings, true)?;
                     let held = lease::acquire_remote(
                         location.meta_store(),
                         location.root_uri(),
@@ -256,5 +279,33 @@ pub(crate) async fn acquire(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{LeaseSettings, check_timing};
+
+    /// A lease whose skew allowance swallows the renewal window is refused,
+    /// as is a renewal interval not below the ttl; the skew matters only to
+    /// the built-in remote lease.
+    #[test]
+    fn lease_timing_is_checked() {
+        let mut settings = LeaseSettings {
+            ttl: Duration::from_secs(30),
+            renew_interval: Duration::from_secs(10),
+            clock_skew: Duration::from_secs(25),
+            ..LeaseSettings::default()
+        };
+        let err = check_timing(&settings, true).expect_err("skew plus renewal reach the ttl");
+        assert!(err.to_string().contains("clock_skew"), "{err}");
+        assert!(
+            check_timing(&settings, false).is_ok(),
+            "no skew without a lease"
+        );
+        settings.renew_interval = settings.ttl;
+        assert!(check_timing(&settings, false).is_err());
     }
 }

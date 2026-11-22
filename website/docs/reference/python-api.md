@@ -270,6 +270,7 @@ Nested dictionaries accept only the following fields, merging fields individuall
 | `file_sandbox` | `enabled`, `allowed_paths` |
 | `object_store` | `connect_timeout`, `read_timeout`, `write_timeout`, `max_retries`, `retry_backoff_base`, `retry_backoff_max` |
 | `index_rebuild` | `max_retries`, `retry_delay`, `worker_check_interval`, `growth_trigger_ratio`, `max_index_age`, `auto_rebuild_enabled` |
+| `writer_lease` | `ttl`, `renew_interval`, `acquire_grace`, `clock_skew` (seconds; `renew_interval` must be below `ttl`, and for an object store `clock_skew + renew_interval` too) |
 
 Disabling `ssi_enabled` is suitable only for single-writer workloads or callers
 that coordinate concurrent read-modify-write operations themselves, matching the
@@ -1786,7 +1787,9 @@ except uni_db.UniError as e:
 | Exception | Description |
 |-----------|-------------|
 | `UniNotFoundError` | Database path does not exist |
-| `UniDatabaseLockedError` | Database is locked by another process |
+| `UniStoreLockedError` | Another handle holds the store open for writing; `holder` names it |
+| `UniWriterFencedError` | This handle lost the store (lease taken over or lapsed, closed, read-only) |
+| `UniStaleWalError` | A hybrid store's local WAL belongs to an earlier writer; `store`, `wal`, `segments` |
 
 **Schema:**
 

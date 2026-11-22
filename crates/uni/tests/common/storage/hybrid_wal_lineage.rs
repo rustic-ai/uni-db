@@ -383,3 +383,98 @@ async fn a_local_store_replays_its_wal_as_before() -> Result<()> {
     db.shutdown().await?;
     Ok(())
 }
+
+impl Hosts {
+    /// The store opened remote-only (its own shared WAL), as a CLI or a
+    /// maintenance job might.
+    async fn open_remote_only(&self) -> uni_db::Result<Uni> {
+        Uni::open(&self.uri())
+            .storage_option(
+                uni_db::store::location::FILE_BUCKET_ROOT_OPTION,
+                self.bucket.display().to_string(),
+            )
+            .config(no_auto_flush())
+            .build()
+            .await
+    }
+}
+
+/// A remote-only writer moves the store on too: a hybrid host that crashed
+/// with unflushed commits is refused when it returns.
+#[tokio::test]
+async fn a_host_returning_after_a_remote_only_writer_is_refused() -> Result<()> {
+    let hosts = Hosts::new()?;
+    crash_with_unflushed(&hosts, true).await?;
+    let db = hosts.open_remote_only().await?;
+    create(&db, "Bob").await?;
+    db.shutdown().await?;
+    match hosts.open("one").await {
+        Err(UniError::StaleWal { segments: 1, .. }) => {}
+        Err(e) => anyhow::bail!("expected StaleWal, got {e}"),
+        Ok(_) => anyhow::bail!("replayed over a remote-only writer's newer data"),
+    }
+    Ok(())
+}
+
+/// A copy of a host's directory (a VM image, an rsync to a standby) carries
+/// its WAL's id but not its home: once the copy has claimed the store, the
+/// original's return is refused.
+#[tokio::test]
+async fn a_copied_directory_supersedes_the_original() -> Result<()> {
+    let hosts = Hosts::new()?;
+    crash_with_unflushed(&hosts, true).await?;
+    // The standby: a copy of host one's directory, opened as the store.
+    copy_dir(&hosts.local("one"), &hosts.local("standby"))?;
+    let db = hosts
+        .builder("standby")
+        .set_aside_stale_wal()
+        .build()
+        .await?;
+    create(&db, "Bob").await?;
+    db.shutdown().await?;
+    match hosts.open("one").await {
+        Err(UniError::StaleWal { .. }) => {}
+        Err(e) => anyhow::bail!("expected StaleWal, got {e}"),
+        Ok(_) => anyhow::bail!("the original replayed over its copy's newer data"),
+    }
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else if entry.file_name() != "writer.lock" {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// A backup of a hybrid store follows the WAL it copied: a hybrid host that
+/// opens the copy with another WAL holding commits is refused.
+#[tokio::test]
+async fn a_backup_of_a_hybrid_store_carries_its_claim() -> Result<()> {
+    let hosts = Hosts::new()?;
+    let db = hosts.open("one").await?;
+    declare(&db).await?;
+    create(&db, "Alice").await?;
+    db.flush().await?;
+    let dest = hosts.root.join("backup");
+    db.session()
+        .run(&format!("BACKUP TO '{}'", dest.display()))
+        .await?;
+    db.shutdown().await?;
+    let claim: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dest.join("catalog/wal_claim.json"))?)?;
+    let wal_id: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dest.join("wal_id.json"))?)?;
+    assert_eq!(
+        claim["wal_id"], wal_id["wal_id"],
+        "the copy follows its WAL"
+    );
+    Ok(())
+}

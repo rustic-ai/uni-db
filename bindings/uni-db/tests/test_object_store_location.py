@@ -267,3 +267,16 @@ async def test_async_builder_refuses_then_sets_a_stale_wal_aside():
         )
         await one.shutdown()
         assert os.listdir(os.path.join(root, "one", "wal_set_aside"))
+
+
+def test_a_read_only_handle_refuses_to_create_a_fork():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        path = os.path.join(tmpdir, "db")
+        writer = uni_db.UniBuilder.open(path).build()
+        try:
+            reader = uni_db.UniBuilder.open(path).read_only().build()
+            with pytest.raises(uni_db.UniReadOnlyError):
+                reader.session().fork("x").build()
+            reader.shutdown()
+        finally:
+            writer.shutdown()

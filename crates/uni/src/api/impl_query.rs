@@ -1331,6 +1331,7 @@ impl crate::api::UniInner {
         // `Executor::new` + six session-constant setters every query.
         // The manual `Clone` impl installs a fresh `warnings` Mutex so
         // each query gets its own warnings accumulator.
+        self.storage.refresh_read_cut().await;
         let mut executor = (*self.executor_template).clone();
         // Overrides have to reach the executor's config before execution: the
         // DataFusion pool is built from `config.max_query_memory` at plan time,

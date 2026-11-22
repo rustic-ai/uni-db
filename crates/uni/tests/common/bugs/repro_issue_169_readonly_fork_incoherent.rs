@@ -102,25 +102,21 @@ async fn fork_write_and_read(db: &Uni, fork_name: &str) -> Result<(Vec<String>, 
     Ok((cypher, locy))
 }
 
-/// The reported case: fork of a read-only parent.
+/// The reported case. A read-only handle writes nothing, a fork included:
+/// creating one writes the fork registry, branches and an allocator while
+/// the writer holds the store, and made that writer fence itself. It is
+/// refused.
 #[tokio::test]
-async fn fork_of_readonly_parent_reads_base_union_fork_local() -> Result<()> {
+async fn fork_of_readonly_parent_is_refused() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().to_str().unwrap();
     seed(path).await?;
 
     let reader = Uni::open_existing(path).read_only().build().await?;
-    let (cypher, locy) = fork_write_and_read(&reader, "ro_sandbox").await?;
-
-    let expected = vec!["base".to_string(), "fork_local".to_string()];
-    assert_eq!(
-        cypher, expected,
-        "Cypher must read base ∪ fork-local in a fork of a read-only parent"
-    );
-    assert_eq!(
-        locy, expected,
-        "Locy must read base ∪ fork-local in a fork of a read-only parent"
-    );
+    let Err(err) = reader.session().fork("ro_sandbox").await else {
+        panic!("a read-only handle created a fork");
+    };
+    assert!(matches!(err, uni_db::UniError::ReadOnly { .. }), "{err:?}");
     Ok(())
 }
 
@@ -145,20 +141,39 @@ async fn fork_of_readwrite_parent_reads_base_union_fork_local() -> Result<()> {
 /// because incoherence *between* them is the part with no safe reading: Cypher
 /// under-reports (a caller concludes the write was lost and retries), while
 /// Locy over-reports relative to the base (a fold derives over a graph missing
-/// everything it started with, producing a plausible wrong number).
+/// everything it started with, producing a plausible wrong number). A fork a
+/// writer made, opened from a read-only handle, reads the same in both.
 #[tokio::test]
-async fn fork_of_readonly_parent_is_coherent_across_languages() -> Result<()> {
+async fn fork_opened_from_a_readonly_handle_is_coherent_across_languages() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().to_str().unwrap();
     seed(path).await?;
 
-    let reader = Uni::open_existing(path).read_only().build().await?;
-    let (cypher, locy) = fork_write_and_read(&reader, "coherence").await?;
+    let rw = Uni::open(path).build().await?;
+    let (cypher, locy) = fork_write_and_read(&rw, "coherence").await?;
+    assert_eq!(cypher, locy, "the writer's view");
+    rw.shutdown().await?;
 
-    assert_eq!(
-        cypher, locy,
-        "one session, one view: Cypher and Locy must not disagree about the \
-         fork's contents"
-    );
+    let reader = Uni::open_existing(path).read_only().build().await?;
+    let fork = reader.session().fork("coherence").await?;
+    let cypher = sorted_names(&fork.query(CYPHER_Q).await?);
+    let mut locy: Vec<String> = fork
+        .locy(LOCY_P)
+        .await?
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("thing")
+        .map(|facts| {
+            facts
+                .iter()
+                .filter_map(|f| f.get("n").and_then(|v| v.as_str().map(str::to_owned)))
+                .collect()
+        })
+        .unwrap_or_default();
+    locy.sort();
+    let expected = vec!["base".to_string(), "fork_local".to_string()];
+    assert_eq!(cypher, expected, "Cypher through the read-only handle");
+    assert_eq!(locy, expected, "Locy through the read-only handle");
     Ok(())
 }

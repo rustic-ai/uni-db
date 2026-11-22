@@ -332,9 +332,9 @@ the load is hidden from the database handle's readers, and it appears all at
 once when the last table is published: a label scan and a label-less scan
 agree, and no vertex appears without its edges or an edge in one direction
 only. The guarantee covers the handle the load ran on (its sessions,
-transactions and pinned snapshots). Another process, or a second handle
-opened on the same path, reads the tables directly and can still see a load
-part way through its publish.
+transactions and pinned snapshots). Another process, or a read-only handle
+opened on the same path, reads the table versions the latest manifest names,
+so it sees the load once the load's manifest is published, all at once.
 
 A fork created while a load is being published waits for the publish to
 finish (up to 30 seconds) and then includes all of the load. If the load stays

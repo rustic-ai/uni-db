@@ -1483,6 +1483,10 @@ pub struct SchemaManager {
     save_order: tokio::sync::Mutex<()>,
     /// Runs before every save; see [`crate::core::write_gate::CatalogPublisher`].
     publisher: std::sync::RwLock<Option<Arc<dyn crate::core::write_gate::CatalogPublisher>>>,
+    /// The bytes of the last save that failed without a verdict (a timeout,
+    /// a transport error): it may have landed, and the next save that finds
+    /// it stored swaps from it instead of taking it for another writer's.
+    unconfirmed: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl SchemaManager {
@@ -1558,6 +1562,7 @@ impl SchemaManager {
                     gate: std::sync::RwLock::new(None),
                     save_order: tokio::sync::Mutex::new(()),
                     publisher: std::sync::RwLock::new(None),
+                    unconfirmed: std::sync::Mutex::new(None),
                 })
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Self {
@@ -1573,6 +1578,7 @@ impl SchemaManager {
                 gate: std::sync::RwLock::new(None),
                 save_order: tokio::sync::Mutex::new(()),
                 publisher: std::sync::RwLock::new(None),
+                unconfirmed: std::sync::Mutex::new(None),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
         }
@@ -1633,69 +1639,27 @@ impl SchemaManager {
         // Test-only seam (no-op without `fail/failpoints`): a save holding a
         // serialized catalog that has not reached the store yet.
         fail::fail_point!("schema::save::before-put");
-        let expected = self
+        let mut expected = self
             .stored
             .lock()
             .map_err(|_| anyhow::anyhow!("schema catalog state poisoned"))?
             .clone();
-        let mode = match &expected {
-            StoredCatalog::Unknown => object_store::PutMode::Overwrite,
-            StoredCatalog::Absent => object_store::PutMode::Create,
-            StoredCatalog::Version(v) => object_store::PutMode::Update(v.clone()),
-        };
         let written_bytes = content.clone().into_bytes();
         let bytes = object_store::PutPayload::from(content);
-        let written = match self
-            .store
-            .put_opts(&self.path, bytes.clone(), mode.into())
-            .await
-        {
-            Ok(result) => StoredCatalog::Version(object_store::UpdateVersion {
-                e_tag: result.e_tag,
-                version: result.version,
-            }),
-            // A local filesystem cannot swap; its OS lock keeps a second
-            // writer out instead.
-            Err(object_store::Error::NotImplemented { .. })
-            | Err(object_store::Error::NotSupported { .. }) => {
-                self.store
-                    .put(&self.path, bytes)
-                    .await
-                    .map_err(anyhow::Error::from)?;
-                StoredCatalog::Unknown
-            }
-            Err(object_store::Error::Precondition { .. })
-            | Err(object_store::Error::AlreadyExists { .. }) => {
-                // Our own earlier attempt may have landed with its response lost.
-                let adopted = match self.store.get(&self.path).await {
-                    Ok(current) => {
-                        let version = object_store::UpdateVersion {
-                            e_tag: current.meta.e_tag.clone(),
-                            version: current.meta.version.clone(),
-                        };
-                        match current.bytes().await {
-                            Ok(held) if held.as_ref() == written_bytes.as_slice() => Some(version),
-                            _ => None,
-                        }
-                    }
-                    Err(_) => None,
-                };
-                match adopted {
-                    Some(version) => StoredCatalog::Version(version),
-                    None => {
-                        let reason = format!(
-                            "{} was changed by another writer since this handle read it",
-                            self.path
-                        );
-                        if let Some(gate) = self.write_gate() {
-                            gate.trip(reason.clone());
-                        }
-                        anyhow::bail!("{reason}; this handle's schema change was not saved")
-                    }
+        // At most twice: a second attempt follows adopting this handle's own
+        // earlier save, which failed without a verdict and landed.
+        let mut written = None;
+        for _ in 0..2 {
+            match self.save_once(&expected, &bytes, &written_bytes).await? {
+                Ok(done) => {
+                    written = Some(done);
+                    break;
                 }
+                Err(ours) => expected = ours,
             }
-            Err(e) => return Err(e.into()),
-        };
+        }
+        let written = written
+            .ok_or_else(|| anyhow::anyhow!("{}: the compare-and-swap did not settle", self.path))?;
         *self
             .stored
             .lock()
@@ -1705,6 +1669,87 @@ impl SchemaManager {
         // between the two leaves the manager dirty instead of falsely clean.
         self.persisted_version.store(version, Ordering::Release);
         Ok(())
+    }
+
+    /// One save attempt: `Ok(Ok(state))` written, `Ok(Err(state))` this
+    /// handle's own unconfirmed save found stored (save again from it).
+    async fn save_once(
+        &self,
+        expected: &StoredCatalog,
+        bytes: &object_store::PutPayload,
+        written_bytes: &[u8],
+    ) -> Result<std::result::Result<StoredCatalog, StoredCatalog>> {
+        let mode = match expected {
+            StoredCatalog::Unknown => object_store::PutMode::Overwrite,
+            StoredCatalog::Absent => object_store::PutMode::Create,
+            StoredCatalog::Version(v) => object_store::PutMode::Update(v.clone()),
+        };
+        let unconfirmed = |value: Option<Vec<u8>>| {
+            if let Ok(mut held) = self.unconfirmed.lock() {
+                *held = value;
+            }
+        };
+        match self
+            .store
+            .put_opts(&self.path, bytes.clone(), mode.into())
+            .await
+        {
+            Ok(result) => {
+                unconfirmed(None);
+                Ok(Ok(StoredCatalog::Version(object_store::UpdateVersion {
+                    e_tag: result.e_tag,
+                    version: result.version,
+                })))
+            }
+            // A local filesystem cannot swap; its OS lock keeps a second
+            // writer out instead.
+            Err(object_store::Error::NotImplemented { .. })
+            | Err(object_store::Error::NotSupported { .. }) => {
+                self.store
+                    .put(&self.path, bytes.clone())
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                Ok(Ok(StoredCatalog::Unknown))
+            }
+            Err(object_store::Error::Precondition { .. })
+            | Err(object_store::Error::AlreadyExists { .. }) => {
+                // Our own earlier attempt may have landed with its response
+                // lost, or an earlier save that failed without a verdict.
+                if let Ok(current) = self.store.get(&self.path).await {
+                    let version = object_store::UpdateVersion {
+                        e_tag: current.meta.e_tag.clone(),
+                        version: current.meta.version.clone(),
+                    };
+                    if let Ok(held) = current.bytes().await {
+                        if held.as_ref() == written_bytes {
+                            unconfirmed(None);
+                            return Ok(Ok(StoredCatalog::Version(version)));
+                        }
+                        let ours = self
+                            .unconfirmed
+                            .lock()
+                            .ok()
+                            .is_some_and(|u| u.as_deref() == Some(held.as_ref()));
+                        if ours {
+                            unconfirmed(None);
+                            return Ok(Err(StoredCatalog::Version(version)));
+                        }
+                    }
+                }
+                let reason = format!(
+                    "{} was changed by another writer since this handle read it",
+                    self.path
+                );
+                if let Some(gate) = self.write_gate() {
+                    gate.trip(reason.clone());
+                }
+                anyhow::bail!("{reason}; this handle's schema change was not saved")
+            }
+            Err(e) => {
+                unconfirmed(Some(written_bytes.to_vec()));
+                Err(e.into())
+            }
+        }
     }
 
     /// Persists the schema only when it holds changes that were never written.
@@ -1891,9 +1936,12 @@ impl SchemaManager {
             // Never saved, so never synced.
             local_file: std::sync::OnceLock::new(),
             stored: std::sync::Mutex::new(StoredCatalog::Unknown),
-            gate: std::sync::RwLock::new(None),
+            // The parent's gate: a save through an overlay (which callers
+            // never make) is at least refused once the handle may not write.
+            gate: std::sync::RwLock::new(self.write_gate()),
             save_order: tokio::sync::Mutex::new(()),
             publisher: std::sync::RwLock::new(None),
+            unconfirmed: std::sync::Mutex::new(None),
         })
     }
 

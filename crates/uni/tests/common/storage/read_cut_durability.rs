@@ -479,6 +479,24 @@ async fn read_cut_abort_child() -> Result<()> {
     let Some((scenario, path)) = crate::crash_harness::child_env() else {
         return Ok(());
     };
+    if scenario == "index-built-in-flush" {
+        // A published flush first: a crash in a store's very first flush
+        // leaves tables and no manifest, which the open refuses (#72).
+        let db = seeded(&path).await?;
+        db.schema()
+            .label("Doc")
+            .property("content", DataType::String)
+            .apply()
+            .await?;
+        let tx = db.session().tx().await?;
+        tx.execute("CREATE FULLTEXT INDEX doc_fts FOR (d:Doc) ON EACH [d.content]")
+            .await?;
+        tx.commit().await?;
+        create(&db, "CREATE (:Doc {content: 'jumping over fences'})").await?;
+        crate::crash_harness::abort_at("flush::before-manifest");
+        db.flush().await?;
+        return Ok(());
+    }
     let db = seeded(&path).await?;
     create(&db, "CREATE (:Person {name: 'Bob'})").await?;
     match scenario.as_str() {
@@ -513,5 +531,341 @@ async fn a_crash_before_the_manifest_leaves_no_partial_flush() -> Result<()> {
     db.flush().await?;
     assert_eq!(stored_names(dir.path(), PERSON).await?, ["Alice", "Bob"]);
     db.shutdown().await?;
+    Ok(())
+}
+
+/// A bulk load names its own table versions in its manifest even while a
+/// flush that wrote the same tables is still open: the load is not in the
+/// WAL, so a manifest that left it out would let the next open roll it back.
+#[tokio::test]
+async fn a_bulk_load_is_named_by_its_manifest_while_a_flush_is_open() -> Result<()> {
+    use std::collections::HashMap;
+    let dir = tempfile::tempdir()?;
+    let db = seeded(dir.path()).await?;
+    // Another flush, mid-way: it has committed the main vertex table.
+    let cut = std::sync::Arc::clone(db.storage().read_cut());
+    let open = cut.open_unit("open-flush");
+    let busy = head_version(dir.path(), "vertices").await?;
+    uni_store::storage::read_cut::in_unit("open-flush".to_string(), async {
+        cut.record("vertices", busy);
+    })
+    .await;
+
+    let tx = db.session().tx().await?;
+    let mut bulk = tx.bulk_writer().build()?;
+    bulk.insert_vertices(
+        "Person",
+        vec![HashMap::from([(
+            "name".to_string(),
+            uni_db::Value::String("Bob".to_string()),
+        )])],
+    )
+    .await?;
+    bulk.commit().await?;
+    tx.commit().await?;
+    let manifest = db
+        .storage()
+        .snapshot_manager()
+        .load_latest_snapshot()
+        .await?
+        .expect("a manifest");
+    drop(open);
+    for table in ["vertices", PERSON] {
+        assert_eq!(
+            manifest.tables.get(table).copied(),
+            Some(head_version(dir.path(), table).await?),
+            "the load's manifest names {table} at the version holding the load"
+        );
+    }
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Restore publishes exactly one manifest: no successor naming rewound tables
+/// under the pre-restore manifest appears while it runs.
+#[tokio::test]
+async fn a_restore_publishes_one_manifest() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = seeded(dir.path()).await?;
+    let snapshot = db.create_snapshot("one").await?;
+    create(&db, "CREATE (:Person {name: 'Bob'})").await?;
+    db.flush().await?;
+    let storage = db.storage();
+    let sm = storage.snapshot_manager();
+    let before: std::collections::HashSet<String> =
+        sm.list_snapshots().await?.into_iter().collect();
+    let pre_restore = sm.latest_snapshot_id().await?.expect("a latest manifest");
+    db.restore_snapshot(&snapshot).await?;
+    // The restore's own manifest succeeds the pre-restore one; another
+    // successor saved while the restore ran would name rewound tables under
+    // the old contents.
+    let mut successors = Vec::new();
+    for id in sm.list_snapshots().await? {
+        if !before.contains(&id)
+            && sm.load_snapshot(&id).await?.parent_snapshot.as_deref() == Some(pre_restore.as_str())
+        {
+            successors.push(id);
+        }
+    }
+    assert_eq!(
+        successors.len(),
+        1,
+        "successors of the pre-restore manifest: {successors:?}"
+    );
+    assert_eq!(names(&db).await?, ["Alice"]);
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// A restore whose rewind fails part way fences the handle: some tables are
+/// rewound and others not, and only a reopen completes the restore.
+#[cfg(feature = "failpoints")]
+#[tokio::test]
+async fn a_failed_restore_rewind_fences_the_handle() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = seeded(dir.path()).await?;
+    let snapshot = db.create_snapshot("one").await?;
+    create(&db, "CREATE (:Person {name: 'Bob'})").await?;
+    db.flush().await?;
+    fail::cfg("restore::table-fail", "1*return").unwrap();
+    let restored = db.restore_snapshot(&snapshot).await;
+    fail::cfg("restore::table-fail", "off").unwrap();
+    assert!(restored.is_err(), "the injected rollback failure surfaces");
+    let write = async {
+        let tx = db.session().tx().await?;
+        tx.execute("CREATE (:Person {name: 'Carol'})").await?;
+        tx.commit().await?;
+        db.flush().await
+    }
+    .await;
+    let err = format!("{:#}", write.expect_err("a write after the failed restore"));
+    assert!(
+        err.contains("restore of snapshot"),
+        "refused by the fence: {err}"
+    );
+    let _ = db.shutdown().await;
+
+    let db = Uni::open(dir.path().to_str().unwrap())
+        .config(quiet())
+        .build()
+        .await?;
+    assert_eq!(
+        names(&db).await?,
+        ["Alice"],
+        "the reopen completes the restore"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// A read-only handle's Locy evaluation reads the latest published flush.
+#[tokio::test]
+async fn a_read_only_locy_evaluation_sees_a_new_flush() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = seeded(dir.path()).await?;
+    let reader = open_read_only(dir.path(), quiet()).await?;
+    let people = |r: &Uni| {
+        let session = r.session();
+        async move {
+            let out = session
+                .locy("CREATE RULE people AS MATCH (p:Person) YIELD KEY p")
+                .await?;
+            Ok::<_, anyhow::Error>(
+                out.derived_rules()
+                    .await
+                    .unwrap()
+                    .get("people")
+                    .map_or(0, Vec::len),
+            )
+        }
+    };
+    assert_eq!(people(&reader).await?, 1);
+    create(&db, "CREATE (:Person {name: 'Bob'})").await?;
+    db.flush().await?;
+    assert_eq!(people(&reader).await?, 2);
+    reader.shutdown().await?;
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// A flush whose future is dropped between its stream and its finalize
+/// leaves no open unit behind: a later publish (a compaction's) does not
+/// wait for it forever.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_flush_does_not_wedge_later_publishes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = seeded(dir.path()).await?;
+    create(&db, "CREATE (:Person {name: 'Bob'})").await?;
+    fail::cfg("flush::after-stream-stall", "1*return").unwrap();
+    let cancelled = tokio::time::timeout(Duration::from_millis(500), db.flush()).await;
+    assert!(
+        cancelled.is_err(),
+        "premise: the flush stalled and was dropped"
+    );
+    fail::cfg("flush::after-stream-stall", "off").unwrap();
+    tokio::time::timeout(Duration::from_secs(20), db.compaction().compact("Person"))
+        .await
+        .expect("the compaction's publish does not wait for the dropped flush")?;
+    tokio::time::timeout(Duration::from_secs(20), db.flush())
+        .await
+        .expect("a later flush completes")?;
+    assert_eq!(names(&db).await?, ["Alice", "Bob"]);
+    tokio::time::timeout(Duration::from_secs(20), db.shutdown())
+        .await
+        .expect("shutdown completes")?;
+    Ok(())
+}
+
+/// Of two async flushes in flight, the second reads what the first wrote
+/// though the first has not published yet: a relabel in the second keeps
+/// the vertex the first created.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relabel_in_an_overlapping_flush_is_kept() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let config = UniConfig {
+        async_flush_enabled: true,
+        max_pending_flushes: 2,
+        auto_flush_threshold: 1,
+        auto_flush_min_mutations: 1,
+        auto_flush_interval: None,
+        ..Default::default()
+    };
+    let db = open(dir.path(), config).await?;
+    db.schema()
+        .label("A")
+        .property("name", DataType::String)
+        .done()
+        .label("B")
+        .property("name", DataType::String)
+        .apply()
+        .await?;
+    // The first flush writes its tables, then waits before its finalize
+    // (holding no lock); the second streams meanwhile.
+    let head = db.storage().head_backend_arc();
+    let versions = || {
+        let head = Arc::clone(&head);
+        async move {
+            let mut all = std::collections::BTreeMap::new();
+            for table in head.table_names().await? {
+                all.insert(table.clone(), head.get_table_version(&table).await?);
+            }
+            Ok::<_, anyhow::Error>(all)
+        }
+    };
+    fail::cfg("flush::before-async-finalize", "1*pause").unwrap();
+    create(&db, "CREATE (:A {name: 'n'})").await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let first_streamed = versions().await;
+    // A relabel alone counts no L0 mutation; the created row makes this
+    // commit trigger the second flush.
+    create(
+        &db,
+        "MATCH (n:A {name: 'n'}) SET n:B CREATE (:A {name: 'pad'})",
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let second_streamed = versions().await;
+    fail::cfg("flush::before-async-finalize", "off").unwrap();
+    // Still paused before the first finalize when read: the second flush
+    // streamed meanwhile (it committed tables).
+    assert_ne!(
+        first_streamed?, second_streamed?,
+        "premise: the second flush streamed while the first was open"
+    );
+    db.flush().await?;
+    let rows = db
+        .session()
+        .query("MATCH (n:B) RETURN n.name AS name")
+        .await?;
+    assert_eq!(rows.len(), 1, "the relabel survived the flushes");
+    db.shutdown().await?;
+    let db = open(dir.path(), quiet()).await?;
+    let rows = db
+        .session()
+        .query("MATCH (n:B) RETURN n.name AS name")
+        .await?;
+    assert_eq!(rows.len(), 1, "and the reopen");
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// An index built inside a flush that crashed before its manifest: the open
+/// rolls its table back, and the index is rebuilt rather than left recorded
+/// built over a version that is gone.
+#[cfg(all(unix, feature = "failpoints"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_index_built_by_a_crashed_flush_is_rebuilt() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    crate::crash_harness::run_child_async(
+        "storage::read_cut_durability::read_cut_abort_child",
+        "index-built-in-flush",
+        dir.path(),
+    )
+    .await;
+    let db = open(dir.path(), quiet()).await?;
+    db.flush().await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        // An error is expected while the rebuild runs; the last one is
+        // reported if it never answers.
+        let answer = db
+            .session()
+            .query("CALL uni.fts.query('Doc', 'content', 'fences', 10) YIELD node RETURN node")
+            .await
+            .map(|r| r.len());
+        if matches!(answer, Ok(1)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the full-text index never answered after the reopen: {answer:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// A flush while BACKUP copies, after it read the manifest it names: the
+/// backup still holds the flush's commits (the WAL is not truncated while it
+/// copies, and is copied before the tables), though opening it rolls the
+/// tables back to that manifest.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flush_during_backup_loses_no_commit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("src");
+    let dest = dir.path().join("dest");
+    let db = Arc::new(seeded(&src).await?);
+    fail::cfg("backup::after-latest", "1*pause").unwrap();
+    let backup = {
+        let db = Arc::clone(&db);
+        let to = format!("BACKUP TO '{}'", dest.display());
+        tokio::spawn(async move { db.session().run(&to).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // After the manifest the backup names: Bob reaches the tables, and the
+    // flush would truncate the WAL past him.
+    let paused_on = db.storage().snapshot_manager().latest_snapshot_id().await?;
+    create(&db, "CREATE (:Person {name: 'Bob'})").await?;
+    db.flush().await?;
+    let after_flush = db.storage().snapshot_manager().latest_snapshot_id().await?;
+    assert_ne!(paused_on, after_flush, "premise: the flush published");
+    fail::cfg("backup::after-latest", "off").unwrap();
+    let rows = backup.await??;
+    // The backup read `latest` before the flush (it paused there): its
+    // manifest lacks Bob, whom only the copied WAL holds.
+    assert_eq!(
+        rows.rows()[0].get::<String>("snapshot_id")?,
+        paused_on.expect("the seed published a manifest"),
+        "premise: the backup named the manifest from before the flush"
+    );
+    Arc::into_inner(db).expect("sole owner").shutdown().await?;
+
+    let restored = open(&dest, quiet()).await?;
+    assert_eq!(names(&restored).await?, ["Alice", "Bob"]);
+    restored.shutdown().await?;
     Ok(())
 }

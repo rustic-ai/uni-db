@@ -92,6 +92,8 @@ pub struct WriteFence {
     /// Wall-clock millisecond after which the handle's lease may have lapsed:
     /// writes stop then even if no renewal has said so (a stalled process).
     deadline_ms: std::sync::atomic::AtomicI64,
+    /// Set for a read-only handle's fence, tripped from the start.
+    read_only: AtomicBool,
 }
 
 impl Default for WriteFence {
@@ -100,6 +102,7 @@ impl Default for WriteFence {
             tripped: AtomicBool::new(false),
             reason: parking_lot::Mutex::new(None),
             deadline_ms: std::sync::atomic::AtomicI64::new(i64::MAX),
+            read_only: AtomicBool::new(false),
         }
     }
 }
@@ -109,6 +112,21 @@ impl WriteFence {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// A read-only handle's fence: tripped from the start.
+    #[must_use]
+    pub fn read_only() -> Arc<Self> {
+        let fence = Self::default();
+        fence.read_only.store(true, Ordering::Release);
+        fence.trip("the handle is read-only");
+        Arc::new(fence)
+    }
+
+    /// Whether this is a read-only handle's fence; see [`Self::read_only`].
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Acquire)
     }
 
     /// Fails with [`UniError::WriterFenced`] once the fence has tripped.
@@ -246,7 +264,7 @@ fn holder_description() -> String {
     format!("pid {} on {}", std::process::id(), host_name())
 }
 
-fn host_name() -> String {
+pub(crate) fn host_name() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .filter(|h| !h.is_empty())
@@ -308,8 +326,10 @@ impl RemoteLease {
         let lease = Arc::downgrade(self);
         let interval = self.settings.renew_interval;
         let task = tokio::spawn(async move {
+            let mut wait = interval;
             loop {
-                tokio::time::sleep(interval).await;
+                tokio::time::sleep(wait).await;
+                wait = interval;
                 let Some(lease) = lease.upgrade() else { return };
                 if lease.released.load(Ordering::Acquire) || lease.fence.is_tripped() {
                     return;
@@ -327,6 +347,10 @@ impl RemoteLease {
                 };
                 if let Err(e) = renewed {
                     tracing::warn!(error = %e, "writer lease renewal failed");
+                    // Try again soon, not a whole interval later: with the
+                    // defaults two failures a full interval apart fence the
+                    // writer.
+                    wait = interval.min(Duration::from_secs(1));
                     let expires = lease.state.lock().await.0.expires_at_ms;
                     // Stop before the lease lapses rather than after: once
                     // it lapses another writer may take it.
@@ -452,10 +476,30 @@ impl RemoteLease {
             Ok(b) => b,
             Err(_) => return,
         };
-        match self.store.put_opts(&self.path, bytes.into(), opts).await {
+        match self
+            .store
+            .put_opts(&self.path, bytes.clone().into(), opts)
+            .await
+        {
             Ok(_) => {}
-            // Taken over already: the lease is someone else's now.
-            Err(object_store::Error::Precondition { .. }) => {}
+            // Taken over already, or a renewal aborted above had landed and
+            // moved the version on: release from that version if the record
+            // is still this holder's.
+            Err(object_store::Error::Precondition { .. }) => {
+                if let Ok(Some((held, version))) = read_lease(&self.store, &self.path).await
+                    && held.owner == state.0.owner
+                    && held.epoch == state.0.epoch
+                    && !held.released
+                {
+                    let opts: PutOptions = PutMode::Update(version).into();
+                    if let Err(e) = self.store.put_opts(&self.path, bytes.into(), opts).await {
+                        tracing::warn!(
+                            error = %e,
+                            "could not release the writer lease; it lapses on its own"
+                        );
+                    }
+                }
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "could not release the writer lease; it lapses on its own")
             }
@@ -508,6 +552,9 @@ pub async fn acquire_remote(
         .into()
     };
     let owner = uuid::Uuid::new_v4().to_string();
+    // Writes that failed without a verdict: each may have landed, which the
+    // next read adopts (the record names this owner).
+    let mut unconfirmed = 0u32;
     loop {
         let mut record = LeaseRecord {
             owner: owner.clone(),
@@ -595,6 +642,13 @@ pub async fn acquire_remote(
             | Err(object_store::Error::Precondition { .. }) => continue,
             Err(e @ object_store::Error::NotImplemented { .. })
             | Err(e @ object_store::Error::NotSupported { .. }) => return Err(unsupported(e)),
+            // A timeout or transport error: the write may have landed, so
+            // read again rather than fail the open and leave the lease held
+            // by no one for a TTL.
+            Err(e) if unconfirmed < 3 => {
+                unconfirmed += 1;
+                tracing::warn!(error = %e, "writer lease write failed; reading it again");
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -709,6 +763,34 @@ mod tests {
             .unwrap();
         assert_eq!(b.epoch().await, 2);
         assert_ne!(record(&store).await.owner, first.owner);
+    }
+
+    /// A renewal whose write landed after it was aborted moved the version
+    /// on; the release finds the record still this holder's and releases it
+    /// from there, so the next open does not wait out the TTL.
+    #[tokio::test]
+    async fn a_release_after_a_landed_renewal_still_frees_the_lease() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let a = acquire_remote(store.clone(), "mem://s", quick(), WriteFence::new())
+            .await
+            .unwrap();
+        let mut renewed = record(&store).await;
+        renewed.expires_at_ms += 1_000;
+        store
+            .put(
+                &ObjPath::from(LEASE_PATH),
+                serde_json::to_vec(&renewed).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        a.release().await;
+        assert!(
+            record(&store).await.released,
+            "released from the landed version"
+        );
+        acquire_remote(store.clone(), "mem://s", quick(), WriteFence::new())
+            .await
+            .expect("the next owner takes it at once");
     }
 
     #[tokio::test]

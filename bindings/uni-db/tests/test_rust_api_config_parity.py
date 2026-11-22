@@ -388,3 +388,9 @@ def test_cloud_config_preserves_optional_fields_and_refuses_typos(config, builde
     obj = builder.temporary().cloud_config(config)
     with pytest.raises(ValueError, match="cloud config key"):
         obj.cloud_config({**config, "typo": "not-a-credential"})
+
+
+def test_read_cut_refresh_none_round_trips():
+    db = uni_db.UniBuilder.temporary().config({"read_cut_refresh": None}).build()
+    assert db.config()["read_cut_refresh"] is None
+    db.shutdown()
