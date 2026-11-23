@@ -223,3 +223,34 @@ async fn seed_lance_dataset(uri: &str) {
     let reader = arrow_array::RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
     lance::Dataset::write(reader, uri, None).await.unwrap();
 }
+
+/// A tombstoned fork whose dataset is gone entirely has no branch left to
+/// delete: recovery finishes the drop instead of keeping it Tombstoned on
+/// every open.
+#[tokio::test]
+async fn tombstoned_drop_completes_when_the_dataset_is_gone() {
+    let dir = TempDir::new().unwrap();
+    let store: Arc<dyn ObjectStore> =
+        Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+    let h = ForkRegistryHandle::load(store.clone()).await.unwrap();
+
+    let id = ForkId::new();
+    let mut info = ForkInfo::new_pending(id, "gone", "snap-1", 1);
+    // A dataset that does not exist on disk.
+    info.datasets
+        .insert("vertices_Missing".into(), format!("fork_{id}_v_Missing"));
+    h.begin_create(info.clone()).await.unwrap();
+    h.finish_create("gone", info.datasets.clone())
+        .await
+        .unwrap();
+    h.begin_drop("gone").await.unwrap();
+
+    let h2 = ForkRegistryHandle::load(store.clone()).await.unwrap();
+    let base = format!("{}/", dir.path().display());
+    let reconciled = recover_forks(&h2, &store, &[], Some(&LanceBranching::new(base)))
+        .await
+        .unwrap();
+    assert_eq!(reconciled, 1);
+    assert!(h2.snapshot().await.forks.is_empty(), "the drop finished");
+    assert!(h2.list_tombstones().await.unwrap().is_empty());
+}

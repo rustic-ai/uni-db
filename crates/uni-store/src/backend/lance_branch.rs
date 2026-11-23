@@ -567,7 +567,14 @@ pub async fn list_tags(uri: &str) -> Result<Vec<super::branching::BranchTag>> {
 /// missing-branch case.
 pub async fn delete_branch(uri: &str, branch: &str) -> Result<()> {
     inject_fault_delete_branch()?;
-    let mut dataset = open_dataset(uri).await?;
+    // A dataset that is gone holds no branch: as for a missing branch below,
+    // the delete is done. Recovery would otherwise keep the fork Tombstoned
+    // on every open with nothing left to delete.
+    let mut dataset = match open_dataset(uri).await {
+        Ok(dataset) => dataset,
+        Err(e) if crate::store_utils::is_dataset_not_found(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     // Cheap pre-check: skip the force-delete if neither BranchContents
     // nor the shallow-clone tree exist. lance::Dataset::force_delete_branch
