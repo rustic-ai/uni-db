@@ -134,10 +134,13 @@ async fn check(db: &Uni, stage: &str) -> Result<()> {
 async fn json_fts_derived_index_before_data() -> Result<()> {
     let db = open().await?;
     run(&db, INDEX).await?;
-    // The first flush creates the table, with the text column, and builds
-    // the deferred index. (Before any table exists, unflushed rows are scored
-    // with Lance's bare tokenizer, which does not fold case.)
-    insert_last(&db).await?;
+    // Before any table exists, unflushed rows are tokenized as the index
+    // will tokenize them (case folded). The first flush creates the table,
+    // with the text column, and builds the deferred index.
+    insert(&db).await?;
+    check(&db, "declared first, no table").await?;
+    db.flush().await?;
+    run(&db, "MATCH (a:Article) WHERE a.id < 4 DETACH DELETE a").await?;
     db.flush().await?;
     insert_first(&db).await?;
     check(&db, "declared first, unflushed").await?;
@@ -233,5 +236,52 @@ async fn json_fts_derived_paths() -> Result<()> {
     .await
     .expect_err("an unknown JSON FULLTEXT option must be refused");
     assert!(format!("{err:#}").contains("path"), "{err:#}");
+    Ok(())
+}
+
+/// Whether the label's catalog registers the index's derived text column.
+fn derived_registered(db: &Uni) -> bool {
+    db.storage()
+        .schema_manager()
+        .schema()
+        .properties
+        .get("Article")
+        .is_some_and(|p| p.keys().any(|k| k.starts_with("__jfts_")))
+}
+
+/// Dropping the index unregisters its derived text column; writes and reads
+/// keep working with the column gone from the catalog, and re-creating the
+/// index backfills it, rows written while it was dropped included.
+#[tokio::test]
+async fn json_fts_derived_drop_unregisters_column() -> Result<()> {
+    let db = open().await?;
+    run(&db, INDEX).await?;
+    insert_first(&db).await?;
+    db.flush().await?;
+    assert!(derived_registered(&db));
+
+    run(&db, "DROP INDEX article_fts").await?;
+    assert!(
+        !derived_registered(&db),
+        "the derived column outlived its index"
+    );
+    insert_last(&db).await?;
+    db.flush().await?;
+    let got = ids(
+        &db,
+        "MATCH (a:Article) WHERE a.doc.title CONTAINS 'Graph' RETURN a.id AS id",
+        &[],
+    )
+    .await?;
+    assert_eq!(got, vec![1], "reads after the drop");
+
+    run(&db, INDEX).await?;
+    assert!(derived_registered(&db));
+    check(&db, "re-created").await?;
+    assert_eq!(
+        search(&db, "untitled").await?,
+        vec![4],
+        "row written while dropped"
+    );
     Ok(())
 }

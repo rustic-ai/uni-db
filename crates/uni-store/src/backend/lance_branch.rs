@@ -1496,6 +1496,7 @@ impl ForkBranching for LanceBranching {
         k: usize,
         filter: &FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
     ) -> Result<TextSearch> {
         let sql = if filter.is_trivially_true() {
             None
@@ -1510,6 +1511,7 @@ impl ForkBranching for LanceBranching {
             k,
             sql.as_deref(),
             unstored,
+            analyzer,
             |_| {},
         )
         .await

@@ -380,6 +380,7 @@ pub trait ForkBranching: Send + Sync + 'static {
         k: usize,
         filter: &FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
     ) -> Result<TextSearch>;
 
     /// Full-text search against `branch`, fused across the parent chain.

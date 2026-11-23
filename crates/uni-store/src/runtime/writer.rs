@@ -7641,6 +7641,12 @@ impl Writer {
                         if *deleted {
                             removed.insert(*vid);
                         } else if let Some(prop_value) = props.get(&cfg.property) {
+                            // The row carries the property: its terms replace the
+                            // vid's earlier ones, so the vid is purged from every
+                            // posting first (remove-then-add). Otherwise an update
+                            // left the vid under terms it no longer holds, and a
+                            // list set to empty or null kept all of them.
+                            removed.insert(*vid);
                             // Extract terms from the property value (List<String>)
                             if let Some(arr) = prop_value.as_array() {
                                 let terms: Vec<String> = arr
@@ -7682,6 +7688,12 @@ impl Writer {
 
                     for (vid, _labels, props, deleted, _version) in &vertices {
                         if *deleted {
+                            removed.insert(*vid);
+                        } else if let Some(value) = props.get(&cfg.property)
+                            && value.sparse_parts().is_none()
+                        {
+                            // Set to null (or to a value that is no sparse vector):
+                            // the vid holds no postings now.
                             removed.insert(*vid);
                         } else if let Some((indices, values)) =
                             props.get(&cfg.property).and_then(Value::sparse_parts)

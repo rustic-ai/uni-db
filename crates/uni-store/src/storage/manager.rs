@@ -6043,6 +6043,25 @@ impl StorageManager {
                 _ => None,
             });
         let derived = json_index.as_ref().map(|cfg| cfg.derived_column());
+        // How the declared index tokenizes the column, for the rows no built
+        // index covers yet (a JSON index's text column uses the standard
+        // analyzer).
+        let analyzer: Option<uni_common::core::schema::TokenizerConfig> = if json_index.is_some() {
+            Some(uni_common::core::schema::TokenizerConfig::Standard)
+        } else {
+            self.schema_manager
+                .schema()
+                .indexes
+                .iter()
+                .find_map(|idx| match idx {
+                    IndexDefinition::FullText(cfg)
+                        if cfg.label == label && cfg.properties.iter().any(|p| p == property) =>
+                    {
+                        Some(cfg.tokenizer.clone())
+                    }
+                    _ => None,
+                })
+        };
         let source = property;
         let property = derived.as_deref().unwrap_or(property);
         let paths: Vec<String> = json_index.map(|cfg| cfg.paths).unwrap_or_default();
@@ -6129,7 +6148,14 @@ impl StorageManager {
                 .map(|(vid, text)| (vid.as_u64(), text))
                 .collect();
             documents.sort_unstable_by_key(|(vid, _)| *vid);
-            let scored = crate::backend::score_documents(property, query, documents, check).await?;
+            let scored = crate::backend::score_documents(
+                property,
+                query,
+                documents,
+                analyzer.as_ref(),
+                check,
+            )
+            .await?;
             let mut hits: Vec<_> = scored
                 .into_iter()
                 .map(|(vid, score)| (Vid::new(vid), score))
@@ -6179,6 +6205,7 @@ impl StorageManager {
                             fetch,
                             combined_filter.clone(),
                             docs.clone(),
+                            analyzer.as_ref(),
                             counters,
                         )
                         .await?;

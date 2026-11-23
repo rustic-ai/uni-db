@@ -685,7 +685,9 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// once they are flushed made the ranking, and which rows made the top
     /// `k`, change at the flush. `filter` applies to stored rows; the caller
     /// filters the unstored documents. A document that does not match is
-    /// absent. `table` need not exist yet.
+    /// absent. `table` need not exist yet. `analyzer` is the declared
+    /// full-text index's tokenizer, used for documents no built index covers
+    /// yet, so that they are tokenized as the index will tokenize them.
     ///
     /// The default runs [`Self::full_text_search`] and scores an unstored
     /// document by the fraction of query words it contains (lowercased,
@@ -703,8 +705,10 @@ pub trait StorageBackend: Send + Sync + 'static {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
         counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<TextSearch> {
+        let _ = analyzer;
         let stored = if self.table_exists(table).await? {
             self.full_text_search(table, column, query, k, filter, counters)
                 .await?

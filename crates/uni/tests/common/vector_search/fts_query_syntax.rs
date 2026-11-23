@@ -196,3 +196,28 @@ async fn fts_query_syntax_phrase_needs_positions() -> Result<()> {
     assert!(!ids(&db, "Doc", "quick").await?.is_empty());
     Ok(())
 }
+
+/// Unflushed rows of a label with no table yet are tokenized as the declared
+/// index will tokenize them once flushed: the default analyzer folds case, so
+/// `quick` finds `Quick` before the first flush as it does after it.
+#[tokio::test]
+async fn fts_unflushed_rows_use_the_declared_analyzer() -> Result<()> {
+    let db = open(true, true).await?;
+    insert(&db, "Doc", &[(1, "Quick Brown Fox"), (2, "lazy cat")]).await?;
+    for (query, expected) in [("quick", &[1][..]), ("QUICK fox", &[1]), ("Lazy", &[2])] {
+        assert_eq!(
+            ids(&db, "Doc", query).await?,
+            expected,
+            "unflushed: {query:?}"
+        );
+    }
+    db.flush().await?;
+    for (query, expected) in [("quick", &[1][..]), ("QUICK fox", &[1]), ("Lazy", &[2])] {
+        assert_eq!(
+            ids(&db, "Doc", query).await?,
+            expected,
+            "flushed: {query:?}"
+        );
+    }
+    Ok(())
+}

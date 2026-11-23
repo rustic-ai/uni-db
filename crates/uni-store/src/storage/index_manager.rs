@@ -1285,6 +1285,22 @@ impl IndexManager {
         }
 
         self.schema_manager.remove_index(name)?;
+        // A JSON full-text index's derived text column goes with the last
+        // index on its column: left registered, it was carried, unfilled, on
+        // every later row. The Lance column stays, invisible to a catalog
+        // that does not name it; re-creating the index backfills it.
+        if let IndexDefinition::JsonFullText(cfg) = &idx_def {
+            let still_indexed = self.schema_manager.schema().indexes.iter().any(|idx| {
+                matches!(idx, IndexDefinition::JsonFullText(other)
+                    if other.label == cfg.label && other.column == cfg.column)
+            });
+            if !still_indexed {
+                let derived = cfg.derived_column();
+                if let Err(e) = self.schema_manager.drop_property(&cfg.label, &derived) {
+                    debug!("derived column '{derived}' of '{name}' was not registered: {e}");
+                }
+            }
+        }
         self.schema_manager.save().await?;
         Ok(())
     }

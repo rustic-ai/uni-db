@@ -1711,8 +1711,10 @@ impl StorageBackend for LanceDbBackend {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&TokenizerConfig>,
         counters: Option<Arc<QueryCounters>>,
     ) -> Result<TextSearch> {
+        let analyzer = analyzer.cloned();
         let sql = if filter.is_trivially_true() {
             None
         } else {
@@ -1740,6 +1742,7 @@ impl StorageBackend for LanceDbBackend {
                 k,
                 sql.as_deref(),
                 unstored,
+                analyzer.as_ref(),
                 |scanner| attach_search_stats(scanner, counters, SearchKind::FullText),
             )
             .await

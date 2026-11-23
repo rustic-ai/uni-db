@@ -227,3 +227,102 @@ async fn test_inverted_index_edge_cases() -> Result<()> {
 
     Ok(())
 }
+
+/// An update that changes a document's terms removes the vertex from the
+/// postings of the terms it no longer holds, at the next flush; so does
+/// setting the list to empty or null.
+#[tokio::test]
+async fn test_inverted_index_update_drops_stale_terms() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let run = |stmt: &'static str| {
+        let db = &db;
+        async move {
+            let tx = db.session().tx().await?;
+            tx.execute(stmt).await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        }
+    };
+    run("CREATE LABEL Product (name STRING, tags LIST<STRING>)").await?;
+    run("CREATE INVERTED INDEX product_tags FOR (p:Product) ON (p.tags)").await?;
+    run("CREATE (:Product {name: 'A', tags: ['rust', 'db']}), (:Product {name: 'B', tags: ['web']})")
+        .await?;
+    db.flush().await?;
+
+    let postings = |terms: &'static [&'static str]| {
+        let storage = db.storage();
+        async move {
+            let index = storage.inverted_index("Product", "tags").await?;
+            let terms: Vec<String> = terms.iter().map(|t| (*t).to_string()).collect();
+            anyhow::Ok(index.query_any(&terms).await?.len())
+        }
+    };
+    assert_eq!(postings(&["rust"]).await?, 1);
+
+    run("MATCH (p:Product {name: 'A'}) SET p.tags = ['go']").await?;
+    db.flush().await?;
+    assert_eq!(postings(&["rust"]).await?, 0, "A no longer holds 'rust'");
+    assert_eq!(postings(&["db"]).await?, 0, "A no longer holds 'db'");
+    assert_eq!(postings(&["go"]).await?, 1);
+
+    run("MATCH (p:Product {name: 'A'}) SET p.tags = []").await?;
+    run("MATCH (p:Product {name: 'B'}) SET p.tags = null").await?;
+    db.flush().await?;
+    assert_eq!(
+        postings(&["go"]).await?,
+        0,
+        "an emptied list holds no terms"
+    );
+    assert_eq!(postings(&["web"]).await?, 0, "a null list holds no terms");
+
+    // An update to another property leaves the postings as they were.
+    run("MATCH (p:Product {name: 'A'}) SET p.tags = ['go']").await?;
+    db.flush().await?;
+    run("MATCH (p:Product {name: 'A'}) SET p.name = 'A2'").await?;
+    db.flush().await?;
+    assert_eq!(postings(&["go"]).await?, 1);
+    Ok(())
+}
+
+/// A sparse vector set to null leaves its vid in no posting after the flush.
+#[tokio::test]
+async fn test_sparse_index_null_drops_postings() -> Result<()> {
+    use uni_db::{DataType, IndexType, Value};
+    let db = Uni::in_memory().build().await?;
+    db.schema()
+        .label("Doc")
+        .property("title", DataType::String)
+        .property_nullable("emb", DataType::SparseVector { dimensions: 16 })
+        .index("emb", IndexType::sparse(16))
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute_with("CREATE (:Doc {title: 'a', emb: $e})")
+        .param(
+            "e",
+            Value::SparseVector {
+                indices: vec![1, 3],
+                values: vec![0.5, 0.25],
+            },
+        )
+        .run()
+        .await?;
+    tx.commit().await?;
+    db.flush().await?;
+    let hits = || async {
+        db.storage()
+            .sparse_search("Doc", "emb", &[(1, 1.0)], 10, None, None)
+            .await
+    };
+    assert_eq!(hits().await?.len(), 1);
+
+    let tx = db.session().tx().await?;
+    tx.execute("MATCH (d:Doc) SET d.emb = null").await?;
+    tx.commit().await?;
+    db.flush().await?;
+    assert!(
+        hits().await?.is_empty(),
+        "a null sparse vector has no postings"
+    );
+    Ok(())
+}

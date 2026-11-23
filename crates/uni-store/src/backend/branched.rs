@@ -271,19 +271,20 @@ impl StorageBackend for BranchedBackend {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
         _counters: Option<Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<TextSearch> {
         if let Some(branch) = self.scope.branch_for(table) {
             return self
                 .branching()?
                 .full_text_search_with_unstored_on_branch(
-                    table, &branch, column, query, k, &filter, unstored,
+                    table, &branch, column, query, k, &filter, unstored, analyzer,
                 )
                 .await;
         }
         Ok(TextSearch {
             stored: Vec::new(),
-            unstored: super::score_documents(column, query, unstored, || Ok(())).await?,
+            unstored: super::score_documents(column, query, unstored, analyzer, || Ok(())).await?,
         })
     }
 

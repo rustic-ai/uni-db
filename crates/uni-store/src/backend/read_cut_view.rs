@@ -390,13 +390,14 @@ impl StorageBackend for ReadCutBackend {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
         counters: Option<Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<TextSearch> {
         match self.reader(table) {
             Reader::At(reader) => {
                 reader
                     .full_text_search_with_unstored(
-                        table, column, query, k, filter, unstored, counters,
+                        table, column, query, k, filter, unstored, analyzer, counters,
                     )
                     .await
             }

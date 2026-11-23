@@ -23,6 +23,11 @@
 //! the flush; the unflushed documents are then scored on the same statistics.
 //! The one change this cannot hide is Lance's own: a row's score moves when
 //! an index optimization brings it under the index.
+//!
+//! Where no index segment exists yet (the label has no table, or its declared
+//! index is not built), the documents are tokenized by the declared index's
+//! analyzer when the caller names one, so that a row matches before its first
+//! flush as it will once the index is built over it.
 
 // Rust guideline compliant
 
@@ -53,6 +58,7 @@ use lance_index::scalar::inverted::{
     DocumentGranularity, FlatBm25SearchOptions, InvertedIndex, MemBM25Scorer, Scorer,
     build_global_bm25_scorer, flat_bm25_search_stream_with_options_and_scorer,
 };
+use uni_common::core::schema::TokenizerConfig;
 
 /// The row-id column Lance's flat search keys its output by.
 const ROW_ID: &str = "_rowid";
@@ -324,6 +330,10 @@ async fn collect_docs(
 /// # Errors
 /// Returns an error if an index segment cannot be opened, or a scan, the
 /// index search or the flat pass fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors StorageBackend::full_text_search_with_unstored"
+)]
 pub(crate) async fn search_with_unstored(
     dataset: Option<&Dataset>,
     column: &str,
@@ -331,12 +341,13 @@ pub(crate) async fn search_with_unstored(
     k: usize,
     filter: Option<&str>,
     unstored: Vec<(u64, String)>,
+    analyzer: Option<&TokenizerConfig>,
     configure: impl FnOnce(&mut Scanner),
 ) -> Result<TextSearch> {
     let Some(dataset) = dataset else {
         return Ok(TextSearch {
             stored: Vec::new(),
-            unstored: score_documents(column, query, unstored, || Ok(())).await?,
+            unstored: score_documents(column, query, unstored, analyzer, || Ok(())).await?,
         });
     };
     let node = structured(query)?;
@@ -356,7 +367,7 @@ pub(crate) async fn search_with_unstored(
                 .map_err(|e| anyhow!("BM25 statistics for '{column}': {e}"))?;
             (first.tokenizer(), Some(base))
         }
-        None => (simple_tokenizer()?, None),
+        None => (unindexed_tokenizer(analyzer)?, None),
     };
     let (covered_fragments, uncovered_fragments): (Vec<_>, Vec<_>) = dataset
         .fragments()
@@ -539,11 +550,13 @@ async fn take_scored(dataset: &Dataset, mut hits: Vec<(u64, f32)>) -> Result<Rec
 }
 
 /// Flat BM25 for a visible corpus without a persistent text column.
-/// Uses the same tokenizer and statistics as the unindexed dataset path.
+/// Uses the same tokenizer and statistics as the unindexed dataset path:
+/// `analyzer`'s when given, else Lance's bare one.
 pub(crate) async fn score_documents(
     column: &str,
     query: &str,
     docs: Vec<(u64, String)>,
+    analyzer: Option<&TokenizerConfig>,
     check: impl Fn() -> Result<()> + Clone + Send + Sync + 'static,
 ) -> Result<Vec<(u64, f32)>> {
     check()?;
@@ -568,14 +581,15 @@ pub(crate) async fn score_documents(
         Box::pin(input),
         column,
         &stats_query,
-        simple_tokenizer()?,
+        unindexed_tokenizer(analyzer)?,
         None,
     )
     .await?;
     check()?;
+    let mut tokenizer = unindexed_tokenizer(analyzer)?;
     match &node {
-        None => rescore_checked(&stats, &mut simple_tokenizer()?, query, docs, check),
-        Some(node) => score_structured(&stats, &mut simple_tokenizer()?, node, docs, check),
+        None => rescore_checked(&stats, &mut tokenizer, query, docs, check),
+        Some(node) => score_structured(&stats, &mut tokenizer, node, docs, check),
     }
 }
 
@@ -682,6 +696,26 @@ fn simple_tokenizer() -> Result<Box<dyn LanceTokenizer>> {
         .map_err(|e| anyhow!("simple tokenizer: {e}"))
 }
 
+/// The tokenizer for rows no index segment covers yet: the declared index's
+/// analyzer, which is how the rows will be tokenized once it is built, else
+/// Lance's bare one. An analyzer that cannot be built here (a custom
+/// tokenizer whose model files are missing) falls back to the bare one, as
+/// before an index was declared.
+fn unindexed_tokenizer(analyzer: Option<&TokenizerConfig>) -> Result<Box<dyn LanceTokenizer>> {
+    let Some(cfg) = analyzer else {
+        return simple_tokenizer();
+    };
+    match super::fts_analyzer::to_inverted_params(cfg, false)
+        .and_then(|params| params.build().map_err(|e| anyhow!("{e}")))
+    {
+        Ok(tokenizer) => Ok(tokenizer),
+        Err(e) => {
+            tracing::debug!("declared FTS analyzer unavailable, using the bare tokenizer: {e:#}");
+            simple_tokenizer()
+        }
+    }
+}
+
 /// Lance's flat BM25 pass, with `MatchQuery`'s defaults (`OR`, boost 1).
 async fn flat_bm25(
     input: SendableRecordBatchStream,
@@ -724,7 +758,7 @@ mod tests {
         let checks = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&checks);
         let docs = (0..2049).map(|id| (id, "supplier".to_string())).collect();
-        let error = score_documents("text", "supplier", docs, move || {
+        let error = score_documents("text", "supplier", docs, None, move || {
             // Entry passes; cancellation happens as statistics read the corpus.
             if checks.fetch_add(1, Ordering::Relaxed) > 0 {
                 anyhow::bail!("Query cancelled");
