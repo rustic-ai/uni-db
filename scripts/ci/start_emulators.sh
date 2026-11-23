@@ -2,16 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2024-2026 Dragonscale Team
 #
-# Starts MinIO, Azurite and fake-gcs-server on their default ports and creates
-# the `uni-test` bucket (or container) in each, for the `emulator_smoke` tests
-# (crates/uni/tests/common/emulator_smoke.rs). Used by the `cloud` jobs in
-# .github/workflows/ci.yml and nightly.yml; runs the same way locally.
+# Starts Azurite and fake-gcs-server on their default ports and creates the
+# `uni-test` bucket (or container) in each, and in the S3 emulator, for the
+# `emulator_smoke` tests (crates/uni/tests/common/emulator_smoke.rs). Used by
+# the `cloud` jobs in .github/workflows/ci.yml and nightly.yml; runs the same
+# way locally.
 #
-#   scripts/ci/start_emulators.sh            # start all three
+# S3 is LocalStack, which those jobs already run as a service on port 4566;
+# locally, start it first (`docker run -d -p 4566:4566 -e SERVICES=s3
+# localstack/localstack:4.13.1`), or point UNI_S3_ENDPOINT at another
+# S3-compatible service. MinIO used to fill this slot, but its images and
+# binaries are no longer published (Docker Hub, quay.io and dl.min.io all
+# refuse them).
+#
+#   scripts/ci/start_emulators.sh            # start them
 #   scripts/ci/start_emulators.sh stop       # remove the containers
 set -euo pipefail
 
-MINIO_IMAGE="minio/minio:RELEASE.2025-04-22T22-12-26Z"
+S3_ENDPOINT="${UNI_S3_ENDPOINT:-http://127.0.0.1:4566}"
 AZURITE_IMAGE="mcr.microsoft.com/azure-storage/azurite:3.34.0"
 FAKE_GCS_IMAGE="fsouza/fake-gcs-server:1.52.2"
 BUCKET="uni-test"
@@ -19,7 +27,7 @@ BUCKET="uni-test"
 AZURITE_CONN="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
 
 stop() {
-  docker rm -f uni-minio uni-azurite uni-fake-gcs >/dev/null 2>&1 || true
+  docker rm -f uni-azurite uni-fake-gcs >/dev/null 2>&1 || true
 }
 
 if [[ "${1:-}" == "stop" ]]; then
@@ -40,17 +48,19 @@ wait_for() {
   exit 1
 }
 
-docker run -d --name uni-minio -p 127.0.0.1:9000:9000 "$MINIO_IMAGE" server /data >/dev/null
 docker run -d --name uni-azurite -p 127.0.0.1:10000:10000 "$AZURITE_IMAGE" \
   azurite-blob --blobHost 0.0.0.0 --loose >/dev/null
 docker run -d --name uni-fake-gcs -p 127.0.0.1:4443:4443 "$FAKE_GCS_IMAGE" \
   -scheme http -port 4443 -public-host 127.0.0.1:4443 >/dev/null
 
-wait_for MinIO http://127.0.0.1:9000/minio/health/live
-# The MinIO image ships `mc`; run inside the container, where 127.0.0.1 is
-# MinIO itself (host networking does not reach it on Docker Desktop).
-docker exec uni-minio sh -c \
-  "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin >/dev/null && mc mb --ignore-existing local/$BUCKET"
+wait_for "the S3 emulator" "$S3_ENDPOINT"
+# A path-style PUT creates the bucket; 409 means it exists. LocalStack takes
+# any credentials, so the request carries none.
+status=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$S3_ENDPOINT/$BUCKET")
+if [[ "$status" != "200" && "$status" != "409" ]]; then
+  echo "S3 emulator: creating bucket '$BUCKET' returned HTTP $status" >&2
+  exit 1
+fi
 
 wait_for Azurite http://127.0.0.1:10000/devstoreaccount1
 # A throwaway venv: `pip --user` fails on an externally managed Python.
@@ -77,4 +87,4 @@ if [[ "$status" != "200" && "$status" != "409" ]]; then
 fi
 rm -rf "$(dirname "$VENV")"
 
-echo "MinIO, Azurite and fake-gcs-server are up with bucket '$BUCKET'."
+echo "S3 ($S3_ENDPOINT), Azurite and fake-gcs-server are up with bucket '$BUCKET'."

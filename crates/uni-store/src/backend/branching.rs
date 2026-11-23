@@ -42,6 +42,17 @@ use uni_common::core::schema::TokenizerConfig;
 
 use super::types::{FilterExpr, TextSearch, VectorQueryOpts};
 
+/// One tag on a table, as [`ForkBranching::list_tags`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchTag {
+    /// The tag's name, unique across the whole table.
+    pub name: String,
+    /// The branch whose version the tag pins; `None` for the trunk.
+    pub branch: Option<String>,
+    /// The pinned version.
+    pub version: u64,
+}
+
 /// Copy-on-write branching over individual tables, as required by the fork
 /// engine.
 ///
@@ -62,17 +73,6 @@ use super::types::{FilterExpr, TextSearch, VectorQueryOpts};
 ///   [`Self::current_version_on_branch`] back into a create call.
 ///
 /// [`StorageBackend::branching`]: super::traits::StorageBackend::branching
-/// One tag on a table, as [`ForkBranching::list_tags`] reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BranchTag {
-    /// The tag's name, unique across the whole table.
-    pub name: String,
-    /// The branch whose version the tag pins; `None` for the trunk.
-    pub branch: Option<String>,
-    /// The pinned version.
-    pub version: u64,
-}
-
 #[async_trait]
 pub trait ForkBranching: Send + Sync + 'static {
     // ========================
