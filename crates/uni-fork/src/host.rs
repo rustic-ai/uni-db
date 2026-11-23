@@ -30,6 +30,14 @@ pub trait ForkQueryHost: Send + Sync {
 
     /// The session's schema manager (labels + edge types to diff over).
     fn schema(&self) -> Arc<uni_common::core::schema::SchemaManager>;
+
+    /// The vids of `label` this view holds in unflushed buffers, which no
+    /// flushed index covers yet; `None` when the host cannot say (every row
+    /// of the label is then treated as possibly unflushed).
+    fn unflushed_vids(&self, label: &str) -> Option<Vec<Vid>> {
+        let _ = label;
+        None
+    }
 }
 
 /// Write-side host for `run_promote` — the primary-targeted transaction

@@ -647,12 +647,32 @@ async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
     if misses.is_empty() {
         return (out, index_degraded);
     }
-    // The scan sees every live primary row, flushed or not, so its verdict
-    // on the misses stands even when the index lookup itself failed.
-    let (found, scan_degraded) =
-        resolve_primary_vids_by_scan(primary, label, &misses, primary_ext_ids).await;
-    out.extend(found);
-    (out, scan_degraded)
+    // The index holds flushed rows only, so a miss may still be a row primary
+    // has not flushed. Only those rows are scanned: a promote of new vertices
+    // into a large label must not read the whole label. A host that cannot
+    // list its unflushed rows gets the full scan, whose verdict then stands
+    // even when the index lookup itself failed.
+    match primary.unflushed_vids(label) {
+        Some(unflushed) if unflushed.is_empty() => (out, index_degraded),
+        Some(unflushed) => {
+            let (found, scan_degraded) = resolve_primary_vids_by_scan_among(
+                primary,
+                label,
+                &misses,
+                primary_ext_ids,
+                Some(&unflushed),
+            )
+            .await;
+            out.extend(found);
+            (out, index_degraded || scan_degraded)
+        }
+        None => {
+            let (found, scan_degraded) =
+                resolve_primary_vids_by_scan(primary, label, &misses, primary_ext_ids).await;
+            out.extend(found);
+            (out, scan_degraded)
+        }
+    }
 }
 
 /// The UidIndex half of [`batch_resolve_primary_vids`]: flushed rows only.
@@ -749,9 +769,28 @@ async fn resolve_primary_vids_by_scan<Q: ForkQueryHost + ?Sized>(
     uids: &[UniId],
     primary_ext_ids: &HashMap<Vid, String>,
 ) -> (HashMap<UniId, Vid>, bool) {
+    resolve_primary_vids_by_scan_among(primary, label, uids, primary_ext_ids, None).await
+}
+
+/// [`resolve_primary_vids_by_scan`] over the given vids of the label only
+/// (`None` for all of them).
+async fn resolve_primary_vids_by_scan_among<Q: ForkQueryHost + ?Sized>(
+    primary: &Q,
+    label: &str,
+    uids: &[UniId],
+    primary_ext_ids: &HashMap<Vid, String>,
+    among: Option<&[Vid]>,
+) -> (HashMap<UniId, Vid>, bool) {
     let mut out: HashMap<UniId, Vid> = HashMap::new();
     let wanted: HashSet<&UniId> = uids.iter().collect();
-    let cypher = format!("MATCH (n:`{}`) RETURN n", escape_backticks(label));
+    let cypher = match among {
+        None => format!("MATCH (n:`{}`) RETURN n", escape_backticks(label)),
+        Some(vids) => format!(
+            "MATCH (n:`{}`) WHERE id(n) IN [{}] RETURN n",
+            escape_backticks(label),
+            vid_in_list(vids.iter().map(|v| v.as_u64()))
+        ),
+    };
     let Ok(rs) = primary.query(&cypher).await else {
         return (out, true);
     };

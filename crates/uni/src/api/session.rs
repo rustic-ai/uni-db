@@ -1932,6 +1932,17 @@ impl uni_fork::ForkQueryHost for Session {
     fn schema(&self) -> Arc<uni_common::core::schema::SchemaManager> {
         self.db.schema.clone()
     }
+
+    fn unflushed_vids(&self, label: &str) -> Option<Vec<uni_common::core::id::Vid>> {
+        let writer = self.db.writer.as_ref()?;
+        let l0 = &writer.l0_manager;
+        let mut vids: std::collections::BTreeSet<uni_common::core::id::Vid> =
+            std::collections::BTreeSet::new();
+        for buffer in std::iter::once(l0.get_current()).chain(l0.get_pending_flush()) {
+            vids.extend(buffer.read().vids_for_label(label));
+        }
+        Some(vids.into_iter().collect())
+    }
 }
 
 // ── Plan Cache (internal) ─────────────────────────────────────────────
