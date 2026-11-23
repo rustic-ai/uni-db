@@ -104,9 +104,9 @@ The commit (including the `flush_lock` acquisition and validation) is bounded by
 | **No spurious CRDT conflicts** | CRDT-mergeable writes are carved out of the write-set |
 | **Efficient batching** | Buffer many writes before flush |
 
-### WriteLease
+### One Writable Handle per Store
 
-For distributed or multi-agent deployments, Uni supports a `WriteLease` mechanism to coordinate write access across processes. This ensures only one process holds the write lease at a time, preventing conflicting commits from separate instances.
+Transactions within one database handle are validated as above. Across handles, a store has **one writable handle at a time**, and this is enforced: a local store is held by an OS lock, an object store by a lease (`UniConfig::writer_lease`). A second writable open fails with `StoreLocked`, and a writer that loses its lease stops with `WriterFenced`. Any number of read-only handles can open the store alongside it. `WriteLease::Custom` plugs in your own provider. See [Cloud Storage](../features/storage-cloud.md#concurrency).
 
 ### Handling Conflicts: Abort and Retry
 
@@ -114,11 +114,15 @@ With SSI enabled, a conflicting commit fails fast rather than silently overwriti
 
 ```rust
 // Retries the whole transaction body on a retriable conflict.
-session.transact_with_retry(RetryOptions::default(), |tx| async move {
-    let n: i64 = tx.query_scalar("MATCH (c:Counter {id:'x'}) RETURN c.n").await?;
-    tx.execute("MATCH (c:Counter {id:'x'}) SET c.n = $v", params).await?;
+session.transact_with_retry(RetryOptions::default(), |tx| Box::pin(async move {
+    let row = tx.query_with("MATCH (c:Counter {id:'x'}) RETURN c.n AS n").fetch_one().await?;
+    let n: i64 = match row { Some(r) => r.get("n")?, None => 0 };
+    tx.execute_with("MATCH (c:Counter {id:'x'}) SET c.n = $v")
+        .param("v", n + 1)
+        .run()
+        .await?;
     Ok(())
-}).await?;
+})).await?;
 
 // Single-statement convenience wrapper:
 session.execute_with_retry("MERGE (u:User {email:'a@b.com'})").await?;
@@ -178,13 +182,21 @@ Setting `UniConfig.ssi_enabled = false` reverts to the legacy **last-writer-wins
 Readers operate on consistent snapshots of the database. Each snapshot represents a point-in-time view:
 
 ```rust
+// crates/uni-common/src/core/snapshot.rs (abridged)
 pub struct SnapshotManifest {
-    snapshot_id: String,
-    version: u64,
-    timestamp: DateTime<Utc>,
-    labels: HashMap<String, LabelSnapshot>,      // Lance version per label
-    edge_types: HashMap<String, EdgeSnapshot>,   // Lance version per type
-    adjacencies: HashMap<String, Vec<String>>,   // Adjacency chunks
+    pub snapshot_id: String,
+    pub name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub parent_snapshot: Option<String>,
+    pub schema_version: u32,
+    pub version_high_water_mark: u64,
+    pub wal_high_water_mark: u64,
+    pub vertices: HashMap<String, LabelSnapshot>,   // version and count per label
+    pub edges: HashMap<String, EdgeSnapshot>,       // version and count per edge type
+    pub next_vid: Option<u64>,
+    pub next_eid: Option<u64>,
+    pub tables: BTreeMap<String, u64>,              // the read cut: Lance version per table
+    // ... writer_features, unpublished_bulk_versions
 }
 ```
 
@@ -215,28 +227,23 @@ sequenceDiagram
 
 ### Read-Your-Writes
 
-Readers can optionally include uncommitted L0 buffer data:
+The shared L0 buffer holds only committed data, so every read sees committed writes whether or not they have been flushed to Lance yet. A transaction additionally reads its own uncommitted writes from its private L0; no other transaction or session sees them before commit:
 
-```rust
-pub struct ExecutionContext {
-    storage: Arc<StorageManager>,
-    l0_buffer: Option<Arc<RwLock<L0Buffer>>>,  // Optional L0 access
-    snapshot: SnapshotManifest,
-}
-```
-
-**With L0 access:**
 ```cypher
-// Sees both committed (Lance) and uncommitted (L0) data
+// Inside one transaction: sees its own uncommitted CREATE
 CREATE (n:Paper {title: "New Paper"})
+WITH n
 MATCH (p:Paper) WHERE p.title = "New Paper"  // Finds it immediately
 RETURN p
 ```
 
-**Without L0 access (snapshot-only):**
-```cypher
-// Reader bound to v2, sees only committed data at v2
-MATCH (p:Paper) RETURN COUNT(p)  // Consistent count at v2
+**Pinned to a snapshot:**
+```rust
+// A session pinned to a named snapshot sees only the data committed at it
+let id = db.create_snapshot("v2").await?;
+let mut reader = db.session();
+reader.pin_to_version(&id).await?;
+reader.query("MATCH (p:Paper) RETURN count(p)").await?;  // Consistent count at v2
 ```
 
 ---
@@ -250,11 +257,11 @@ Snapshots are created when L0 buffer is flushed to Lance:
 ```mermaid
 flowchart TB
     Trigger["L0 Buffer Full<br/>(or manual flush)"]
-    S1["1. Write L0 vertices to Lance datasets<br/>vertices_Paper.lance → new version"]
-    S2["2. Write L0 edges to Lance datasets<br/>edges_CITES.lance → new version"]
-    S3["3. Update adjacency datasets<br/>adj_out_CITES_Paper.lance → new version"]
-    S4["4. Create snapshot manifest (atomic write)<br/>snapshots/manifest_v42.json"]
-    S5["5. Clear L0 buffer,<br/>invalidate adjacency cache"]
+    S1["1. Write L0 vertices to Lance datasets<br/>vertices_Paper.lance, vertices.lance → new versions"]
+    S2["2. Write L0 edges to Lance datasets<br/>edges.lance, deltas_CITES_fwd/bwd.lance → new versions"]
+    S3["3. Write the snapshot manifest naming those versions<br/>storage/catalog/manifests/&lt;uuid&gt;.json"]
+    S4["4. Publish it (atomic swap of catalog/latest)<br/>→ the flush becomes visible all at once"]
+    S5["5. Retire the flushed L0 buffer"]
 
     Trigger --> S1 --> S2 --> S3 --> S4 --> S5
 ```
@@ -263,28 +270,28 @@ flowchart TB
 
 ```json
 {
-  "snapshot_id": "snap_20240115_103045_abc123",
-  "version": 42,
-  "timestamp": "2024-01-15T10:30:45.123Z",
-  "labels": {
-    "Paper": {
-      "dataset_version": 15,
-      "vertex_count": 1000000
-    },
-    "Author": {
-      "dataset_version": 8,
-      "vertex_count": 250000
-    }
+  "snapshot_id": "7f3c…",
+  "parent_snapshot": "a91e…",
+  "created_at": "2026-01-15T10:30:45.123Z",
+  "schema_version": 12,
+  "version_high_water_mark": 4211,
+  "wal_high_water_mark": 98,
+  "vertices": {
+    "Paper": { "version": 7, "count": 1000000, "lance_version": 0 },
+    "Author": { "version": 3, "count": 250000, "lance_version": 0 }
   },
-  "edge_types": {
-    "CITES": {
-      "dataset_version": 12,
-      "edge_count": 5000000
-    }
+  "edges": {
+    "CITES": { "version": 3, "count": 5000000, "lance_version": 0 }
   },
-  "adjacencies": {
-    "CITES_out": ["chunk_0.lance", "chunk_1.lance"],
-    "CITES_in": ["chunk_0.lance", "chunk_1.lance"]
+  "next_vid": 1310720,
+  "next_eid": 5242880,
+  "tables": {
+    "vertices": 41,
+    "vertices_Paper": 38,
+    "vertices_Author": 22,
+    "edges": 29,
+    "deltas_CITES_fwd": 17,
+    "deltas_CITES_bwd": 17
   }
 }
 ```
@@ -315,7 +322,7 @@ flowchart TB
 
 | Level | Uni Equivalent | Anomalies Prevented |
 |-------|----------------|---------------------|
-| Read Uncommitted | With L0 access | None |
+| Read Uncommitted | N/A (only a transaction's own uncommitted writes are visible to it) | None |
 | Read Committed | N/A | Dirty reads |
 | Repeatable Read | Snapshot isolation (`ssi_enabled = false`, LWW) | Dirty reads, non-repeatable reads |
 | Serializable | SSI / OCC (default, `ssi_enabled = true`) | All anomalies (write skew and lost updates prevented by commit-time conflict detection) |
@@ -346,8 +353,8 @@ the checksum and replays segments above the snapshot's WAL high-water mark.
 
 ```mermaid
 flowchart TB
-    R1["1. Find latest snapshot manifest<br/>→ manifest_v42.json"]
-    R2["2. Load snapshot state<br/>→ Lance datasets at recorded versions"]
+    R1["1. Find latest snapshot manifest<br/>→ storage/catalog/latest"]
+    R2["2. Load snapshot state<br/>→ roll tables back to the versions it names"]
     R3["3. Replay WAL after last snapshot LSN<br/>→ Apply INSERT_VERTEX, DELETE_EDGE, etc.<br/>→ Rebuild L0 buffer"]
     R4["4. Resume normal operation<br/>→ Writer ready<br/>→ Readers can bind to snapshot"]
 
@@ -362,29 +369,28 @@ flowchart TB
 
 | Component | Primitive | Pattern |
 |-----------|-----------|---------|
-| L0 Buffer | `Mutex<L0Buffer>` | Exclusive write access |
+| L0 Buffer | `RwLock<Arc<RwLock<L0Buffer>>>` (`L0Manager`) | Outer lock swaps the buffer at flush; inner lock guards its content |
 | Adjacency Cache | `DashMap<K, V>` | Concurrent read, partitioned write |
 | Property Cache | `Mutex<LruCache>` | Exclusive access with LRU eviction |
-| ID Allocator | `AtomicU64` | Lock-free increment |
-| Snapshot Manager | `RwLock<SnapshotManager>` | Read-heavy access pattern |
+| ID Allocator | `tokio::sync::Mutex` plus `AtomicU64` mirrors | Batched reservation under the lock; reserved ends readable lock-free |
+| Snapshot Manager | `Arc<SnapshotManager>` | Shared; manifests are immutable once written |
 
 ### Example: Concurrent Reads
 
 ```rust
 // Multiple readers can execute concurrently
-let snapshot = snapshot_manager.current().await;
+let id = db.create_snapshot("report").await?;
+let (mut r1, mut r2) = (db.session(), db.session());
+r1.pin_to_version(&id).await?;
+r2.pin_to_version(&id).await?;
 
-// Reader 1 (thread A)
-tokio::spawn(async move {
-    let results = executor.execute(query1, &snapshot).await?;
-});
+// Reader 1 (task A)
+let a = tokio::spawn(async move { r1.query(query1).await });
 
-// Reader 2 (thread B)
-tokio::spawn(async move {
-    let results = executor.execute(query2, &snapshot).await?;
-});
+// Reader 2 (task B)
+let b = tokio::spawn(async move { r2.query(query2).await });
 
-// Both run concurrently, both see same consistent snapshot
+// Both run concurrently, both see the same consistent snapshot
 ```
 
 ---
@@ -422,32 +428,38 @@ transaction once the writer is built.
 ### Write Optimization
 
 ```rust
-// Good: Batch many writes
-let mut batch = Vec::with_capacity(1000);
-for item in items {
-    batch.push(create_vertex(item));
-}
-writer.insert_batch(batch).await?;
+// Good: Batch many writes into one transaction
+let tx = session.tx().await?;
+let props: Vec<HashMap<String, Value>> = items.iter().map(to_props).collect();
+tx.bulk_insert_vertices("Item", props).await?;
+tx.commit().await?;
 
-// Bad: Many small writes
+// Bad: One transaction per write
 for item in items {
-    writer.insert_vertex(item).await?;  // Overhead per call
+    let tx = session.tx().await?;
+    tx.execute_with("CREATE (:Item {name: $name})")
+        .param("name", item.name.clone())
+        .run()
+        .await?;
+    tx.commit().await?;  // Commit (and WAL append) per call
 }
 ```
 
 ### Reader Management
 
 ```rust
-// Good: Bind to snapshot once, reuse
-let snapshot = snapshot_manager.current().await;
-for query in queries {
-    executor.execute(query, &snapshot).await?;  // Same snapshot
+// Good: Pin one snapshot, reuse it
+let id = db.create_snapshot("batch").await?;
+let mut reader = db.session();
+reader.pin_to_version(&id).await?;
+for query in &queries {
+    reader.query(query).await?;  // Same snapshot
 }
 
-// Bad: New snapshot per query (may see inconsistent data)
+// Bad: Live session (each query sees the latest commits, which may change in between)
+let live = db.session();
 for query in queries {
-    let snapshot = snapshot_manager.current().await;  // Might change
-    executor.execute(query, &snapshot).await?;
+    live.query(query).await?;
 }
 ```
 

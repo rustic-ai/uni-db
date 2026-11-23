@@ -13,9 +13,11 @@ dropped.
 
 Both the sync `Uni` and async `AsyncUni` expose the same two load methods. They
 are gated behind the cargo features `wasm-plugins` (for `load_wasm_component`)
-and `extism-plugins` (for `load_wasm_extism`). The default wheel bundles
-wasmtime and ships both; some variant wheels omit one or both — if a method is
-absent at runtime, the wheel was built without the corresponding feature.
+and `extism-plugins` (for `load_wasm_extism`). The published wheels (`uni-db`
+and its variants) are built without them; build the bindings from source with
+`maturin develop --features wasm-plugins,extism-plugins` (in `bindings/uni-db`)
+to get them. If a method is absent at runtime, the wheel was built without the
+corresponding feature.
 
 `grants` is an optional list of capability/grant variant names (see
 [Capability names](#capability-names)). When omitted it defaults to the surface
@@ -71,7 +73,8 @@ grants `ScalarFn`, `AggregateFn`, `Procedure`. The same list drives both the
     ```python
     from uni_db import AsyncUni
 
-    async with AsyncUni.open("graph.uni") as db:
+    db = await AsyncUni.open("graph.uni")
+    async with db:
         outcome = await db.load_wasm_component(
             wasm_bytes,
             grants=["ScalarFn"],
@@ -89,6 +92,7 @@ Both methods return a `dict` with the following keys:
 | `scalars_registered` | `list[str]` | Qnames registered as Cypher scalar functions. |
 | `aggregates_registered` | `list[str]` | Qnames registered as Cypher aggregate functions. |
 | `procedures_registered` | `list[str]` | Qnames registered as Cypher procedures. |
+| `algorithms_registered` | `list[str]` | Qnames registered as graph algorithms. |
 | `effective_capabilities` | `list[str]` | Capabilities granted (manifest declared ∩ host grants). |
 | `denied_capabilities` | `list[str]` | Capabilities the plugin declared but the host did not grant. |
 
@@ -100,6 +104,7 @@ with different signatures from the two WASM methods above:
 | Method | On | Async? | Signature | Scope |
 | --- | --- | --- | --- | --- |
 | `load_rhai_plugin` | `Uni` / `AsyncUni` | both | `(script: str, grants: list[str] \| None = None) -> dict` | instance |
+| `load_python_plugin` | `Uni` / `AsyncUni` | both | `(module_src: str, module_name: str, grants: list[str] \| None = None) -> dict` | instance |
 | `load_python_plugin` | `Session` / `AsyncSession` (from `db.session()`) | both | `(module_src: str, module_name: str, grants: list[str] \| None = None) -> dict` | session |
 
 `Session` also exposes the decorator surface — `@session.scalar_fn(...)` /
@@ -107,14 +112,14 @@ with different signatures from the two WASM methods above:
 `session.finalize_plugin(plugin_id, version=None, grants=None) -> dict` — as an
 alternative to loading from a source string. All of these return a dict with
 `plugin_id`, `version`, `scalars_registered`, `aggregates_registered`,
-`procedures_registered`, and `denied_capabilities` (note: no
+`procedures_registered`, `algorithms_registered`, and `denied_capabilities` (note: no
 `effective_capabilities` key, unlike the two WASM methods). See
 [Rhai](loaders/rhai.md) and [PyO3](loaders/pyo3.md) for usage.
 
 ## Rust host API
 
 The Rust host owns the loaders explicitly: you construct a `WasmLoader` /
-`ExtismLoader`, pass the plugin bytes plus the grant list, and receive a
+`ExtismLoader`, pass the plugin bytes plus two capability sets, and receive a
 `LoadOutcome`. `host_grants` gates which host fns are linked into the plugin's
 import table; `registrar_caps` gates which registration surfaces the plugin may
 use.
@@ -125,7 +130,7 @@ pub fn load_wasm_component(
     &self,
     loader: &uni_plugin_wasm::WasmLoader,
     bytes: &[u8],
-    host_grants: &[String],
+    host_grants: &uni_plugin::CapabilitySet,
     registrar_caps: &uni_plugin::CapabilitySet,
 ) -> Result<uni_plugin_wasm::loader::LoadOutcome>;
 
@@ -134,7 +139,7 @@ pub fn load_wasm_extism(
     &self,
     loader: &uni_plugin_extism::ExtismLoader,
     bytes: &[u8],
-    host_grants: &[String],
+    host_grants: &uni_plugin::CapabilitySet,
     registrar_caps: &uni_plugin::CapabilitySet,
 ) -> Result<uni_plugin_extism::loader::LoadOutcome>;
 ```
@@ -182,6 +187,7 @@ keep adapters alive):
 | `scalars_registered` | `Vec<String>` | Qnames registered as scalar fns. |
 | `aggregates_registered` | `Vec<String>` | Qnames registered as aggregate fns. |
 | `procedures_registered` | `Vec<String>` | Qnames registered as procedures. |
+| `algorithms_registered` | `Vec<String>` | Qnames registered as graph algorithms. |
 | `pool` | `Arc<…InstancePool>` | Instance pool shared by every adapter bound to this plugin; keeps the pool alive while any adapter remains registered. |
 
 The Python load methods project every field except `pool` into the returned
@@ -189,9 +195,12 @@ dict.
 
 ## Capability names
 
-Grant strings (Python `grants`, Rust `host_grants`) and the entries in
-`effective_capabilities` / `denied_capabilities` use the variant names of
-`uni_plugin::Capability`. The authoritative set follows; see
+Grant strings (Python `grants`, parsed by `Capability::parse_grant` into a
+Rust `CapabilitySet`) use the variant names of `uni_plugin::Capability`. The
+entries in `effective_capabilities` / `denied_capabilities` are each
+capability's `Debug` rendering: the bare name for a variant without data
+(`ScalarFn`), and the name with its attenuation for one that carries data
+(`Network { allow: ["https://api.example.com/**"] }`). The authoritative set follows; see
 [Trust & Capabilities](trust-and-capabilities.md) for how declared capabilities,
 host grants, and the effective (intersected) set interact.
 
@@ -298,8 +307,9 @@ for the full contract and the worked `CALL` examples.
 
 These capabilities exist but are **never** grantable from a bare grant string —
 `Capability::parse_grant` rejects them, and only first-party host code may
-construct them directly. Requesting one from Python or the CLI is an error
-(strict paths) or is dropped (lenient paths).
+construct them directly. Requesting one is an error on the strict path (the
+Rhai loader) and is dropped on the lenient paths (the WASM and Extism methods,
+the Python plugin loaders, the decorator surface, and the CLI, which warns).
 
 | Name | Purpose |
 | --- | --- |

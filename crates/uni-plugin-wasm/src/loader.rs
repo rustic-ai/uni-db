@@ -1036,9 +1036,7 @@ fn apply_registration(
                 ));
                 registrar
                     .scalar_fn(parsed_qname, sig, adapter)
-                    .map_err(|e| {
-                        WasmError::Internal(format!("registrar.scalar_fn `{qname}`: {e}"))
-                    })?;
+                    .map_err(WasmError::Registration)?;
                 scalars.push(qname);
             }
             RegistrationEntry::Aggregate {
@@ -1063,9 +1061,7 @@ fn apply_registration(
                 ));
                 registrar
                     .aggregate_fn(parsed_qname, sig, adapter)
-                    .map_err(|e| {
-                        WasmError::Internal(format!("registrar.aggregate_fn `{qname}`: {e}"))
-                    })?;
+                    .map_err(WasmError::Registration)?;
                 aggregates.push(qname);
             }
             RegistrationEntry::Procedure {
@@ -1091,9 +1087,7 @@ fn apply_registration(
                 ));
                 registrar
                     .procedure(parsed_qname, sig, adapter)
-                    .map_err(|e| {
-                        WasmError::Internal(format!("registrar.procedure `{qname}`: {e}"))
-                    })?;
+                    .map_err(WasmError::Registration)?;
                 procedures.push(qname);
             }
             RegistrationEntry::Algorithm {
@@ -1123,9 +1117,9 @@ fn apply_registration(
                     parsed_qname.clone(),
                     sig,
                 ));
-                registrar.algorithm(parsed_qname, adapter).map_err(|e| {
-                    WasmError::Internal(format!("registrar.algorithm `{qname}`: {e}"))
-                })?;
+                registrar
+                    .algorithm(parsed_qname, adapter)
+                    .map_err(WasmError::Registration)?;
                 algorithms.push(qname);
             }
         }

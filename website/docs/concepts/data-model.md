@@ -37,7 +37,7 @@ Vertices represent entities in your domain. Each vertex has:
 
 | Component | Description | Example |
 |-----------|-------------|---------|
-| **VID** | Internal 64-bit identifier | `0x0001_0000_0000_002A` |
+| **VID** | Internal 64-bit identifier | `42` |
 | **Label(s)** | Type classification (one or more) | `:Paper`, `:Author`, `:Person:Employee` |
 | **Properties** | Key-value attributes | `{title: "...", year: 2023}` |
 
@@ -87,7 +87,7 @@ Strongly-typed properties defined in the schema provide optimal performance:
 
 #### Schemaless Properties (Overflow)
 
-Properties not in the schema are automatically stored in `overflow_json` (JSONB binary format):
+Properties not in the schema are automatically stored in `overflow_json` (a binary-encoded `CypherValue` map):
 
 ```cypher
 // Minimal schema: one typed property; everything else goes to overflow
@@ -100,7 +100,7 @@ CREATE (:Document {
     tags: ['tech', 'ai'],
     year: 2024
 })
-// Query works normally (automatic rewriting)
+// Query works normally
 MATCH (d:Document)
 WHERE d.author = 'Alice'
 RETURN d.title, d.year
@@ -113,7 +113,7 @@ RETURN d.title, d.year
 - 📝 User-defined metadata
 
 **Trade-offs:**
-- 🟡 Slower than typed columns (JSONB parsing)
+- 🟡 Slower than typed columns (blob decoding)
 - ❌ Cannot be indexed
 - 🔴 Less compression
 
@@ -141,6 +141,11 @@ tx.execute("CREATE (:Person {
 tx.commit().await?;
 ```
 
+A schemaless property holds a scalar, a temporal value or a list of scalars. A map value
+(or a list of maps or lists) is not a valid property value unless the property is declared
+`JSON` or `MAP<STRING, V>`, so `CREATE (:Document {meta: {a: 1}})` fails with
+`InvalidPropertyType`.
+
 **Best Practice:** Use schema properties for frequently-queried core fields, overflow properties for optional metadata.
 
 ---
@@ -151,7 +156,7 @@ Edges connect vertices with typed, directed relationships.
 
 | Component | Description | Example |
 |-----------|-------------|---------|
-| **EID** | Internal 64-bit identifier | `0x0002_0000_0000_0015` |
+| **EID** | Internal 64-bit identifier | `21` |
 | **Type** | Relationship classification | `:CITES`, `:AUTHORED_BY` |
 | **Source** | Origin vertex (VID) | Paper vertex |
 | **Destination** | Target vertex (VID) | Author vertex |
@@ -223,7 +228,7 @@ Uni supports a rich set of data types for properties:
 | `Float32` | 4 bytes | IEEE 754 single precision | `3.14159` |
 | `Float64` | 8 bytes | IEEE 754 double precision | `3.141592653589793` |
 | `Bool` | 1 byte | true / false | `true` |
-| `Timestamp` | 8 bytes | Microsecond precision UTC | `"2024-01-15T10:30:00Z"` |
+| `Timestamp` | 8 bytes | Nanosecond precision UTC | `"2024-01-15T10:30:00Z"` |
 
 ### Temporal Types
 
@@ -238,12 +243,14 @@ Uni supports a rich set of data types for properties:
 
 | Type | Description | Example |
 |------|-------------|---------|
-| `Json` | Structured JSON document | `{"nested": {"key": [1, 2, 3]}}` |
 | `Vector` | Fixed-dimension float32 array | `[0.1, -0.2, 0.3, ...]` |
+| `SparseVector` | Learned-sparse vector (SPLADE / BGE-M3); DDL `SPARSE_VECTOR(N)` | indices `[3, 17]`, values `[0.5, 0.2]` |
+| `BinaryVector` | Packed bit vector of N `u8` lanes for Hamming/Jaccard; DDL `BINARY_VECTOR(N)` | 8 lanes = 64 bits |
+| `Btic` | Temporal interval with per-bound granularity and certainty | `btic('2024-03')` |
 | `List<T>` | Variable-length array | `["a", "b", "c"]` |
 | `List<Vector>` | Multi-vector (ColBERT / late-interaction) | `[[0.1, -0.2], [0.3, -0.4]]` |
 | `Map<K, V>` | Typed key-value map (string keys) | `{key1: "value1", key2: "value2"}` |
-| `CypherValue` | Dynamic Cypher value | Any Cypher-compatible value |
+| `CypherValue` | Dynamic Cypher value, including nested maps; DDL `JSON` | `{nested: {key: [1, 2, 3]}}` |
 | `Bytes` | Raw byte buffer (images, audio, blobs) | `b"\xde\xad\xbe\xef"` |
 | `Point(PointType)` | Spatial point | `point({x: 1.0, y: 2.0})` |
 | `Crdt(CrdtType)` | Conflict-free replicated data type | CRDT-specific values |
@@ -287,15 +294,11 @@ A typed scalar `Map` value (`String`, `Int64`, `Float64`, `Bool`, `Bytes`) is st
 
 ### JSON Type
 
-For semi-structured data with flexible schema:
+For semi-structured data with flexible schema, declare the property `JSON`. There is no
+separate JSON type: `JSON` is stored as a `CypherValue` column.
 
-```json
-{
-  "metadata": {
-    "type": "Json",
-    "nullable": true
-  }
-}
+```cypher
+CREATE LABEL Paper (title STRING, metadata JSON)
 ```
 
 **JSON Capabilities:**
@@ -314,7 +317,8 @@ RETURN p.title
 
 ## Schema Definition
 
-Uni uses a strict schema for performance and storage efficiency. Define schemas via **Cypher DDL** or the **Rust/Python schema builders**. The on-disk schema is stored as JSON, but includes additional metadata and enum casing details.
+A schema is optional: a label or property that is not declared is stored schemaless.
+Declaring one gives typed columns for performance and storage efficiency. Define schemas via **Cypher DDL** or the **Rust/Python schema builders**. The on-disk schema is stored as JSON, but includes additional metadata and enum casing details.
 
 ### Conceptual Schema Example (illustrative)
 
@@ -372,7 +376,7 @@ Uni uses a strict schema for performance and storage efficiency. Define schemas 
       "year": { "type": "Int32", "nullable": true },
       "doi": { "type": "String", "nullable": true },
       "embedding": { "type": { "Vector": { "dimensions": 768 } }, "nullable": true },
-      "metadata": { "type": "Json", "nullable": true }
+      "metadata": { "type": "CypherValue", "nullable": true }
     },
     "Author": {
       "name": { "type": "String", "nullable": false },
@@ -418,7 +422,6 @@ Labels and edge types can be in different lifecycle states:
 | State | Description | Queryable | Writable |
 |-------|-------------|-----------|----------|
 | `Active` | Normal operation | Yes | Yes |
-| `Deprecated` | Marked for removal | Yes | Yes |
 | `Hidden` | No longer queryable | No | No |
 | `Tombstone` | Deleted | No | No |
 
@@ -428,9 +431,9 @@ Labels and edge types can be in different lifecycle states:
 
 | ID Type | Bits | Purpose | Example |
 |---------|------|---------|---------|
-| **VID** | 64 | Internal vertex identifier | `0x0001_0000_0000_002A` |
-| **EID** | 64 | Internal edge identifier | `0x0002_0000_0000_0015` |
-| **UniId** | 256 | Content-addressed hash | `bafkrei...` |
+| **VID** | 64 | Internal vertex identifier | `42` |
+| **EID** | 64 | Internal edge identifier | `21` |
+| **UniId** | 256 | Content-addressed hash | `b4nq4gcu...` |
 
 [Learn more about Identity Model →](identity.md)
 

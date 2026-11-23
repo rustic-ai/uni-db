@@ -677,6 +677,8 @@ impl HashAggregateOperator {
 
 ### Batch Size Selection
 
+The engine's batch size is `UniConfig::execution_batch_size` (default `None`, DataFusion's 8192). `UniConfig::batch_size` is only the page size a query cursor returns.
+
 | Scenario | Recommended Size | Rationale |
 |----------|------------------|-----------|
 | Simple scans | 8192 | Maximize throughput |
@@ -690,8 +692,9 @@ impl HashAggregateOperator {
 use uni_db::UniConfig;
 
 let mut config = UniConfig::default();
-config.parallelism = num_cpus::get();
-config.batch_size = 4096; // Rows per morsel
+config.parallelism = num_cpus::get();          // DataFusion target partitions
+config.execution_batch_size = Some(4096);        // Engine batch size (default: DataFusion's 8192)
+config.batch_size = 1024;                        // Rows per page a query cursor returns
 config.max_query_memory = 4 * 1024 * 1024 * 1024; // 4 GB
 ```
 

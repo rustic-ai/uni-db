@@ -35,7 +35,7 @@ pub mod fork;
 /// fork-engine extraction. `compute_diff`/`run_promote` are generic over the
 /// `uni_fork` host traits, which uni-db implements for `Session`/`Transaction`.
 pub mod fork_diff {
-    pub use uni_fork::diff::{compute_diff, run_promote};
+    pub use uni_fork::diff::{SharedLineage, compute_diff, compute_diff_with_lineage, run_promote};
     pub use uni_fork::types::*;
 }
 pub(crate) mod fork_admin;
@@ -72,6 +72,7 @@ pub mod sync;
 pub mod template;
 pub mod transaction;
 pub(crate) mod wal_recovery;
+pub(crate) mod writer_lock;
 /// Trigger dispatch engine — moved to `uni-plugin-host`; re-exported to keep
 /// the `uni_db::api::triggers::*` path stable.
 pub mod triggers {
@@ -86,7 +87,6 @@ use tracing::info;
 use uni_common::core::snapshot::SnapshotManifest;
 use uni_common::{CloudStorageConfig, UniConfig};
 use uni_common::{Result, UniError};
-use uni_store::cloud::build_cloud_store;
 use uni_xervo::api::ModelAliasSpec;
 use uni_xervo::runtime::ModelRuntime;
 
@@ -94,6 +94,7 @@ use uni_common::core::schema::SchemaManager;
 use uni_store::runtime::id_allocator::IdAllocator;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::wal::WriteAheadLog;
+use uni_store::runtime::wal_lineage;
 use uni_store::storage::manager::StorageManager;
 
 use uni_store::runtime::writer::Writer;
@@ -195,6 +196,10 @@ pub struct UniInner {
     pub(crate) cdc_runtime: Option<Arc<crate::cdc_runtime::CdcRuntime>>,
     /// Write lease configuration for multi-agent access.
     pub(crate) write_lease: Option<multi_agent::WriteLease>,
+    /// The writable handle's hold on its store (lock, lease or custom
+    /// provider). `None` for read-only handles, derived views and
+    /// `WriteLease::Unenforced`.
+    pub(crate) writer_hold: Option<Arc<writer_lock::WriterHold>>,
     /// Host plugin trust policy — signature enforcement + trust root.
     /// Consulted at every plugin-load site. Default: Disabled + empty root
     /// (accept everything, as before).
@@ -455,6 +460,13 @@ pub(crate) fn storage_error(e: anyhow::Error) -> UniError {
 }
 
 impl UniInner {
+    /// Whether this handle (or the read-only handle a fork was opened from)
+    /// writes nothing. A fork of a read-only handle has a writer of its own,
+    /// whose commits its fence refuses.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.writer.is_none() || self.storage.write_fence().is_read_only()
+    }
+
     /// Copy a label's rows from the main vertex table into its label table
     /// right after the label entered the live catalog (#304).
     ///
@@ -603,6 +615,7 @@ impl UniInner {
             // No CDC runtime reads a derived inner's `commit_tx`.
             cdc_runtime: None,
             write_lease: None,
+            writer_hold: None,
             plugin_trust: self.plugin_trust.clone(),
             active_session_count: AtomicUsize::new(0),
             total_queries: AtomicU64::new(0),
@@ -781,9 +794,15 @@ impl UniInner {
         // open never looks at. A no-op when no marker is present. Its events
         // are delivered as an ordinary fork load's are (triggers; a fork has
         // no CDC), by the caller.
-        let recovered_loads = uni_bulk::recover_interrupted_bulk_load(&forked_storage)
-            .await
-            .map_err(UniError::Internal)?;
+        // Skipped on a read-only database (no primary writer), which writes
+        // nothing: a writable open completes the load.
+        let recovered_loads = if !self.is_read_only() {
+            uni_bulk::recover_interrupted_bulk_load(&forked_storage)
+                .await
+                .map_err(UniError::Internal)?
+        } else {
+            Default::default()
+        };
 
         let prop_manager = Arc::new(PropertyManager::with_plugin_registry(
             forked_storage.clone(),
@@ -879,7 +898,7 @@ impl UniInner {
         // overlay write). Record it now, before a flush can move its edges
         // into `deltas_{type}_*` where only the name finds them. Skipped on a
         // read-only database (no primary writer), which persists nothing.
-        if self.writer.is_some() {
+        if !self.is_read_only() {
             crate::api::fork::record_fork_schemaless_edge_types(&scope, &merged_schema)
                 .await
                 .map_err(UniError::Internal)?;
@@ -891,9 +910,13 @@ impl UniInner {
             .map_err(UniError::Internal)?;
         // As on the primary: a fork load completed by recovery above has its
         // edges' declared endpoints checked once the fork's WAL is replayed.
-        uni_bulk::check_recovered_bulk_endpoints(&forked_storage, &forked_writer_arc, true)
-            .await
-            .map_err(UniError::Internal)?;
+        uni_bulk::check_recovered_bulk_endpoints(
+            &forked_storage,
+            &forked_writer_arc,
+            !self.is_read_only(),
+        )
+        .await
+        .map_err(UniError::Internal)?;
         if replayed > 0 {
             tracing::info!(
                 fork_id = %scope.fork_id(),
@@ -1318,7 +1341,10 @@ impl Uni {
                 .flush_to_l1(None)
                 .await
                 .map(|_| ())
-                .map_err(UniError::Internal)
+                .map_err(|e| match e.downcast::<UniError>() {
+                    Ok(typed) => typed,
+                    Err(other) => UniError::Internal(other),
+                })
         } else {
             Err(UniError::ReadOnly {
                 operation: "flush".to_string(),
@@ -1342,7 +1368,7 @@ impl Uni {
             writer
                 .create_snapshot(Some(name.to_string()))
                 .await
-                .map_err(UniError::Internal)?
+                .map_err(typed_or_internal)?
         } else {
             return Err(UniError::ReadOnly {
                 operation: "create_snapshot".to_string(),
@@ -1354,7 +1380,7 @@ impl Uni {
             .snapshot_manager()
             .save_named_snapshot(name, &snapshot_id)
             .await
-            .map_err(UniError::Internal)?;
+            .map_err(typed_or_internal)?;
 
         Ok(snapshot_id)
     }
@@ -1498,6 +1524,12 @@ impl Uni {
             if let Err(e) = writer.flush_to_l1(None).await {
                 tracing::error!("Error flushing during shutdown: {}", e);
             }
+            // Compaction, index builds and widening this handle made since its
+            // last publish: other handles, and the next open, read them only
+            // once a manifest names them.
+            if let Err(e) = self.inner.storage.publish_cut().await {
+                tracing::error!("Error publishing the read cut during shutdown: {}", e);
+            }
             // A flush that did not run (or found nothing to flush) leaves
             // announced commits in the WAL; record that they were announced,
             // so the next open does not announce them again.
@@ -1525,6 +1557,11 @@ impl Uni {
             .shutdown_async()
             .await
             .map_err(UniError::Internal)?;
+
+        // Every task has stopped: give the store up for the next writer.
+        if let Some(hold) = &self.inner.writer_hold {
+            hold.release().await;
+        }
 
         self.reap_scratch_dir();
         Ok(())
@@ -1680,7 +1717,49 @@ impl Drop for Uni {
                  `Uni::shutdown` to wait for them"
             );
         }
+        // Give the store up for the next writer. Sessions still holding this
+        // handle's data can read, but no longer write. The WAL is sealed
+        // first: after the release another writer may own it.
+        if let Some(hold) = &self.inner.writer_hold {
+            self.inner.seal_wal_on_drop();
+            hold.release_blocking();
+        }
         tracing::debug!("Uni dropped, background tasks signalled");
+    }
+}
+
+/// A storage error as its typed `UniError` when it carries one (a fenced
+/// writer, a conflict), `Internal` otherwise.
+/// Claims the store for the WAL `wal_id` (see
+/// `uni_store::runtime::wal_lineage`), swapping from `replacing`; a claim
+/// another writer replaced in the meantime trips the fence.
+async fn claim_store(
+    storage: &StorageManager,
+    data_store: &Arc<dyn ObjectStore>,
+    wal_id: &str,
+    wal: &str,
+    home: Option<&wal_lineage::WalHome>,
+    replacing: Option<&wal_lineage::Claim>,
+) -> Result<()> {
+    storage.write_fence().check().map_err(typed_or_internal)?;
+    match wal_lineage::claim(data_store, wal_id, wal, home, replacing).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.downcast_ref::<wal_lineage::ClaimLost>().is_some() => {
+            storage.write_fence().trip(e.to_string());
+            Err(storage
+                .write_fence()
+                .check()
+                .err()
+                .map_or_else(|| UniError::Internal(e), typed_or_internal))
+        }
+        Err(e) => Err(UniError::Internal(e)),
+    }
+}
+
+fn typed_or_internal(e: anyhow::Error) -> UniError {
+    match e.downcast::<UniError>() {
+        Ok(typed) => typed,
+        Err(other) => UniError::Internal(other),
     }
 }
 
@@ -1821,6 +1900,11 @@ impl Drop for UniInner {
     /// a `Session` still holds a reference to the data underneath it.
     fn drop(&mut self) {
         self.seal_wal_on_drop();
+        // Fallback: a handle torn down without `Drop for Uni` (released
+        // there and in `shutdown` already; release is idempotent).
+        if let Some(hold) = &self.writer_hold {
+            hold.release_blocking();
+        }
         // Stop the tasks this view started; nothing can reach them any more. A
         // fork's last session going away is the common case. Tasks of views
         // derived from this one (a nested fork) are left alone, and the tasks
@@ -1843,9 +1927,12 @@ pub struct UniBuilder {
     prebuilt_xervo_runtime: Option<Arc<ModelRuntime>>,
     hybrid_remote_url: Option<String>,
     cloud_config: Option<CloudStorageConfig>,
+    /// Raw `object_store` / Lance storage options; highest precedence.
+    storage_options: std::collections::BTreeMap<String, String>,
     create_if_missing: bool,
     fail_if_exists: bool,
     read_only: bool,
+    set_aside_stale_wal: bool,
     write_lease: Option<multi_agent::WriteLease>,
     plugin_trust: Arc<plugin_trust::PluginTrustConfig>,
     temp_dir: Option<TempDir>,
@@ -1865,9 +1952,11 @@ impl UniBuilder {
             prebuilt_xervo_runtime: None,
             hybrid_remote_url: None,
             cloud_config: None,
+            storage_options: std::collections::BTreeMap::new(),
             create_if_missing: true,
             fail_if_exists: false,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             plugin_trust: Arc::new(plugin_trust::PluginTrustConfig::default()),
             temp_dir: None,
@@ -1912,32 +2001,74 @@ impl UniBuilder {
         self
     }
 
-    /// Configure remote storage for data, keeping local path for WAL/IDs.
+    /// Typed object-store configuration: endpoint, credentials, region.
+    ///
+    /// Applies to a remote-only store (`Uni::open("s3://bucket/prefix")`)
+    /// and to the remote half of a [`hybrid`](Self::hybrid) store. A field
+    /// left `None` falls back to the environment (`AWS_*`, `GOOGLE_*`,
+    /// `AZURE_*`), and [`storage_option`](Self::storage_option) overrides
+    /// any field.
     ///
     /// # Examples
     ///
     /// ```ignore
-    /// use uni_common::CloudStorageConfig;
-    ///
-    /// let config = CloudStorageConfig::S3 {
-    ///     bucket: "my-bucket".to_string(),
-    ///     region: Some("us-east-1".to_string()),
-    ///     endpoint: None,
-    ///     access_key_id: None,
-    ///     secret_access_key: None,
-    ///     session_token: None,
-    ///     virtual_hosted_style: false,
-    /// };
-    ///
-    /// let db = Uni::open("./local_meta")
-    ///     .remote_storage("s3://my-bucket/graph-data", config)
+    /// let db = Uni::open("s3://my-bucket/graph")
+    ///     .cloud_storage(CloudStorageConfig::S3 {
+    ///         bucket: "my-bucket".into(),
+    ///         region: Some("us-east-1".into()),
+    ///         endpoint: Some("http://localhost:9000".into()),
+    ///         access_key_id: Some("minio".into()),
+    ///         secret_access_key: Some("minio-secret".into()),
+    ///         session_token: None,
+    ///         virtual_hosted_style: false,
+    ///     })
     ///     .build()
     ///     .await?;
     /// ```
-    pub fn remote_storage(mut self, remote_url: &str, config: CloudStorageConfig) -> Self {
-        self.hybrid_remote_url = Some(remote_url.to_string());
+    pub fn cloud_storage(mut self, config: CloudStorageConfig) -> Self {
         self.cloud_config = Some(config);
         self
+    }
+
+    /// Sets one raw storage option, passed to both object-store clients.
+    ///
+    /// Keys are `object_store` configuration keys (`aws_endpoint`,
+    /// `aws_region`, `google_service_account`, `azure_storage_use_emulator`,
+    /// `timeout`, …; aliases such as `endpoint` are accepted). A key only
+    /// Lance understands (`client_max_retries`, `use_opendal`, …) is passed
+    /// to Lance alone. Options win over [`cloud_storage`](Self::cloud_storage)
+    /// and the environment.
+    pub fn storage_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.storage_options.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets several raw storage options. See [`storage_option`](Self::storage_option).
+    pub fn storage_options<K, V>(mut self, options: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in options {
+            self.storage_options.insert(k.into(), v.into());
+        }
+        self
+    }
+
+    /// Hybrid mode: data in the object store at `remote_url`, the WAL and ID
+    /// allocator in the local directory the builder was opened with.
+    ///
+    /// Configure the remote side with [`cloud_storage`](Self::cloud_storage),
+    /// [`storage_option`](Self::storage_option), or the environment.
+    pub fn hybrid(mut self, remote_url: &str) -> Self {
+        self.hybrid_remote_url = Some(remote_url.to_string());
+        self
+    }
+
+    /// Hybrid mode with a typed configuration.
+    #[deprecated(note = "use `.hybrid(url).cloud_storage(config)`")]
+    pub fn remote_storage(self, remote_url: &str, config: CloudStorageConfig) -> Self {
+        self.hybrid(remote_url).cloud_storage(config)
     }
 
     /// Open the database in read-only mode.
@@ -1950,10 +2081,23 @@ impl UniBuilder {
         self
     }
 
+    /// Open a hybrid store whose local WAL is stale, setting the WAL aside.
+    ///
+    /// A hybrid host that crashed with unflushed commits, and whose store
+    /// another host has opened since, holds a WAL that no longer describes
+    /// the store; a plain open fails with [`UniError::StaleWal`]. With this
+    /// option its segments are moved to `wal_set_aside/` in the same
+    /// directory (never deleted) and the store opens as the object store has
+    /// it. A WAL that is the store's own is replayed as usual.
+    pub fn set_aside_stale_wal(mut self) -> Self {
+        self.set_aside_stale_wal = true;
+        self
+    }
+
     /// Set the write lease strategy for multi-agent access.
     ///
-    /// This configures how write access is coordinated when multiple
-    /// processes share the same database.
+    /// The default, [`WriteLease::Local`](multi_agent::WriteLease::Local),
+    /// is the built-in lock or lease; see [`multi_agent::WriteLease`].
     pub fn write_lease(mut self, lease: multi_agent::WriteLease) -> Self {
         self.write_lease = Some(lease);
         self
@@ -1979,7 +2123,26 @@ impl UniBuilder {
     }
 
     /// Open the database (async).
-    pub async fn build(mut self) -> Result<Uni> {
+    pub async fn build(self) -> Result<Uni> {
+        let mut taken = None;
+        let result = self.build_holding(&mut taken).await;
+        // A failed open gives the store back before it returns, so the
+        // caller can retry at once. Awaited here rather than left to the
+        // hold's drop, which on a `current_thread` runtime cannot finish the
+        // release until the caller's runtime runs again.
+        if result.is_err()
+            && let Some(hold) = taken
+        {
+            hold.release().await;
+        }
+        result
+    }
+
+    /// [`build`](Self::build), reporting the store hold it takes in `taken`.
+    async fn build_holding(
+        mut self,
+        taken: &mut Option<Arc<writer_lock::WriterHold>>,
+    ) -> Result<Uni> {
         self.config.warn_deprecated_options();
         let uri = self.uri.clone();
         // Share one guard between `UniInner` and every background task that can
@@ -1987,110 +2150,146 @@ impl UniBuilder {
         // last writer rather than racing it. See `ScratchDir` (issue #167).
         let scratch_dir: Option<Arc<ScratchDir>> =
             self.temp_dir.take().map(|d| Arc::new(ScratchDir::new(d)));
-        let is_remote_uri = uri.contains("://");
+        let primary_is_url = uri.contains("://");
         let is_hybrid = self.hybrid_remote_url.is_some();
 
-        if is_hybrid && is_remote_uri {
+        if is_hybrid && primary_is_url {
             return Err(UniError::Internal(anyhow::anyhow!(
                 "Hybrid mode requires a local path as primary URI, found: {}",
                 uri
             )));
         }
 
-        let (storage_uri, data_store, local_store_opt) = if is_hybrid {
-            let remote_url = self.hybrid_remote_url.as_ref().unwrap();
-
-            // Remote Store (Data) - use explicit cloud_config if provided
-            let remote_store: Arc<dyn ObjectStore> = if let Some(cloud_cfg) = &self.cloud_config {
-                build_cloud_store(cloud_cfg).map_err(UniError::Internal)?
-            } else {
-                let url = url::Url::parse(remote_url).map_err(|e| {
-                    UniError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        e.to_string(),
-                    ))
-                })?;
-                let (os, _path) =
-                    object_store::parse_url(&url).map_err(|e| UniError::Internal(e.into()))?;
-                Arc::from(os)
-            };
-
-            // Local Store (WAL, IDs)
-            let path = PathBuf::from(&uri);
+        // The local directory, for a local store or a hybrid store's WAL and
+        // ID allocator.
+        let ensure_dir = |path: &Path| -> Result<()> {
             if path.exists() {
                 if self.fail_if_exists {
                     return Err(UniError::Internal(anyhow::anyhow!(
                         "Database already exists at {}",
-                        uri
+                        path.display()
                     )));
                 }
             } else {
                 if !self.create_if_missing {
-                    return Err(UniError::NotFound { path: path.clone() });
+                    return Err(UniError::NotFound {
+                        path: path.to_path_buf(),
+                    });
                 }
-                std::fs::create_dir_all(&path).map_err(UniError::Io)?;
+                std::fs::create_dir_all(path).map_err(UniError::Io)?;
             }
+            Ok(())
+        };
+        if !primary_is_url {
+            ensure_dir(Path::new(&uri))?;
+        } else if uri.starts_with("file://") {
+            let path = url::Url::parse(&uri)
+                .ok()
+                .and_then(|u| u.to_file_path().ok())
+                .ok_or_else(|| UniError::Internal(anyhow::anyhow!("Invalid file URI: {}", uri)))?;
+            ensure_dir(&path)?;
+        }
 
-            let local_store = Arc::new(
-                LocalFileSystem::new_with_prefix(&path).map_err(|e| UniError::Io(e.into()))?,
-            );
-
-            // For hybrid, storage_uri is the remote URL (since StorageManager loads datasets from there)
-            // But we must provide the correct store to other components manually.
-            (
-                remote_url.clone(),
-                remote_store,
-                Some(local_store as Arc<dyn ObjectStore>),
+        // One resolved location for everything but a hybrid store's WAL and
+        // ID allocator: the data root `R`, its option map, and the store
+        // handles both object-store clients are built from.
+        let location_spec = uni_store::location::LocationSpec {
+            uri: self
+                .hybrid_remote_url
+                .clone()
+                .unwrap_or_else(|| uri.clone()),
+            cloud: self.cloud_config.clone(),
+            options: self.storage_options.clone(),
+        };
+        let location = uni_store::location::StoreLocation::resolve_from_env(
+            &location_spec,
+            &self.config.object_store,
+        )
+        .await
+        .map_err(UniError::Internal)?;
+        if is_hybrid
+            && matches!(
+                location.kind(),
+                uni_store::location::LocationKind::Local { .. }
             )
-        } else if is_remote_uri {
-            // Remote Only - use explicit cloud_config if provided
-            let remote_store: Arc<dyn ObjectStore> = if let Some(cloud_cfg) = &self.cloud_config {
-                build_cloud_store(cloud_cfg).map_err(UniError::Internal)?
-            } else {
-                let url = url::Url::parse(&uri).map_err(|e| {
-                    UniError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        e.to_string(),
-                    ))
-                })?;
-                let (os, _path) =
-                    object_store::parse_url(&url).map_err(|e| UniError::Internal(e.into()))?;
-                Arc::from(os)
+        {
+            return Err(UniError::Internal(anyhow::anyhow!(
+                "Hybrid mode needs an object-store URI for the data, found: {}",
+                location_spec.uri
+            )));
+        }
+
+        // Decide the layout before anything writes.
+        let (layout, record_layout) =
+            match location.probe_layout().await.map_err(UniError::Internal)? {
+                uni_store::location::LayoutProbe::Recorded(layout) => (layout, false),
+                uni_store::location::LayoutProbe::Inferred(layout) => (layout, !self.read_only),
+                uni_store::location::LayoutProbe::LegacyPrefixed { root_files } => {
+                    return Err(UniError::Internal(anyhow::anyhow!(
+                        "The store at {root} looks like one written by uni-db 5.3.0 or older, \
+                     which kept a prefixed store's metadata at the bucket root: its tables \
+                     are under the prefix, but its catalog is not, and the bucket root holds \
+                     {files}. Several prefixes may share those files, so they are not \
+                     adopted automatically. To open this store, copy the bucket root's \
+                     catalog/ (and, for a remote-only store, wal/ and id_allocator.json) \
+                     under the prefix, then open it again. See the storage documentation \
+                     on stores written before 6.0.",
+                        root = location.root_uri(),
+                        files = root_files.join(", "),
+                    )));
+                }
             };
 
-            (uri.clone(), remote_store, None)
+        // One writer per store: take the lock (local) or lease (object store)
+        // before the first write. Read-only handles take neither, and their
+        // fence starts tripped: storage, the fork registry and every Lance
+        // commit refuse a write through them.
+        let fence = if self.read_only {
+            uni_store::lease::WriteFence::read_only()
         } else {
-            // Local Only
-            let path = PathBuf::from(&uri);
-            let storage_path = path.join("storage");
-
-            if path.exists() {
-                if self.fail_if_exists {
-                    return Err(UniError::Internal(anyhow::anyhow!(
-                        "Database already exists at {}",
-                        uri
-                    )));
-                }
-            } else {
-                if !self.create_if_missing {
-                    return Err(UniError::NotFound { path: path.clone() });
-                }
-                std::fs::create_dir_all(&path).map_err(UniError::Io)?;
-            }
-
-            // Ensure storage directory exists
-            if !storage_path.exists() {
-                std::fs::create_dir_all(&storage_path).map_err(UniError::Io)?;
-            }
-
-            let store = Arc::new(
-                LocalFileSystem::new_with_prefix(&path).map_err(|e| UniError::Io(e.into()))?,
-            );
-            (
-                storage_path.to_string_lossy().to_string(),
-                store.clone() as Arc<dyn ObjectStore>,
-                Some(store as Arc<dyn ObjectStore>),
+            uni_store::lease::WriteFence::new()
+        };
+        let mut write_lease = self.write_lease.take();
+        let writer_hold = if self.read_only {
+            None
+        } else {
+            let lease_cfg = &self.config.writer_lease;
+            writer_lock::acquire(
+                &mut write_lease,
+                &location,
+                is_hybrid.then(|| Path::new(&uri)),
+                uni_store::lease::LeaseSettings {
+                    ttl: lease_cfg.ttl,
+                    renew_interval: lease_cfg.renew_interval,
+                    acquire_grace: lease_cfg.acquire_grace,
+                    clock_skew: lease_cfg.clock_skew,
+                },
+                &fence,
             )
+            .await?
+        };
+        taken.clone_from(&writer_hold);
+        if record_layout {
+            location
+                .write_layout_marker(layout)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
+        let data_store = location.meta_store();
+        // The store the WAL and ID allocator use, when it is not `data_store`.
+        let local_store_opt: Option<Arc<dyn ObjectStore>> = if is_hybrid {
+            Some(Arc::new(
+                LocalFileSystem::new_with_prefix(&uri).map_err(|e| UniError::Io(e.into()))?,
+            ))
+        } else {
+            None
+        };
+        // The local directory those live in, when there is one.
+        let wal_fs_root: Option<PathBuf> = if is_hybrid {
+            Some(PathBuf::from(&uri))
+        } else {
+            location.fs_root().map(Path::to_path_buf)
         };
 
         // Canonical schema location in metadata catalog.
@@ -2106,7 +2305,15 @@ impl UniBuilder {
             Err(object_store::Error::NotFound { .. }) => false,
             Err(e) => return Err(UniError::Internal(e.into())),
         };
-        if !has_catalog_schema {
+        // A read-only open writes nothing: it reads the legacy file in place.
+        let mut schema_load_path = schema_obj_path.clone();
+        if !has_catalog_schema && self.read_only {
+            match data_store.head(&legacy_schema_obj_path).await {
+                Ok(_) => schema_load_path = legacy_schema_obj_path.clone(),
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(UniError::Internal(e.into())),
+            }
+        } else if !has_catalog_schema {
             match data_store.get(&legacy_schema_obj_path).await {
                 Ok(result) => {
                     let bytes = result
@@ -2131,15 +2338,26 @@ impl UniBuilder {
         // Load schema (SchemaManager::load creates a default if missing)
         // Schema is always in data_store (Remote or Local)
         let schema_manager = Arc::new(
-            SchemaManager::load_from_store(data_store.clone(), &schema_obj_path)
+            SchemaManager::load_from_store(data_store.clone(), &schema_load_path)
                 .await
                 .map_err(UniError::Internal)?,
         );
-        // A local-only store keeps the catalog under the database directory;
-        // a restore syncs it there before clearing its intent.
-        if !is_hybrid && !is_remote_uri {
-            schema_manager.set_local_file(PathBuf::from(&uri).join(schema_obj_path.as_ref()));
+        // A store in a local directory keeps the catalog under it; a restore
+        // syncs it there before clearing its intent.
+        if !is_hybrid && let Some(root) = location.fs_root() {
+            schema_manager.set_local_file(root.join(schema_obj_path.as_ref()));
         }
+        // The primary catalog (schema, Locy rules) is written only by a
+        // handle that holds the store: a read-only handle's gate is closed
+        // from the start, a writer's closes with its fence.
+        let catalog_gate = if self.read_only {
+            let closed = uni_store::lease::WriteFence::new();
+            closed.trip("the handle is read-only");
+            closed
+        } else {
+            Arc::clone(&fence)
+        };
+        schema_manager.set_write_gate(Arc::clone(&catalog_gate) as _);
 
         // Hoisted above the persisted-Locy-rule load below, which needs the
         // registry to compile rules against a registry-backed monotonicity
@@ -2163,11 +2381,7 @@ impl UniBuilder {
         // object-store URIs (those containing "://") have no local
         // sidecar root — for those, persistence falls back to
         // `NullPersistence`.
-        let persistence_data_path: Option<std::path::PathBuf> = if is_remote_uri {
-            None
-        } else {
-            Some(std::path::PathBuf::from(&uri))
-        };
+        let persistence_data_path: Option<std::path::PathBuf> = wal_fs_root.clone();
         let custom_persistence_sink =
             register_builtin_plugins(&plugin_registry, persistence_data_path.as_deref()).expect(
                 "BuiltinPlugin / ApocCorePlugin registration must succeed against fresh registry",
@@ -2185,43 +2399,31 @@ impl UniBuilder {
             self.skip_invalid_locy_rules,
             &plugin_registry,
         )?;
-        let locy_rule_persister = Arc::new(locy_rule_catalog::LocyRulePersister::new(
-            data_store.clone(),
-            locy_rules_obj_path,
-        ));
-
-        let lancedb_storage_options = self
-            .cloud_config
-            .as_ref()
-            .map(Self::cloud_config_to_lancedb_storage_options);
+        let locy_rule_persister = Arc::new(
+            locy_rule_catalog::LocyRulePersister::new(data_store.clone(), locy_rules_obj_path)
+                .with_fence(Arc::clone(&catalog_gate)),
+        );
 
         // Declarations (and the restore and recovery paths that redo their
         // storage half on open) judge the values a property already holds by
         // the write path's rule; see `uni_store::storage::declared_values`.
         uni_store::storage::declared_values::install_coercion(uni_query::coerce_declared_value);
 
-        let mut storage = if is_hybrid || is_remote_uri {
-            // Preserve explicit cloud settings (endpoint, credentials, path style)
-            // by reusing the constructed remote store.
-            StorageManager::new_with_store_and_storage_options(
-                &storage_uri,
-                data_store.clone(),
-                schema_manager.clone(),
-                self.config.clone(),
-                lancedb_storage_options.clone(),
-            )
-            .await
-            .map_err(UniError::Internal)?
-        } else {
-            // Local mode keeps using a storage-path-scoped local store.
-            StorageManager::new_with_config(
-                &storage_uri,
-                schema_manager.clone(),
-                self.config.clone(),
-            )
-            .await
-            .map_err(UniError::Internal)?
-        };
+        // Tables, indexes and snapshot manifests, under the location's table
+        // root, with both object-store clients configured from one map.
+        let mut storage = StorageManager::new_with_location_opts(
+            &location,
+            layout,
+            schema_manager.clone(),
+            self.config.clone(),
+            self.read_only,
+        )
+        .await
+        .map_err(UniError::Internal)?;
+        if let Some(local) = &local_store_opt {
+            storage.set_local_store(Arc::clone(local));
+        }
+        storage.set_write_fence(Arc::clone(&fence));
 
         // Stamp the registry onto the owned StorageManager (before it is
         // shared) so compaction and L0 flush route custom CRDT merges through
@@ -2252,10 +2454,17 @@ impl UniBuilder {
         let shutdown_handle = Arc::new(ShutdownHandle::new(Duration::from_secs(30)));
 
         // Start background compaction with shutdown signal
-        let compaction_handle = storage
-            .clone()
-            .start_background_compaction(shutdown_handle.subscribe());
-        track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), compaction_handle);
+        // Compaction rewrites tables: the writer's job, never a reader's.
+        if !self.read_only {
+            let compaction_handle = storage
+                .clone()
+                .start_background_compaction(shutdown_handle.subscribe());
+            track_task_with_scratch_claim(
+                &shutdown_handle,
+                scratch_dir.as_ref(),
+                compaction_handle,
+            );
+        }
 
         // Initialize property manager
         let prop_cache_capacity = self.config.cache_size / 1024;
@@ -2282,15 +2491,33 @@ impl UniBuilder {
         // so it must run first). A no-op when no marker is present (H9). The
         // loads it completes whose events were not delivered are delivered
         // once the database's event machinery exists, below.
-        let recovered_loads = uni_bulk::recover_interrupted_bulk_load(&storage)
+        // Recovery writes, so it is the writer's; a reader sees the store as
+        // the crash left it until a writer opens.
+        // Reads see the table versions the latest manifest names (its read
+        // cut). A writable handle records its commits from here, so a
+        // manifest a recovery below saves names every table.
+        storage
+            .begin_read_cut(!self.read_only)
             .await
             .map_err(UniError::Internal)?;
+        if !self.read_only {
+            schema_manager.set_catalog_publisher(storage.catalog_publisher());
+        }
+        let recovered_loads = if self.read_only {
+            Vec::new()
+        } else {
+            uni_bulk::recover_interrupted_bulk_load(&storage)
+                .await
+                .map_err(UniError::Internal)?
+        };
         // A snapshot restore cut short rewinds the rest of the store and
         // publishes its manifest, so it too runs before the latest snapshot is
         // read.
-        uni_store::snapshot::restore::recover_interrupted_restore(&storage)
-            .await
-            .map_err(UniError::Internal)?;
+        if !self.read_only {
+            uni_store::snapshot::restore::recover_interrupted_restore(&storage)
+                .await
+                .map_err(UniError::Internal)?;
+        }
 
         // Determine start version and WAL high water mark from latest snapshot.
         // Detects and recovers from a lost manifest pointer.
@@ -2300,6 +2527,8 @@ impl UniBuilder {
             .await
             .map_err(UniError::Internal)?;
 
+        // The manifest the store resumes from, for its ID marks.
+        let mut recovered_manifest = latest_snapshot.clone();
         let (start_version, wal_high_water_mark) = if let Some(ref snapshot) = latest_snapshot {
             (
                 snapshot.version_high_water_mark + 1,
@@ -2324,22 +2553,35 @@ impl UniBuilder {
                     .list_snapshots()
                     .await
                     .map_err(UniError::Internal)?;
-                if let Some(last_id) = snapshot_ids.last() {
+                // Snapshot ids are random, so the newest manifest is the one
+                // with the highest version mark, not the last id listed.
+                let mut newest: Option<uni_common::core::snapshot::SnapshotManifest> = None;
+                for id in &snapshot_ids {
                     let manifest = storage
                         .snapshot_manager()
-                        .load_snapshot(last_id)
+                        .load_snapshot(id)
                         .await
                         .map_err(UniError::Internal)?;
+                    let key = |m: &uni_common::core::snapshot::SnapshotManifest| {
+                        (m.version_high_water_mark, m.created_at)
+                    };
+                    if newest.as_ref().is_none_or(|n| key(&manifest) > key(n)) {
+                        newest = Some(manifest);
+                    }
+                }
+                if let Some(manifest) = newest {
                     tracing::warn!(
                         "Latest snapshot pointer missing but found manifest '{}'. \
                          Recovering version {}.",
-                        last_id,
+                        manifest.snapshot_id,
                         manifest.version_high_water_mark
                     );
-                    (
+                    let resume = (
                         manifest.version_high_water_mark + 1,
                         manifest.wal_high_water_mark,
-                    )
+                    );
+                    recovered_manifest = Some(manifest);
+                    resume
                 } else {
                     return Err(UniError::Internal(anyhow::anyhow!(
                         "Snapshot manifests directory exists but contains no valid manifests. \
@@ -2395,15 +2637,190 @@ impl UniBuilder {
             }
         };
 
+        // Roll every table back to the versions the manifest the store
+        // resumes from names, before the WAL replays: what is above them was
+        // never published (a crashed flush's commits, which the replay writes
+        // again, or a stale writer's). A reader reads at those versions.
+        let mut stale_index_labels: Vec<String> = Vec::new();
+        if self.read_only {
+            if let Some(manifest) = recovered_manifest.as_ref() {
+                storage
+                    .read_cut()
+                    .publish(&manifest.snapshot_id, manifest.tables.clone());
+            }
+        } else {
+            let undone = storage
+                .reconcile_read_cut(recovered_manifest.as_ref())
+                .await
+                .map_err(UniError::Internal)?;
+            // An index recorded built over a version the reconcile rolled
+            // back is rebuilt.
+            stale_index_labels = storage
+                .mark_indexes_stale(&undone)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
+        // Which WAL a hybrid store follows (`uni_store::runtime::wal_lineage`).
+        // Its WAL is local while everything else is remote, so a WAL the store
+        // does not follow, still holding commits, is an earlier writer's: a
+        // host that crashed or was dropped with unflushed commits and whose
+        // store another host has opened since. Replaying it would lay commits
+        // made against an older state over newer data, with ids the newer
+        // writer may have reused. A store whose WAL lives beside it shares the
+        // WAL with every writer and is not checked.
+        let mut skip_wal_replay = false;
+        if is_hybrid {
+            let wal_dir = Path::new(&uri).join("wal").display().to_string();
+            let local_wal_id = if self.read_only {
+                wal_lineage::load(&wal_store).await
+            } else {
+                wal_lineage::load_or_create(&wal_store).await.map(Some)
+            }
+            .map_err(UniError::Internal)?;
+            let claimed = wal_lineage::load_claim(&data_store)
+                .await
+                .map_err(UniError::Internal)?;
+            // The directory this WAL lives in: a copy of it (a VM image, an
+            // rsync to a standby) carries the WAL's id but not its home.
+            let home = wal_lineage::WalHome::of(Path::new(&uri));
+            let followed = match (&claimed, local_wal_id.as_deref()) {
+                (Some(claim), Some(id)) => claim.names(id, Some(&home)),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if !followed {
+                let segments = wal_lineage::segments_with_commits(&wal_store)
+                    .await
+                    .map_err(UniError::Internal)?;
+                let local = local_wal_id.as_deref().unwrap_or("unknown");
+                if segments == 0 {
+                    // Nothing in it to lose: no segments, or only the mark a
+                    // clean close seals. A writer moves the marks out of the
+                    // way, since replay would read them as its own WAL's once
+                    // the store is claimed below.
+                    if !self.read_only {
+                        let moved = wal_lineage::set_aside(&wal_store, local)
+                            .await
+                            .map_err(UniError::Internal)?;
+                        tracing::debug!(set_aside = %moved, "set aside an earlier writer's WAL marks");
+                    }
+                } else if self.read_only {
+                    tracing::warn!(
+                        wal = %wal_dir,
+                        segments,
+                        "this WAL belongs to an earlier writer of the store; a read-only open \
+                         ignores it and reads the store as the object store has it"
+                    );
+                    skip_wal_replay = true;
+                } else if self.set_aside_stale_wal {
+                    let moved = wal_lineage::set_aside(&wal_store, local)
+                        .await
+                        .map_err(UniError::Internal)?;
+                    tracing::warn!(
+                        wal = %wal_dir,
+                        segments,
+                        set_aside = %moved,
+                        "set aside a WAL from an earlier writer of the store; its unflushed \
+                         commits are not in the store"
+                    );
+                } else {
+                    return Err(UniError::StaleWal {
+                        store: location.root_uri().to_string(),
+                        wal: wal_dir,
+                        segments,
+                    });
+                }
+            }
+            // A writable open claims the store for its WAL before anything is
+            // committed, so an earlier writer's WAL is recognised as such even
+            // if this one never flushes.
+            if let Some(wal_id) = local_wal_id.as_deref().filter(|_| !self.read_only)
+                && claimed
+                    .as_ref()
+                    .is_none_or(|c| c.wal_id != wal_id || c.home.as_ref() != Some(&home))
+            {
+                claim_store(
+                    &storage,
+                    &data_store,
+                    wal_id,
+                    &wal_dir,
+                    Some(&home),
+                    claimed.as_ref(),
+                )
+                .await?;
+            }
+        } else if !self.read_only {
+            // The store's WAL is shared by every writer, so nothing here is
+            // checked. But a hybrid writer may have claimed the store: it
+            // must find, on return, that the store has moved on.
+            let claimed = wal_lineage::load_claim(&data_store)
+                .await
+                .map_err(UniError::Internal)?;
+            if let Some(claim) = claimed {
+                let wal_id = wal_lineage::load_or_create(&wal_store)
+                    .await
+                    .map_err(UniError::Internal)?;
+                if claim.wal_id != wal_id || claim.home.is_some() {
+                    claim_store(&storage, &data_store, &wal_id, "wal", None, Some(&claim)).await?;
+                }
+            }
+        }
+
+        // The allocator never starts below an ID already in use, even when
+        // its file is gone (a hybrid store's lost local directory): the
+        // manifest records how far it had reserved, and a manifest from
+        // before that was recorded falls back to the tables themselves.
+        let marks = recovered_manifest
+            .as_ref()
+            .and_then(|m| Some((m.next_vid?, m.next_eid?)))
+            .unwrap_or((0, 0));
+        let allocator_file_missing = matches!(
+            id_store
+                .head(&object_store::path::Path::from("id_allocator.json"))
+                .await,
+            Err(object_store::Error::NotFound { .. })
+        );
+        // With the counter file, it and the marks bound every id in use.
+        // Without it, the marks alone may not: a manifest from before they
+        // were recorded has none, and one published by bulk-load recovery
+        // above (before the allocator existed) carries the marks from before
+        // the load. The tables are the ground truth then.
+        // A read-only handle allocates nothing, so it skips the scan.
+        let id_floor = if allocator_file_missing && recovered_manifest.is_some() && !self.read_only
+        {
+            let scanned = storage.scan_id_floor().await.map_err(UniError::Internal)?;
+            let floor = (marks.0.max(scanned.0), marks.1.max(scanned.1));
+            tracing::info!(
+                vid = floor.0,
+                eid = floor.1,
+                "ID allocator file missing; allocation resumes above the ids in the tables"
+            );
+            floor
+        } else {
+            marks
+        };
         let allocator = Arc::new(
-            IdAllocator::new(
+            IdAllocator::open(
                 id_store,
                 object_store::path::Path::from("id_allocator.json"),
                 1000,
+                uni_store::runtime::id_allocator::AllocatorOptions {
+                    floor: id_floor,
+                    // Only a local directory has no other writer that a lost
+                    // update could race.
+                    // `Unenforced` is one writer by convention, on a store
+                    // that may have no conditional writes at all.
+                    allow_unconditional: wal_fs_root.is_some()
+                        || matches!(write_lease, Some(multi_agent::WriteLease::Unenforced)),
+                },
             )
             .await
             .map_err(UniError::Internal)?,
         );
+        storage
+            .snapshot_manager()
+            .set_id_allocator(allocator.clone());
 
         // When WAL is enabled the construction is identical for every
         // storage layout (remote-only, hybrid, or local): the only
@@ -2526,7 +2943,9 @@ impl UniBuilder {
         // and the reactivated declared triggers exist; their places in the
         // announcement order are taken now (see `wal_recovery`). A read-only
         // open has nothing to announce with.
-        let recovered_commits = {
+        let recovered_commits = if skip_wal_replay {
+            Default::default()
+        } else {
             let (replayed, recovered_commits) = wal_recovery::replay_wal(
                 &writer,
                 &storage,
@@ -2538,6 +2957,7 @@ impl UniBuilder {
             .await?;
             if replayed > 0 {
                 info!("WAL recovery: replayed {} mutations", replayed);
+                writer.raise_id_floor_from_l0().await;
             }
             // Replay re-resolves edge types by name and may intern a
             // schemaless one the catalog never saved (a crash between a
@@ -2604,6 +3024,9 @@ impl UniBuilder {
                 .start_background_worker(shutdown_handle.subscribe());
             track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
 
+            if !stale_index_labels.is_empty() {
+                rebuild_manager.enqueue(std::mem::take(&mut stale_index_labels));
+            }
             writer
                 .set_index_rebuild_manager(Arc::clone(&rebuild_manager))
                 .map_err(UniError::Internal)?;
@@ -2719,7 +3142,7 @@ impl UniBuilder {
         // its flushed half alone, with no error.
         let l0_manager_field = Some(Arc::clone(&writer.l0_manager));
         // Lift the id allocator out for the same reason as the L0 tier above.
-        // Forking a read-only handle still needs the parent's VID/EID
+        // A fork (created from a writable handle, opened from any) needs the parent's VID/EID
         // high-water marks to bootstrap the fork's allocator above them;
         // without them the fork started allocating at 0 and its first writes
         // were shadowed by the parent's pre-existing rows at the same VID
@@ -2740,6 +3163,7 @@ impl UniBuilder {
                     other => UniError::Internal(anyhow::anyhow!(other.to_string())),
                 })?,
         );
+        fork_registry.set_write_fence(Arc::clone(&fence));
         // Phase 4a: apply the configured fork budget cap.
         fork_registry.set_max_forks(self.config.max_forks).await;
         // Let storage-side DDL reach the registry, so declaring a property
@@ -2752,17 +3176,21 @@ impl UniBuilder {
         // by a create that crashed before recording them in the registry.
         let recovery_candidates =
             crate::api::fork::fork_candidate_dataset_names(&schema_manager.schema());
-        let recovered = uni_store::fork::recovery::recover_forks(
-            &fork_registry,
-            &recovery_store,
-            &recovery_candidates,
-            recovery_branching.as_deref(),
-        )
-        .await
-        .map_err(|e| match e {
-            UniError::Internal(inner) => UniError::Internal(inner),
-            other => UniError::Internal(anyhow::anyhow!(other.to_string())),
-        })?;
+        let recovered = if self.read_only {
+            0
+        } else {
+            uni_store::fork::recovery::recover_forks(
+                &fork_registry,
+                &recovery_store,
+                &recovery_candidates,
+                recovery_branching.as_deref(),
+            )
+            .await
+            .map_err(|e| match e {
+                UniError::Internal(inner) => UniError::Internal(inner),
+                other => UniError::Internal(anyhow::anyhow!(other.to_string())),
+            })?
+        };
         if recovered > 0 {
             tracing::info!(reconciled = recovered, "fork registry recovery completed");
         }
@@ -2770,12 +3198,12 @@ impl UniBuilder {
         // Phase 4a: capture sweeper config + a shutdown subscription
         // before the config is consumed into UniInner.
         let sweeper_interval = self.config.fork_sweeper_interval;
-        let sweeper_disabled = self.config.disable_fork_sweeper;
+        let sweeper_disabled = self.config.disable_fork_sweeper || self.read_only;
         let sweeper_shutdown_rx = shutdown_handle.subscribe();
         // Phase 5a-impl Step 7: same for the fork index builder.
         let index_builder_interval = self.config.fork_index_builder_interval;
         let index_builder_threshold = self.config.fork_index_build_threshold;
-        let index_builder_disabled = self.config.disable_fork_index_builder;
+        let index_builder_disabled = self.config.disable_fork_index_builder || self.read_only;
         let index_builder_shutdown_rx = shutdown_handle.subscribe();
 
         // Build the cached DataFusion SessionContext template once with all
@@ -3023,7 +3451,8 @@ impl UniBuilder {
                 start_time: Instant::now(),
                 commit_tx,
                 cdc_runtime: Some(cdc_runtime),
-                write_lease: self.write_lease,
+                write_lease,
+                writer_hold,
                 plugin_trust: self.plugin_trust,
                 active_session_count: AtomicUsize::new(0),
                 total_queries: AtomicU64::new(0),
@@ -3154,80 +3583,6 @@ impl UniBuilder {
     pub fn build_sync(self) -> Result<Uni> {
         let rt = uni_store::runtime::io_runtime::io_runtime().map_err(UniError::Io)?;
         rt.block_on(self.build())
-    }
-
-    fn cloud_config_to_lancedb_storage_options(
-        config: &CloudStorageConfig,
-    ) -> std::collections::HashMap<String, String> {
-        let mut opts = std::collections::HashMap::new();
-
-        match config {
-            CloudStorageConfig::S3 {
-                bucket,
-                region,
-                endpoint,
-                access_key_id,
-                secret_access_key,
-                session_token,
-                virtual_hosted_style,
-            } => {
-                opts.insert("bucket".to_string(), bucket.clone());
-                opts.insert(
-                    "virtual_hosted_style_request".to_string(),
-                    virtual_hosted_style.to_string(),
-                );
-
-                if let Some(r) = region {
-                    opts.insert("region".to_string(), r.clone());
-                }
-                if let Some(ep) = endpoint {
-                    opts.insert("endpoint".to_string(), ep.clone());
-                    if ep.starts_with("http://") {
-                        opts.insert("allow_http".to_string(), "true".to_string());
-                    }
-                }
-                if let Some(v) = access_key_id {
-                    opts.insert("access_key_id".to_string(), v.clone());
-                }
-                if let Some(v) = secret_access_key {
-                    opts.insert("secret_access_key".to_string(), v.clone());
-                }
-                if let Some(v) = session_token {
-                    opts.insert("session_token".to_string(), v.clone());
-                }
-            }
-            CloudStorageConfig::Gcs {
-                bucket,
-                service_account_path,
-                service_account_key,
-            } => {
-                opts.insert("bucket".to_string(), bucket.clone());
-                if let Some(v) = service_account_path {
-                    opts.insert("service_account".to_string(), v.clone());
-                    opts.insert("application_credentials".to_string(), v.clone());
-                }
-                if let Some(v) = service_account_key {
-                    opts.insert("service_account_key".to_string(), v.clone());
-                }
-            }
-            CloudStorageConfig::Azure {
-                container,
-                account,
-                access_key,
-                sas_token,
-            } => {
-                opts.insert("account_name".to_string(), account.clone());
-                opts.insert("container_name".to_string(), container.clone());
-                if let Some(v) = access_key {
-                    opts.insert("access_key".to_string(), v.clone());
-                }
-                if let Some(v) = sas_token {
-                    opts.insert("sas_token".to_string(), v.clone());
-                }
-            }
-        }
-
-        opts
     }
 }
 

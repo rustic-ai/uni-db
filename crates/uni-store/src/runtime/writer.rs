@@ -425,11 +425,19 @@ pub use crate::storage::manager::FlushInProgressGuard;
 /// captured WAL LSN, current_version, and the in-progress guard whose
 /// lifetime spans the full flush (including the future async stream
 /// phase that runs on a spawned task).
+/// How long a flush stream waits for an earlier rotation's stream before
+/// running out of order: a safety valve for an earlier stream that is never
+/// polled. A stalled one is ended sooner, by its own stream timeout, which
+/// passes the turn on.
+pub(crate) const STREAM_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 struct RotateOutput {
     old_l0_arc: Arc<RwLock<L0Buffer>>,
     wal_lsn: u64,
     current_version: u64,
     flush_in_progress_guard: FlushInProgressGuard,
+    /// This flush's place in the order streams run in, taken at rotation.
+    stream_turn: crate::storage::read_cut::StreamTicket,
 }
 
 /// Reject a write whose property map is keyed by a storage column name
@@ -452,6 +460,10 @@ fn check_property_names(
 struct FlushOutcome {
     manifest: SnapshotManifest,
     snapshot_id: String,
+    /// The flush's commit unit, open until its manifest is published. Whoever
+    /// holds the outcome holds the unit: dropping it (a cancelled flush, a
+    /// finalize that never runs) closes the unit.
+    unit: Option<crate::storage::read_cut::UnitGuard>,
 }
 
 pub struct Writer {
@@ -511,7 +523,7 @@ pub struct Writer {
     /// Reading the actual `Dataset::manifest().fragments.len()` per
     /// flush would add a per-dataset object-store roundtrip on the hot
     /// commit path; the proxy keeps the guard rail purely observational
-    /// (Phase 5 introduces fork compaction proper). Only meaningful when
+    /// (forks are not compacted). Only meaningful when
     /// `fork_id.is_some()`. `Relaxed` is sufficient — observational only.
     fork_flush_count: Arc<AtomicU64>,
     /// Whether the fork-fragment warning has already fired at the
@@ -1332,6 +1344,46 @@ impl Writer {
         Ok(true)
     }
 
+    /// Raises the ID allocator above every VID and EID in L0.
+    ///
+    /// WAL replay restores mutations with the ids they were committed with,
+    /// which can lie above the allocator's floor when its file was lost after
+    /// a batch was reserved but before the next flush recorded it.
+    pub async fn raise_id_floor_from_l0(&self) {
+        const EPHEMERAL: u64 = 1 << 63;
+        let mut vid_floor = 0u64;
+        let mut eid_floor = 0u64;
+        let mut see_vid = |v: Vid| {
+            let v = v.as_u64();
+            if v & EPHEMERAL == 0 {
+                vid_floor = vid_floor.max(v.saturating_add(1));
+            }
+        };
+        let mut eids: Vec<u64> = Vec::new();
+        for buffer in self.l0_manager.get_all_readable() {
+            let l0 = buffer.read();
+            l0.vertex_properties.keys().copied().for_each(&mut see_vid);
+            l0.vertex_versions.keys().copied().for_each(&mut see_vid);
+            l0.vertex_labels.keys().copied().for_each(&mut see_vid);
+            l0.vertex_tombstones.iter().copied().for_each(&mut see_vid);
+            for (eid, (src, dst, _)) in &l0.edge_endpoints {
+                see_vid(*src);
+                see_vid(*dst);
+                eids.push(eid.as_u64());
+            }
+            eids.extend(l0.edge_versions.keys().map(|e| e.as_u64()));
+            eids.extend(l0.tombstones.keys().map(|e| e.as_u64()));
+        }
+        for e in eids {
+            if e & EPHEMERAL == 0 {
+                eid_floor = eid_floor.max(e.saturating_add(1));
+            }
+        }
+        if vid_floor > 0 || eid_floor > 0 {
+            self.allocator.raise_floor(vid_floor, eid_floor).await;
+        }
+    }
+
     /// Whether the WAL is on a remote store (see `WriteAheadLog::is_remote`).
     /// `false` without a WAL.
     #[must_use]
@@ -1377,6 +1429,8 @@ impl Writer {
     }
 
     async fn seal_wal_locked(&self) -> Result<()> {
+        // After the handle gave the store up, another writer may own the WAL.
+        self.storage.write_fence().check()?;
         let wal = self.l0_manager.get_current().read().wal.clone();
         if let Some(wal) = wal {
             wal.seal().await?;
@@ -1922,6 +1976,8 @@ impl Writer {
         lock_timeout: Option<std::time::Duration>,
         on_abandon: Option<crate::runtime::publish_sequencer::AbandonAnnouncement>,
     ) -> Result<CommittedTx> {
+        // A handle that lost its writer lease, or was closed, commits nothing.
+        self.storage.write_fence().check()?;
         // Hold `flush_lock` across WAL append + flush + main-L0 merge.
         // Two concurrent commits serialize here; in Phase 3 the outer
         // `Arc<RwLock<Writer>>` already provides this exclusion, so the
@@ -1941,6 +1997,9 @@ impl Writer {
             },
             None => self.flush_lock.lock().await,
         };
+        // Checked again with the lock held: the fence may have tripped while
+        // this commit waited behind a flush.
+        self.storage.write_fence().check()?;
 
         // Crash-recovery seam: simulate process death immediately after winning
         // the commit serialization point but before any durable work. No-op
@@ -2434,16 +2493,20 @@ impl Writer {
                                         parent_manifest,
                                         permit,
                                         flush_in_progress_guard: rotate_out.flush_in_progress_guard,
+                                        stream_turn: rotate_out.stream_turn.waiter(),
                                     };
                                     let writer = self.clone();
+                                    let turn = rotate_out.stream_turn;
                                     let _ticket = coord.submit_for_stream(
                                         rotated,
                                         move |old_l0, wal, ver, n| async move {
-                                            let outcome =
-                                                writer.flush_stream_l1(old_l0, wal, ver, n).await?;
+                                            let outcome = writer
+                                                .flush_stream_l1(old_l0, wal, ver, n, turn)
+                                                .await?;
                                             Ok(crate::runtime::flush_coordinator::FlushOutcome {
                                                 new_manifest: outcome.manifest,
                                                 snapshot_id: outcome.snapshot_id,
+                                                unit: outcome.unit,
                                             })
                                         },
                                     );
@@ -4141,6 +4204,14 @@ impl Writer {
         // taken before this write stay isolated from it.
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await;
 
+        // A created row gets the DDL `DEFAULT` of each property it does not
+        // name, before the NOT NULL check and the embedding of its sources.
+        if create {
+            self.schema_manager
+                .schema()
+                .apply_property_defaults(labels.iter().map(String::as_str), &mut properties);
+        }
+
         if !self.try_defer_embedding(labels, &properties, vid, tx_l0) {
             self.process_embeddings_for_labels(labels, &mut properties)
                 .await?;
@@ -4154,6 +4225,14 @@ impl Writer {
             tx_l0,
         )
         .await?;
+
+        // An update keeps the vertex's creation stamp: a flushed vertex's comes
+        // from storage, since no buffer holds it.
+        let stored_created_at = if create {
+            None
+        } else {
+            self.stored_created_at_for_update(vid, tx_l0).await?
+        };
 
         // Clone properties and labels before moving into L0 to return them and populate constraint index
         let properties_copy = properties.clone();
@@ -4187,7 +4266,12 @@ impl Writer {
             if create {
                 l0_guard.insert_vertex_with_labels(vid, properties, labels);
             } else {
-                l0_guard.update_vertex_with_labels(vid, properties, labels);
+                l0_guard.update_vertex_with_labels_created(
+                    vid,
+                    properties,
+                    labels,
+                    stored_created_at,
+                );
             }
 
             // Populate constraint index for O(1) duplicate detection
@@ -4250,6 +4334,84 @@ impl Writer {
             log::warn!("Slow insert_vertex: {}ms", start.elapsed().as_millis());
         }
         Ok(properties_copy)
+    }
+
+    /// Whether a buffer this write sees (its transaction's, the current one,
+    /// or one being flushed) already holds `vid`'s creation stamp.
+    fn created_at_in_buffers(&self, vid: Vid, tx_l0: Option<&Arc<RwLock<L0Buffer>>>) -> bool {
+        tx_l0
+            .cloned()
+            .into_iter()
+            .chain(std::iter::once(self.l0_manager.get_current()))
+            .chain(self.l0_manager.get_pending_flush())
+            .any(|l0| l0.read().vertex_created_at.contains_key(&vid))
+    }
+
+    /// The flushed creation stamps of `vids`: the earliest over each live
+    /// vertex's stored rows.
+    async fn find_stored_created_at(&self, vids: &[Vid]) -> Result<HashMap<Vid, i64>> {
+        crate::storage::main_vertex::MainVertexDataset::find_created_at_by_vids(
+            self.storage.backend(),
+            vids,
+            self.storage.row_visibility(),
+        )
+        .await
+    }
+
+    /// The stored `created_at` an update of `vid` must keep, or `None` when
+    /// a buffer already holds the vertex's stamp (or storage has none).
+    ///
+    /// An update of a flushed vertex writes a new L0 row, which would
+    /// otherwise be stamped with the update's clock, and the flush and scans
+    /// take the L0 stamp. Served from a hint
+    /// [`Self::carry_stored_created_at`] left, else read from storage.
+    async fn stored_created_at_for_update(
+        &self,
+        vid: Vid,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<Option<i64>> {
+        if let Some(ts) = self
+            .resolve_l0(tx_l0)
+            .write()
+            .stored_created_at_hints
+            .remove(&vid)
+        {
+            return Ok(Some(ts));
+        }
+        if self.created_at_in_buffers(vid, tx_l0) {
+            return Ok(None);
+        }
+        Ok(self.find_stored_created_at(&[vid]).await?.remove(&vid))
+    }
+
+    /// Read the stored `created_at` of every vertex in `vids` no buffer
+    /// stamps, in one storage read, ahead of a statement that updates them,
+    /// so each update keeps its vertex's stamp without a read per row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage read fails.
+    pub async fn carry_stored_created_at(
+        &self,
+        vids: &[Vid],
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<()> {
+        let unknown: Vec<Vid> = vids
+            .iter()
+            .copied()
+            .filter(|vid| !self.created_at_in_buffers(*vid, tx_l0))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let found = self.find_stored_created_at(&unknown).await?;
+        if !found.is_empty() {
+            self.resolve_l0(tx_l0)
+                .write()
+                .stored_created_at_hints
+                .extend(found);
+        }
+        Ok(())
     }
 
     /// Refresh auto-embed targets for a `SET` write whose `touched_keys`
@@ -4379,6 +4541,16 @@ impl Writer {
             // freeze the pinned generation aside before merging so snapshot
             // readers stay isolated. No-op when unpinned or transactional.
             self.freeze_for_non_tx_write_if_pinned(tx_l0).await;
+
+            // DDL `DEFAULT`s for properties a row does not name.
+            {
+                let schema = self.schema_manager.schema();
+                if schema.has_property_defaults(labels.iter().map(String::as_str)) {
+                    for props in properties_batch.iter_mut() {
+                        schema.apply_property_defaults(labels.iter().map(String::as_str), props);
+                    }
+                }
+            }
 
             // Batch embedding generation (1 API call per config)
             self.process_embeddings_for_batch(&labels, &mut properties_batch)
@@ -5123,6 +5295,12 @@ impl Writer {
         self.check_write_pressure(tx_l0).await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
+        // A created edge gets its type's DDL `DEFAULT`s for absent properties.
+        if create && let Some(type_name) = edge_type_name.as_deref() {
+            self.schema_manager
+                .schema()
+                .apply_property_defaults([type_name], &mut properties);
+        }
         self.prepare_edge_upsert(eid, &mut properties, tx_l0)
             .await?;
 
@@ -6055,6 +6233,7 @@ impl Writer {
     /// must call `flush_inline_under_lock` (private) directly to avoid a re-entrant
     /// `tokio::sync::Mutex` deadlock — see concurrent_writer.md §5.5.
     pub async fn flush_to_l1(&self, name: Option<String>) -> Result<String> {
+        self.storage.write_fence().check()?;
         // Drain any in-flight async flushes first. `flush_to_l1` is a
         // SYNCHRONIZATION BARRIER — callers (test fixtures, fork
         // setup, shutdown paths) rely on it as "all writes are now
@@ -6236,6 +6415,9 @@ impl Writer {
     ///
     /// [`RestoreIntent`]: crate::snapshot::manager::RestoreIntent
     pub async fn restore_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        // A restore rewinds tables before it publishes: refuse it outright on
+        // a handle that may no longer write.
+        self.storage.write_fence().check()?;
         // Refuse up front too, before the flush below does any work.
         self.refuse_restore_with_forks().await?;
         use crate::snapshot::manager::RestoreIntent;
@@ -6348,11 +6530,32 @@ impl Writer {
         ])
         .await?;
 
-        // 4.
-        restore::rewind_storage(&self.storage, &point, &target).await?;
-
-        // 5.
-        sm.set_latest_snapshot(&manifest.snapshot_id).await?;
+        // 4. and 5. The rewind is a read-cut unit named by the manifest it
+        // publishes: its rollbacks are read only once that manifest is, and
+        // a catalog save in between publishes nothing (no successor naming
+        // rewound tables under the pre-restore manifest).
+        let unit = self.storage.read_cut().open_unit(&manifest.snapshot_id);
+        let rewind: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =
+            Box::pin(async {
+                restore::rewind_storage(&self.storage, &point, &target).await?;
+                // Saved again: the manifest names the rewound tables'
+                // versions (the read cut), known only now.
+                sm.save_snapshot(&manifest).await?;
+                sm.set_latest_snapshot(&manifest.snapshot_id).await
+            });
+        if let Err(e) =
+            crate::storage::read_cut::in_unit(manifest.snapshot_id.clone(), rewind).await
+        {
+            // Some tables may be rewound and others not, and only the next
+            // open (which finds the intent) completes the restore: this handle
+            // must write nothing more over the half-rewound store.
+            self.storage.write_fence().trip(format!(
+                "restore of snapshot {snapshot_id} failed part way ({e}); reopen the database to \
+                 complete it"
+            ));
+            return Err(e);
+        }
+        drop(unit);
         let local_root = self.storage.local_fs_root();
         let barrier_id = manifest.snapshot_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -6636,6 +6839,7 @@ impl Writer {
                 wal_lsn,
                 current_version,
                 flush_in_progress_guard,
+                stream_turn,
             },
             seq,
         ) = {
@@ -6657,16 +6861,20 @@ impl Writer {
             parent_manifest,
             permit,
             flush_in_progress_guard,
+            stream_turn: stream_turn.waiter(),
         };
         // 4. Spawn the stream phase via the coordinator. The closure
         //    captures Arc<Writer> transiently — drops when stream
         //    completes (bounded, ~50-500 ms).
         let writer = self.clone();
         let ticket = coord.submit_for_stream(rotated, move |old_l0, wal, ver, n| async move {
-            let outcome = writer.flush_stream_l1(old_l0, wal, ver, n).await?;
+            let outcome = writer
+                .flush_stream_l1(old_l0, wal, ver, n, stream_turn)
+                .await?;
             Ok(crate::runtime::flush_coordinator::FlushOutcome {
                 new_manifest: outcome.manifest,
                 snapshot_id: outcome.snapshot_id,
+                unit: outcome.unit,
             })
         });
         Ok(ticket)
@@ -6765,6 +6973,8 @@ impl Writer {
             wal_lsn,
             current_version,
             flush_in_progress_guard,
+            // Under `flush_lock` (held by every caller): turns follow rotations.
+            stream_turn: self.storage.read_cut().stream_ticket(),
         })
     }
 
@@ -6784,6 +6994,61 @@ impl Writer {
         wal_lsn: u64,
         current_version: u64,
         name: Option<String>,
+        turn: crate::storage::read_cut::StreamTicket,
+    ) -> Result<FlushOutcome> {
+        // The flush is a commit unit of the read cut, named by the manifest
+        // it will publish: its table commits stay unread until that manifest
+        // is published, and the manifest names them. The unit stays open
+        // past a successful stream, until the finalize publishes it (or
+        // closes it, failing); a stream that fails closes it here.
+        let snapshot_id = Uuid::new_v4().to_string();
+        // A fork's flush publishes no primary manifest: what it commits on
+        // primary's own datasets (the shared UID index) is loose there.
+        let forked = self.storage.fork_scope().is_some();
+        let cut = Arc::clone(self.storage.read_cut());
+        // One stream at a time, in rotation order: a stream's commits never
+        // interleave with another's, and an earlier rotation's rows commit
+        // first. A later flush may still commit a table on top of an earlier
+        // flush's unpublished commit (the earlier one's finalize can run
+        // after it) and its manifest then names those rows early; nothing is
+        // lost, since the WAL floor and truncation follow the oldest pending
+        // flush and stamping keeps the newer version. The lock is held for
+        // the Lance writes only; finalize runs without it, and no stream needs
+        // `flush_lock`, so a synchronous flush waiting here under `flush_lock`
+        // cannot deadlock. The turn passes on when `turn` drops, as this
+        // stream ends. (An async stream has already waited for its turn, in
+        // the coordinator, before its timeout started.)
+        turn.wait_turn(STREAM_TURN_TIMEOUT).await;
+        let _stream = cut.stream_lock().await;
+        let _turn = turn;
+        let unit = (!forked).then(|| cut.open_unit(&snapshot_id));
+        // Boxed as `dyn`: one more layer of nesting around the stream's
+        // future overflows the Send proof of every future holding a flush
+        // (E0275); erasing the type stops it.
+        let stream: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<FlushOutcome>> + Send + '_>,
+        > = Box::pin(self.flush_stream_l1_in_unit(
+            old_l0_arc,
+            wal_lsn,
+            current_version,
+            name,
+            snapshot_id.clone(),
+        ));
+        let mut outcome = match unit {
+            Some(_) => crate::storage::read_cut::in_unit(snapshot_id, stream).await?,
+            None => stream.await?,
+        };
+        outcome.unit = unit;
+        Ok(outcome)
+    }
+
+    async fn flush_stream_l1_in_unit(
+        &self,
+        old_l0_arc: Arc<RwLock<L0Buffer>>,
+        wal_lsn: u64,
+        current_version: u64,
+        name: Option<String>,
+        unit_snapshot_id: String,
     ) -> Result<FlushOutcome> {
         // Test-only seam (no-op without the `failpoints` feature): the rotate
         // (begin_flush) already moved the to-be-flushed buffer onto
@@ -6999,7 +7264,7 @@ impl Writer {
             // which is the #233 property below, preserved.
             let orphan_vids: Vec<Vid> = orphaned_tombstones.iter().map(|(vid, _)| *vid).collect();
             let orphan_labels = MainVertexDataset::find_batch_labels_by_vids(
-                self.storage.backend(),
+                self.storage.head_backend(),
                 &orphan_vids,
                 None,
             )
@@ -7051,7 +7316,7 @@ impl Writer {
         // Save parent snapshot ID before generating new one (for lineage tracking)
         let parent_id = manifest.snapshot_id.clone();
         manifest.parent_snapshot = Some(parent_id);
-        manifest.snapshot_id = Uuid::new_v4().to_string();
+        manifest.snapshot_id = unit_snapshot_id;
         manifest.name = name;
         manifest.created_at = Utc::now();
         manifest.version_high_water_mark = current_version;
@@ -7130,8 +7395,8 @@ impl Writer {
                 Some(&edge_created_at_map),
                 Some(&edge_updated_at_map),
             )?;
-            MainEdgeDataset::write_batch(self.storage.backend(), main_edge_batch).await?;
-            MainEdgeDataset::ensure_default_indexes(self.storage.backend()).await?;
+            MainEdgeDataset::write_batch(self.storage.head_backend(), main_edge_batch).await?;
+            MainEdgeDataset::ensure_default_indexes(self.storage.head_backend()).await?;
         }
 
         // 2.2 Main vertices table
@@ -7205,13 +7470,13 @@ impl Writer {
         // versions itself rather than filtering on one.
         let relabel_vids: Vec<Vid> = overwrite_only.iter().map(|(vid, ..)| *vid).collect();
         let relabel_props = MainVertexDataset::find_batch_props_by_vids(
-            self.storage.backend(),
+            self.storage.head_backend(),
             &relabel_vids,
             self.storage.version_high_water_mark(),
         )
         .await?;
         let relabel_old_labels = MainVertexDataset::find_batch_labels_by_vids(
-            self.storage.backend(),
+            self.storage.head_backend(),
             &relabel_vids,
             None,
         )
@@ -7269,8 +7534,8 @@ impl Writer {
                 Some(&vertex_created_at),
                 Some(&vertex_updated_at),
             )?;
-            MainVertexDataset::write_batch(self.storage.backend(), main_vertex_batch).await?;
-            MainVertexDataset::ensure_default_indexes(self.storage.backend()).await?;
+            MainVertexDataset::write_batch(self.storage.head_backend(), main_vertex_batch).await?;
+            MainVertexDataset::ensure_default_indexes(self.storage.head_backend()).await?;
         }
         main_vertices.truncate(live_main_rows);
 
@@ -7299,7 +7564,7 @@ impl Writer {
             // Every edge flushes as a full-row Append; see
             // `Writer::insert_edge_partial_full` for why the delta log
             // cannot take a partial MergeInsert.
-            let backend = self.storage.backend();
+            let backend = self.storage.head_backend();
 
             // FWD run (sorted by src_vid)
             let mut fwd_entries = entries.clone();
@@ -7340,6 +7605,10 @@ impl Writer {
             // already has these edges via dual-write in insert_edge/delete_edge.
         }
 
+        // Seam: the main tables and the edge deltas are committed, the label
+        // tables are not.
+        fail::fail_point!("flush::before-label-tables");
+
         // 4. Per-label vertex table writes
         // Iterate all labels that have either full-row data or tombstones
         // pending. A label may appear in only one of the two maps.
@@ -7372,6 +7641,12 @@ impl Writer {
                         if *deleted {
                             removed.insert(*vid);
                         } else if let Some(prop_value) = props.get(&cfg.property) {
+                            // The row carries the property: its terms replace the
+                            // vid's earlier ones, so the vid is purged from every
+                            // posting first (remove-then-add). Otherwise an update
+                            // left the vid under terms it no longer holds, and a
+                            // list set to empty or null kept all of them.
+                            removed.insert(*vid);
                             // Extract terms from the property value (List<String>)
                             if let Some(arr) = prop_value.as_array() {
                                 let terms: Vec<String> = arr
@@ -7414,14 +7689,24 @@ impl Writer {
                     for (vid, _labels, props, deleted, _version) in &vertices {
                         if *deleted {
                             removed.insert(*vid);
-                        } else if let Some(uni_common::Value::SparseVector { indices, values }) =
-                            props.get(&cfg.property)
+                        } else if let Some(value) = props.get(&cfg.property)
+                            && value.sparse_parts().is_none()
                         {
-                            let pairs: Vec<(u32, f32)> = indices
-                                .iter()
-                                .copied()
-                                .zip(values.iter().copied())
-                                .collect();
+                            // Set to null (or to a value that is no sparse vector):
+                            // the vid holds no postings now.
+                            removed.insert(*vid);
+                        } else if let Some((indices, values)) =
+                            props.get(&cfg.property).and_then(Value::sparse_parts)
+                        {
+                            // The native value or its `{indices, values}` map form,
+                            // canonicalized (sorted, duplicates summed) as at write.
+                            let pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
+                            let pairs = match sparse_pairs_to_value(&pairs) {
+                                Value::SparseVector { indices, values } => {
+                                    indices.into_iter().zip(values).collect()
+                                }
+                                _ => pairs,
+                            };
                             added.insert(*vid, pairs);
                             // An in-place SET re-flushes an already-indexed vid. The
                             // sparse postings are a `Vec` with no per-vid dedup, so unless
@@ -7456,7 +7741,7 @@ impl Writer {
                 ver_data.push(version);
             }
 
-            let backend = self.storage.backend();
+            let backend = self.storage.head_backend();
 
             // Tombstones are appended as rows of their own, in the same
             // append as the live rows: `_deleted = true` at the delete's
@@ -7576,6 +7861,7 @@ impl Writer {
         Ok(FlushOutcome {
             manifest,
             snapshot_id,
+            unit: None,
         })
     }
 
@@ -7610,6 +7896,7 @@ impl Writer {
             wal_lsn,
             current_version,
             flush_in_progress_guard: _flush_guard,
+            stream_turn,
         } = self.flush_l0_rotate().await?;
 
         // Phases D (L1 collect), E (orphan resolve), F (manifest seed),
@@ -7617,9 +7904,24 @@ impl Writer {
         let FlushOutcome {
             manifest,
             snapshot_id,
+            unit: _unit,
         } = self
-            .flush_stream_l1(old_l0_arc.clone(), wal_lsn, current_version, name)
+            .flush_stream_l1(
+                old_l0_arc.clone(),
+                wal_lsn,
+                current_version,
+                name,
+                stream_turn,
+            )
             .await?;
+
+        // Test-only seam: an async stall between the stream and the finalize,
+        // so a test can drop the flush's future in that window (a cancelled
+        // commit, a timed-out `flush()`).
+        #[cfg(feature = "failpoints")]
+        if fail::eval("flush::after-stream-stall", |_| ()).is_some() {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
 
         // Phases H..S: publish manifest, complete_flush, WAL truncate,
         // property cache clear, last_flush_time, metrics, l1_runs++,
@@ -7743,6 +8045,8 @@ impl Writer {
             shared.storage.snapshot_manager().is_fork_scoped(),
             "fork writer must publish to a fork-scoped snapshot namespace (review C1)"
         );
+        // Seam: every table of the flush is committed, its manifest is not.
+        fail::fail_point!("flush::before-manifest");
         shared
             .storage
             .snapshot_manager()
@@ -7826,6 +8130,9 @@ impl Writer {
         // in L1, so truncating to its high watermark would delete its own data
         // (the lost-commit-on-graceful-close bug).
         let wal_handle = shared.l0_manager.get_current().read().wal.clone();
+        // A BACKUP copying the WAL holds truncation off; a later flush
+        // truncates what this one leaves.
+        let wal_handle = wal_handle.filter(|_| !shared.storage.wal_truncation_held());
         if let Some(w) = wal_handle {
             let safe_lsn = shared
                 .l0_manager
@@ -7920,8 +8227,8 @@ impl Writer {
     /// once if the threshold is crossed.
     ///
     /// Each flush typically appends ~1 fragment per touched dataset on
-    /// the fork's branches; without compaction (deferred to Phase 5)
-    /// long-lived heavy-write forks degrade. The flush count is a
+    /// the fork's branches; forks are not compacted, so long-lived
+    /// heavy-write forks degrade. The flush count is a
     /// proxy for actual fragment growth — reading
     /// `Dataset::manifest().fragments.len()` per dataset would add a
     /// per-flush object-store roundtrip on the hot commit path, which
@@ -7967,7 +8274,7 @@ impl Writer {
                 flush_count = new_count,
                 threshold,
                 "fork has exceeded the L1 flush-count threshold; \
-                 fork compaction is deferred to Phase 5 — consider \
+                 forks are not compacted — consider \
                  drop+recreate or promotion to bound fragment growth"
             );
         }
@@ -8048,6 +8355,9 @@ impl FinalizeFn for WriterFinalizer {
                 let l0 = rotated.old_l0_arc.read();
                 (l0.estimated_size, l0.mutation_count)
             };
+            // Held across the finalize: its publish closes the unit, and a
+            // finalize that fails or never completes closes it on drop.
+            let _unit = outcome.unit;
             let result = Writer::flush_finalize_now(
                 shared,
                 rotated.old_l0_arc.clone(),

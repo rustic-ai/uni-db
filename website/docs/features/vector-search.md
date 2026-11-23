@@ -41,7 +41,6 @@ full node: `RETURN node`, `properties(node)`, `keys(node)`, `labels(node)` and
     ```rust
     use uni_db::{DataType, IndexType, Uni, VectorAlgo, VectorIndexCfg, VectorMetric};
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
 
     db.schema()
@@ -65,8 +64,6 @@ full node: `RETURN node`, `properties(node)`, `keys(node)`, `labels(node)` and
     .await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"

@@ -7,9 +7,9 @@ status: ga
 
 The sandboxed loaders ([WASM Component Model](loaders/wasm-components.md),
 [Extism](loaders/extism.md), [Rhai](loaders/rhai.md), [PyO3](loaders/pyo3.md)) cover scalar
-functions, aggregates, and procedures. **Native Rust plugins** are the only kind that can author
-*every* extension surface — operators, index kinds, storage backends, CRDTs, hooks, triggers,
-graph algorithms, logical types, connectors, and more — because those surfaces are in-process Rust
+functions, aggregates, procedures, and graph algorithms. **Native Rust plugins** are the only kind
+that can author *every* extension surface — optimizer rules, index kinds, label storage, CRDTs,
+hooks, triggers, logical types, collations, and more — because those surfaces are in-process Rust
 traits with no cross-ABI wire format.
 
 A native plugin is a Rust type that implements the [`Plugin`](#the-plugin-trait) trait and is added
@@ -72,7 +72,7 @@ plugin whose manifest didn't declare it fails registration with `PluginError::Ca
 | Procedure | `ProcedurePlugin` | `procedure(qname, sig, p)` |
 | Optimizer rule | `OptimizerRuleProvider` | `optimizer_rule(r)` |
 | Index kind | `IndexKindProvider` | `index_kind(kind, p)` |
-| Label storage | `LabelStorageProvider` | `label_storage(label, s)` |
+| Label storage | `Storage` | `label_storage(label, s)` |
 | CRDT kind | `CrdtKindProvider` | `crdt_kind(kind, p)` |
 | Session / query hook | `SessionHook` | `hook(h)` |
 | Trigger | `TriggerPlugin` | `trigger(t)` |
@@ -129,15 +129,17 @@ for each non-trivial surface:
   `IndexKindProvider` + the build / handle traits).
 - **CRDTs** — `crates/uni-plugin-builtin/src/crdts.rs` (`lww-register`, `or-set`, `g-counter`,
   `mv-register`, `rga`; `CrdtKindProvider` + `CrdtState`).
-- **Storage backend** — `crates/uni-plugin-builtin/src/storage.rs` (the Lance backend;
-  `StorageBackend` + `Storage`).
+- **Label storage** — `crates/uni-plugin-builtin/src/storage.rs` (`MemoryStorage`, an in-memory
+  `Storage` implementation used by the conformance suite; registered per label with
+  `PluginRegistrar::label_storage`). Lance storage is native, not a plugin registration.
 - **Scalars** — `crates/uni-plugin-builtin/src/scalar_fns/mod.rs`.
 
 ## Capabilities and trust
 
-A native plugin still declares capabilities in its manifest. `add_plugin` intersects them with the
-host grant set the same way the sandboxed loaders do, and the registrar enforces the result — so a
-plugin that didn't declare `Crdt` cannot call `crdt_kind`, even in-process. Host-import capabilities
+A native plugin still declares capabilities in its manifest. `add_plugin` takes no host grant set:
+the registrar admits exactly the manifest's declared capabilities, so a plugin that didn't declare
+`Crdt` cannot call `crdt_kind`, even in-process. (There is no `declared ∩ granted` step on this
+path; trust comes from the signature policy and from compiling the code in.) Host-import capabilities
 (`Network`, `Filesystem`, `HostQuery`, `Kms`, `Secret`, `Config`) gate the host services a plugin
 may call. See [Trust & Capabilities](trust-and-capabilities.md) for the signature policy and the
 declared-∩-granted model, and [Reference](reference.md) for the full capability list.

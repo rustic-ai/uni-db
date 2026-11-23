@@ -125,8 +125,10 @@ pub struct DatabaseBuilder {
     pub(crate) cloud_config: Option<uni_common::CloudStorageConfig>,
     pub(crate) uni_config: Option<uni_common::UniConfig>,
     pub(crate) read_only: bool,
+    pub(crate) set_aside_stale_wal: bool,
     pub(crate) write_lease: Option<crate::types::PyWriteLease>,
     pub(crate) skip_invalid_locy_rules: bool,
+    pub(crate) storage_options: crate::core::RedactedOptions,
 }
 
 #[pymethods]
@@ -148,8 +150,10 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
+            storage_options: Default::default(),
         }
     }
 
@@ -170,8 +174,10 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
+            storage_options: Default::default(),
         }
     }
 
@@ -192,8 +198,10 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
+            storage_options: Default::default(),
         }
     }
 
@@ -214,8 +222,10 @@ impl DatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
+            storage_options: Default::default(),
         }
     }
 
@@ -225,7 +235,9 @@ impl DatabaseBuilder {
         Self::temporary()
     }
 
-    /// Configure hybrid storage with local metadata and remote data.
+    /// Configure hybrid storage: data in the object store at `remote_url`,
+    /// the WAL and ID allocator in `local_path`, which must be the path the
+    /// builder was opened at.
     fn hybrid(
         mut slf: PyRefMut<'_, Self>,
         local_path: String,
@@ -290,6 +302,10 @@ impl DatabaseBuilder {
     }
 
     /// Configure cloud storage credentials (dict with 'provider' key: 's3', 'gcs', or 'azure').
+    ///
+    /// Applies to a remote-only store (`open("s3://bucket/prefix")`) and to
+    /// the remote half of a hybrid store. Unset fields fall back to the
+    /// environment.
     fn cloud_config(
         mut slf: PyRefMut<'_, Self>,
         config: HashMap<String, Py<PyAny>>,
@@ -297,6 +313,17 @@ impl DatabaseBuilder {
         let py = slf.py();
         slf.cloud_config = Some(convert::extract_cloud_config(py, &config)?);
         Ok(slf)
+    }
+
+    /// Set raw object-store options (``object_store`` keys such as
+    /// ``aws_endpoint`` or ``azure_storage_use_emulator``), passed to both
+    /// storage clients. They override ``cloud_config`` and the environment.
+    fn storage_options(
+        mut slf: PyRefMut<'_, Self>,
+        options: HashMap<String, String>,
+    ) -> PyRefMut<'_, Self> {
+        slf.storage_options.0.extend(options);
+        slf
     }
 
     /// Configure database options (query_timeout, max_query_memory, etc.).
@@ -343,6 +370,14 @@ impl DatabaseBuilder {
     /// Open the database in read-only mode (no writes allowed).
     fn read_only(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf.read_only = true;
+        slf
+    }
+
+    /// Open a hybrid store whose local WAL belongs to an earlier writer,
+    /// moving that WAL's segments to `wal_set_aside/` (never deleting them).
+    /// Without it such an open raises `UniStaleWalError`.
+    fn set_aside_stale_wal(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.set_aside_stale_wal = true;
         slf
     }
 
@@ -424,6 +459,9 @@ impl DatabaseBuilder {
                 crate::types::WriteLeaseVariant::Local => {
                     ::uni_db::api::multi_agent::WriteLease::Local
                 }
+                crate::types::WriteLeaseVariant::Unenforced => {
+                    ::uni_db::api::multi_agent::WriteLease::Unenforced
+                }
                 crate::types::WriteLeaseVariant::DynamoDB { table } => {
                     ::uni_db::api::multi_agent::WriteLease::DynamoDB {
                         table: table.clone(),
@@ -455,7 +493,9 @@ impl DatabaseBuilder {
                     self.read_only,
                     rust_write_lease,
                     self.skip_invalid_locy_rules,
+                    self.set_aside_stale_wal,
                     self.xervo_runtime.as_ref().map(|rt| rt.inner.clone()),
+                    self.storage_options.0.clone(),
                 ))
             })
             .map_err(crate::exceptions::uni_error_to_pyerr)?;

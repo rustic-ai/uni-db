@@ -56,7 +56,7 @@ async fn fork_local_fts_index_returns_fused_results() -> Result<()> {
 
     // Phase 5b followup: planner emission for FTS. Explain should
     // show FusedIndexScanWrapped { kind: Bm25Rrf } wrapping the
-    // original InvertedIndexLookup node.
+    // original `uni.fts.query` procedure call.
     let plan = forked
         .query_with(
             "CALL uni.fts.query('Doc', 'body', 'zebra', 10)

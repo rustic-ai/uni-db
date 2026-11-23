@@ -3747,9 +3747,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -10518,7 +10518,7 @@ checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "uni-algo"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10538,7 +10538,7 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -10548,7 +10548,7 @@ dependencies = [
 
 [[package]]
 name = "uni-bulk"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10573,7 +10573,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cli"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -10593,7 +10593,7 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -10617,7 +10617,7 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "proptest",
  "rmp-serde",
@@ -10632,7 +10632,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -10644,7 +10644,7 @@ dependencies = [
 
 [[package]]
 name = "uni-db"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10715,7 +10715,7 @@ dependencies = [
 
 [[package]]
 name = "uni-fork"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10735,7 +10735,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10752,7 +10752,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy-oracle"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "proptest",
@@ -10763,7 +10763,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy-tck"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10790,7 +10790,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -10828,7 +10828,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-apoc-core"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10849,7 +10849,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-builtin"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10878,7 +10878,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-conformance"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "semver",
  "serde",
@@ -10890,7 +10890,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-custom"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10913,7 +10913,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-extism"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10941,7 +10941,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-host"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10978,7 +10978,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-pyo3"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -11004,7 +11004,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-rhai"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -11036,7 +11036,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-wasm"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -11066,7 +11066,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-wasm-rt"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -11079,7 +11079,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11105,7 +11105,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-cuda"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11128,7 +11128,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-metal"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11151,7 +11151,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-onnx"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11174,7 +11174,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-onnx-cuda"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11197,7 +11197,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-onnx-metal"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11220,7 +11220,7 @@ dependencies = [
 
 [[package]]
 name = "uni-query"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -11266,11 +11266,12 @@ dependencies = [
  "uni-sparse-vector",
  "uni-store",
  "uni-xervo",
+ "url",
 ]
 
 [[package]]
 name = "uni-query-functions"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -11305,7 +11306,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sidecar"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11315,7 +11316,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "proptest",
  "serde",
@@ -11324,7 +11325,7 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11332,6 +11333,10 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-types",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -11356,6 +11361,7 @@ dependencies = [
  "sha3",
  "shuttle",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
@@ -11370,7 +11376,7 @@ dependencies = [
 
 [[package]]
 name = "uni-tck"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11531,9 +11537,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

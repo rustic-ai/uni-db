@@ -54,6 +54,33 @@ pub enum UniError {
     #[error("Operation '{operation}' not supported on read-only database")]
     ReadOnly { operation: String },
 
+    /// Another handle holds the store open for writing.
+    #[error(
+        "The store at {store} is open for writing elsewhere ({holder}). Close that handle, open \
+         this one read-only, or wait for its lease to expire."
+    )]
+    StoreLocked { store: String, holder: String },
+
+    /// A WAL holds commits from an earlier writer of the store, made against
+    /// a state another writer has since moved on from. Replaying them would
+    /// corrupt the store.
+    #[error(
+        "The WAL at {wal} belongs to an earlier writer of {store}: another writer (or a copy \
+         of this directory) has opened the store since, so its {segments} segment(s) may hold \
+         commits that were never flushed and cannot be replayed safely. Some may be flushed \
+         already (a flush whose WAL cleanup was cut short). Open with `set_aside_stale_wal()` \
+         to move them to wal_set_aside/ and open the store as it is."
+    )]
+    StaleWal {
+        store: String,
+        wal: String,
+        segments: usize,
+    },
+
+    /// This handle may no longer write: its lease was lost or it was closed.
+    #[error("This handle can no longer write to the store: {reason}")]
+    WriterFenced { reason: String },
+
     /// Label not found in schema
     #[error("Label '{label}' not found in schema")]
     LabelNotFound { label: String },
@@ -392,6 +419,16 @@ pub enum UniError {
         "Fork '{name}' has nested children {children:?}; use drop_fork_cascade or drop them first"
     )]
     ForkHasChildren { name: String, children: Vec<String> },
+
+    /// Drop refused because the fork has tags (applied with `tag_fork`).
+    ///
+    /// A tag pins a version of the fork's branch, and a tagged branch cannot
+    /// be deleted, so the drop is refused before anything is tombstoned.
+    /// `name` is the tagged fork (for `drop_fork_cascade`, the first tagged
+    /// node of the subtree) and `tags` its tag names. Untag the fork with
+    /// `untag_fork`, then retry.
+    #[error("Fork '{name}' has tags {tags:?}; untag it with untag_fork before dropping")]
+    ForkTagged { name: String, tags: Vec<String> },
 
     /// `drop_fork_cascade` refused because at least one fork in the
     /// subtree has live sessions or in-flight transactions. No branch

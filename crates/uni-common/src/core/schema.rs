@@ -840,6 +840,52 @@ pub struct PropertyMeta {
     pub generation_expression: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The value an insert stores when it does not name the property (DDL
+    /// `DEFAULT`), already in the property's declared form. Evaluated once,
+    /// when declared; rows written before it are not backfilled. An explicit
+    /// `NULL` in a write is kept as NULL.
+    ///
+    /// Persisted through the value codec (base64), since untagged serde
+    /// would not round-trip temporal or vector values.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "property_default_serde"
+    )]
+    pub default: Option<crate::value::Value>,
+}
+
+/// Serde for [`PropertyMeta::default`]: the value-codec encoding, as base64.
+mod property_default_serde {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<crate::value::Value>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(v) => serializer.serialize_some(
+                &base64::engine::general_purpose::STANDARD
+                    .encode(crate::cypher_value_codec::encode(v)),
+            ),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<crate::value::Value>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(D::Error::custom)?;
+        crate::cypher_value_codec::decode(&bytes)
+            .map(Some)
+            .map_err(D::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1153,6 +1199,62 @@ impl Default for Schema {
 }
 
 impl Schema {
+    /// Fill `props` with the DDL `DEFAULT` of every active property one of
+    /// `entities` (labels or edge types) declares and `props` does not name.
+    ///
+    /// Only an absent key is filled: an explicit `Value::Null` is kept, so a
+    /// write can still store NULL in a defaulted property. Defaults are
+    /// stored in their declared form, so the filled values need no further
+    /// coercion. Returns whether anything was filled.
+    pub fn apply_property_defaults<'a>(
+        &self,
+        entities: impl IntoIterator<Item = &'a str>,
+        props: &mut HashMap<String, crate::value::Value>,
+    ) -> bool {
+        let mut filled = false;
+        for entity in entities {
+            if !self.declares_active(entity) {
+                continue;
+            }
+            let Some(declared) = self.properties.get(entity) else {
+                continue;
+            };
+            for (name, meta) in declared {
+                if let Some(default) = &meta.default
+                    && matches!(meta.state, SchemaElementState::Active)
+                    && !props.contains_key(name)
+                {
+                    props.insert(name.clone(), default.clone());
+                    filled = true;
+                }
+            }
+        }
+        filled
+    }
+
+    /// Whether any property of `entities` declares a DDL `DEFAULT`.
+    pub fn has_property_defaults<'a>(&self, entities: impl IntoIterator<Item = &'a str>) -> bool {
+        entities.into_iter().any(|entity| {
+            self.declares_active(entity)
+                && self
+                    .properties
+                    .get(entity)
+                    .is_some_and(|props| props.values().any(|m| m.default.is_some()))
+        })
+    }
+
+    /// Whether `entity` is a label or edge type whose declaration is live.
+    /// A dropped one keeps its properties in the catalog (they are tombstoned
+    /// with it), but its defaults no longer apply to writes under the name.
+    fn declares_active(&self, entity: &str) -> bool {
+        let live = |state: &SchemaElementState| matches!(state, SchemaElementState::Active);
+        match (self.labels.get(entity), self.edge_types.get(entity)) {
+            (Some(label), _) => live(&label.state),
+            (None, Some(edge_type)) => live(&edge_type.state),
+            (None, None) => true,
+        }
+    }
+
     /// Bumps `schema_version` to invalidate cached query plans.
     ///
     /// Called at the end of every DDL mutation that changes the schema's
@@ -1441,6 +1543,17 @@ impl Schema {
     }
 }
 
+/// What a catalog save expects to replace.
+#[derive(Debug, Clone)]
+enum StoredCatalog {
+    /// Not known: overwrite.
+    Unknown,
+    /// There was none: create only.
+    Absent,
+    /// Replace only this version.
+    Version(object_store::UpdateVersion),
+}
+
 pub struct SchemaManager {
     store: Arc<dyn ObjectStore>,
     path: ObjectStorePath,
@@ -1460,10 +1573,22 @@ pub struct SchemaManager {
     /// The catalog file on the local filesystem, when the store is local;
     /// see [`SchemaManager::set_local_file`].
     local_file: std::sync::OnceLock<std::path::PathBuf>,
+    /// The catalog object as this manager last read or wrote it: saves
+    /// replace only that version (compare-and-swap), so a stale handle cannot
+    /// overwrite another writer's catalog. `None` until known.
+    stored: std::sync::Mutex<StoredCatalog>,
+    /// Whether the handle may still write; consulted by every save.
+    gate: std::sync::RwLock<Option<Arc<dyn crate::core::write_gate::WriteGate>>>,
     /// Orders [`SchemaManager::save`]s: held from reading the catalog to the
     /// end of its write, so writes reach the store in the order their
     /// contents were taken and the last one holds the newest catalog.
     save_order: tokio::sync::Mutex<()>,
+    /// Runs before every save; see [`crate::core::write_gate::CatalogPublisher`].
+    publisher: std::sync::RwLock<Option<Arc<dyn crate::core::write_gate::CatalogPublisher>>>,
+    /// The bytes of the last save that failed without a verdict (a timeout,
+    /// a transport error): it may have landed, and the next save that finds
+    /// it stored swaps from it instead of taking it for another writer's.
+    unconfirmed: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl SchemaManager {
@@ -1490,6 +1615,10 @@ impl SchemaManager {
     ) -> Result<Self> {
         match store.get(path).await {
             Ok(result) => {
+                let stored = StoredCatalog::Version(object_store::UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                });
                 let bytes = result.bytes().await?;
                 let content = String::from_utf8(bytes.to_vec())?;
                 let mut schema: Schema = serde_json::from_str(&content)?;
@@ -1531,7 +1660,11 @@ impl SchemaManager {
                     persisted_version: AtomicU32::new(loaded_version),
                     loaded_writer_features,
                     local_file: std::sync::OnceLock::new(),
+                    stored: std::sync::Mutex::new(stored),
+                    gate: std::sync::RwLock::new(None),
                     save_order: tokio::sync::Mutex::new(()),
+                    publisher: std::sync::RwLock::new(None),
+                    unconfirmed: std::sync::Mutex::new(None),
                 })
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Self {
@@ -1543,7 +1676,11 @@ impl SchemaManager {
                 persisted_version: AtomicU32::new(0),
                 loaded_writer_features: current_writer_features(),
                 local_file: std::sync::OnceLock::new(),
+                stored: std::sync::Mutex::new(StoredCatalog::Absent),
+                gate: std::sync::RwLock::new(None),
                 save_order: tokio::sync::Mutex::new(()),
+                publisher: std::sync::RwLock::new(None),
+                unconfirmed: std::sync::Mutex::new(None),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
         }
@@ -1563,7 +1700,36 @@ impl SchemaManager {
     /// # Errors
     /// Propagates the object-store write failure, a serialization failure, or
     /// a poisoned schema lock.
+    /// Gates every save on `gate`: once it refuses, the catalog is not
+    /// written, and a lost compare-and-swap trips it.
+    pub fn set_write_gate(&self, gate: Arc<dyn crate::core::write_gate::WriteGate>) {
+        if let Ok(mut held) = self.gate.write() {
+            *held = Some(gate);
+        }
+    }
+
+    /// Runs `publisher` before every save.
+    pub fn set_catalog_publisher(
+        &self,
+        publisher: Arc<dyn crate::core::write_gate::CatalogPublisher>,
+    ) {
+        if let Ok(mut held) = self.publisher.write() {
+            *held = Some(publisher);
+        }
+    }
+
+    fn write_gate(&self) -> Option<Arc<dyn crate::core::write_gate::WriteGate>> {
+        self.gate.read().ok().and_then(|g| g.clone())
+    }
+
     pub async fn save(&self) -> Result<()> {
+        if let Some(gate) = self.write_gate() {
+            gate.check()?;
+        }
+        let publisher = self.publisher.read().ok().and_then(|p| p.clone());
+        if let Some(publisher) = publisher {
+            publisher.before_save().await?;
+        }
         let _ordered = self.save_order.lock().await;
         let (content, version) = {
             let schema_guard = acquire_read(&self.schema, "schema")?;
@@ -1575,15 +1741,117 @@ impl SchemaManager {
         // Test-only seam (no-op without `fail/failpoints`): a save holding a
         // serialized catalog that has not reached the store yet.
         fail::fail_point!("schema::save::before-put");
-        self.store
-            .put(&self.path, content.into())
-            .await
-            .map_err(anyhow::Error::from)?;
+        let mut expected = self
+            .stored
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schema catalog state poisoned"))?
+            .clone();
+        let written_bytes = content.clone().into_bytes();
+        let bytes = object_store::PutPayload::from(content);
+        // At most twice: a second attempt follows adopting this handle's own
+        // earlier save, which failed without a verdict and landed.
+        let mut written = None;
+        for _ in 0..2 {
+            match self.save_once(&expected, &bytes, &written_bytes).await? {
+                Ok(done) => {
+                    written = Some(done);
+                    break;
+                }
+                Err(ours) => expected = ours,
+            }
+        }
+        let written = written
+            .ok_or_else(|| anyhow::anyhow!("{}: the compare-and-swap did not settle", self.path))?;
+        *self
+            .stored
+            .lock()
+            .map_err(|_| anyhow::anyhow!("schema catalog state poisoned"))? = written;
         // Recorded only after the PUT succeeds, and it is the version that was
         // actually serialized rather than the live one, so a concurrent bump
         // between the two leaves the manager dirty instead of falsely clean.
         self.persisted_version.store(version, Ordering::Release);
         Ok(())
+    }
+
+    /// One save attempt: `Ok(Ok(state))` written, `Ok(Err(state))` this
+    /// handle's own unconfirmed save found stored (save again from it).
+    async fn save_once(
+        &self,
+        expected: &StoredCatalog,
+        bytes: &object_store::PutPayload,
+        written_bytes: &[u8],
+    ) -> Result<std::result::Result<StoredCatalog, StoredCatalog>> {
+        let mode = match expected {
+            StoredCatalog::Unknown => object_store::PutMode::Overwrite,
+            StoredCatalog::Absent => object_store::PutMode::Create,
+            StoredCatalog::Version(v) => object_store::PutMode::Update(v.clone()),
+        };
+        let unconfirmed = |value: Option<Vec<u8>>| {
+            if let Ok(mut held) = self.unconfirmed.lock() {
+                *held = value;
+            }
+        };
+        match self
+            .store
+            .put_opts(&self.path, bytes.clone(), mode.into())
+            .await
+        {
+            Ok(result) => {
+                unconfirmed(None);
+                Ok(Ok(StoredCatalog::Version(object_store::UpdateVersion {
+                    e_tag: result.e_tag,
+                    version: result.version,
+                })))
+            }
+            // A local filesystem cannot swap; its OS lock keeps a second
+            // writer out instead.
+            Err(object_store::Error::NotImplemented { .. })
+            | Err(object_store::Error::NotSupported { .. }) => {
+                self.store
+                    .put(&self.path, bytes.clone())
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                Ok(Ok(StoredCatalog::Unknown))
+            }
+            Err(object_store::Error::Precondition { .. })
+            | Err(object_store::Error::AlreadyExists { .. }) => {
+                // Our own earlier attempt may have landed with its response
+                // lost, or an earlier save that failed without a verdict.
+                if let Ok(current) = self.store.get(&self.path).await {
+                    let version = object_store::UpdateVersion {
+                        e_tag: current.meta.e_tag.clone(),
+                        version: current.meta.version.clone(),
+                    };
+                    if let Ok(held) = current.bytes().await {
+                        if held.as_ref() == written_bytes {
+                            unconfirmed(None);
+                            return Ok(Ok(StoredCatalog::Version(version)));
+                        }
+                        let ours = self
+                            .unconfirmed
+                            .lock()
+                            .ok()
+                            .is_some_and(|u| u.as_deref() == Some(held.as_ref()));
+                        if ours {
+                            unconfirmed(None);
+                            return Ok(Err(StoredCatalog::Version(version)));
+                        }
+                    }
+                }
+                let reason = format!(
+                    "{} was changed by another writer since this handle read it",
+                    self.path
+                );
+                if let Some(gate) = self.write_gate() {
+                    gate.trip(reason.clone());
+                }
+                anyhow::bail!("{reason}; this handle's schema change was not saved")
+            }
+            Err(e) => {
+                unconfirmed(Some(written_bytes.to_vec()));
+                Err(e.into())
+            }
+        }
     }
 
     /// Persists the schema only when it holds changes that were never written.
@@ -1742,6 +2010,7 @@ impl SchemaManager {
                         state: SchemaElementState::Active,
                         generation_expression: None,
                         description: None,
+                        default: None,
                     },
                 );
             }
@@ -1769,7 +2038,13 @@ impl SchemaManager {
             loaded_writer_features: self.loaded_writer_features.clone(),
             // Never saved, so never synced.
             local_file: std::sync::OnceLock::new(),
+            stored: std::sync::Mutex::new(StoredCatalog::Unknown),
+            // The parent's gate: a save through an overlay (which callers
+            // never make) is at least refused once the handle may not write.
+            gate: std::sync::RwLock::new(self.write_gate()),
             save_order: tokio::sync::Mutex::new(()),
+            publisher: std::sync::RwLock::new(None),
+            unconfirmed: std::sync::Mutex::new(None),
         })
     }
 
@@ -2144,6 +2419,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description,
+                default: None,
             },
         );
         // Bump after stamping `added_in` with the pre-bump `version`.
@@ -2211,6 +2487,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description,
+                default: None,
             },
         );
         // Bump after stamping `added_in` with the pre-bump `version`.
@@ -2264,6 +2541,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: None,
                 description: None,
+                default: None,
             },
         );
         schema.bump_version();
@@ -2301,6 +2579,7 @@ impl SchemaManager {
                 state: SchemaElementState::Active,
                 generation_expression: Some(expr),
                 description: None,
+                default: None,
             },
         );
         // Bump after stamping `added_in` with the pre-bump `version`.
@@ -2346,6 +2625,28 @@ impl SchemaManager {
             .get_mut(prop_name)
             .ok_or_else(|| anyhow!("Property '{}' does not exist on '{}'", prop_name, entity))?;
         meta.description = description;
+        Ok(())
+    }
+
+    /// Set (or clear) the DDL `DEFAULT` of a declared property. `default`
+    /// must already be in the property's declared form.
+    pub fn set_property_default(
+        &self,
+        entity: &str,
+        prop_name: &str,
+        default: Option<crate::value::Value>,
+    ) -> Result<()> {
+        let mut guard = acquire_write(&self.schema, "schema")?;
+        let schema = Arc::make_mut(&mut *guard);
+        let props = schema
+            .properties
+            .get_mut(entity)
+            .ok_or_else(|| anyhow!("Entity '{}' does not exist", entity))?;
+        let meta = props
+            .get_mut(prop_name)
+            .ok_or_else(|| anyhow!("Property '{}' does not exist on '{}'", prop_name, entity))?;
+        meta.default = default;
+        schema.bump_version();
         Ok(())
     }
 
@@ -2659,10 +2960,11 @@ pub const RESERVED_PROPERTY_NAMES: &[&str] = &[
 /// [`RESERVED_PROPERTY_NAMES`].
 ///
 /// `_gen_` names the columns of generated (expression-index) properties,
-/// `__fde_` a MUVERA index's derived vector column, and `__alias_of__` the
-/// alias marker the planner records in a variable's property set. Each is a
-/// family of names created by the engine, so a prefix is the exact rule.
-pub const RESERVED_PROPERTY_PREFIXES: &[&str] = &["_gen_", "__fde_", "__alias_of__"];
+/// `__fde_` a MUVERA index's derived vector column, `__jfts_` a JSON
+/// full-text index's derived text column, and `__alias_of__` the alias marker
+/// the planner records in a variable's property set. Each is a family of
+/// names created by the engine, so a prefix is the exact rule.
+pub const RESERVED_PROPERTY_PREFIXES: &[&str] = &["_gen_", "__fde_", "__jfts_", "__alias_of__"];
 
 /// Whether `name` is reserved by the engine rather than a user property.
 ///
@@ -2752,6 +3054,157 @@ mod tests {
     use super::*;
     use crate::value::{TemporalValue, Value};
 
+    /// A catalog another writer changed since this manager read it is not
+    /// overwritten: on a store with conditional writes the save fails.
+    #[tokio::test]
+    async fn a_save_does_not_overwrite_a_catalog_changed_by_another_writer() {
+        use object_store::ObjectStoreExt;
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let path = ObjectStorePath::from("catalog/schema.json");
+        let a = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        a.add_label("A").unwrap();
+        a.save().await.unwrap();
+        let b = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        b.add_label("B").unwrap();
+        b.save().await.unwrap();
+        // `a` still holds the catalog as it last wrote it.
+        a.add_label("A2").unwrap();
+        let err = a
+            .save()
+            .await
+            .expect_err("a stale save overwrote the catalog");
+        assert!(format!("{err:#}").contains("another writer"), "{err:#}");
+        let on_disk = store.get(&path).await.unwrap().bytes().await.unwrap();
+        let text = String::from_utf8(on_disk.to_vec()).unwrap();
+        assert!(text.contains("\"B\"") && !text.contains("A2"), "{text}");
+        // Successive saves by one manager keep working.
+        b.add_label("B2").unwrap();
+        b.save().await.unwrap();
+    }
+
+    /// Two managers that both found no catalog cannot both create it.
+    #[tokio::test]
+    async fn only_one_of_two_fresh_managers_creates_the_catalog() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let path = ObjectStorePath::from("catalog/schema.json");
+        let a = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        let b = SchemaManager::load_from_store(store.clone(), &path)
+            .await
+            .unwrap();
+        a.add_label("A").unwrap();
+        a.save().await.unwrap();
+        b.add_label("B").unwrap();
+        assert!(
+            b.save().await.is_err(),
+            "the second creator overwrote the first"
+        );
+    }
+
+    /// A property default round-trips through the catalog JSON exactly,
+    /// typed values included, and a catalog written before defaults existed
+    /// still loads (with none).
+    #[test]
+    fn property_default_round_trips_and_is_optional() {
+        use crate::value::{TemporalValue, Value};
+        for default in [
+            Value::Int(7),
+            Value::Float(2.0),
+            Value::String("x".into()),
+            Value::Temporal(TemporalValue::Date {
+                days_since_epoch: 18_263,
+            }),
+            Value::List(vec![Value::String("a".into())]),
+        ] {
+            let meta = PropertyMeta {
+                r#type: DataType::String,
+                nullable: true,
+                added_in: 1,
+                state: SchemaElementState::Active,
+                generation_expression: None,
+                description: None,
+                default: Some(default.clone()),
+            };
+            let json = serde_json::to_string(&meta).unwrap();
+            let back: PropertyMeta = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.default, Some(default));
+        }
+        // A catalog written before defaults: the same JSON without the key.
+        let mut old: serde_json::Value = serde_json::to_value(PropertyMeta {
+            r#type: DataType::String,
+            nullable: true,
+            added_in: 1,
+            state: SchemaElementState::Active,
+            generation_expression: None,
+            description: None,
+            default: None,
+        })
+        .unwrap();
+        assert!(old.get("default").is_none());
+        old.as_object_mut().unwrap().remove("default");
+        let meta: PropertyMeta = serde_json::from_value(old).unwrap();
+        assert_eq!(meta.default, None);
+    }
+
+    /// `apply_property_defaults` fills only absent keys: an explicit NULL stays.
+    #[test]
+    fn apply_property_defaults_keeps_explicit_null() {
+        use crate::value::Value;
+        let mut schema = Schema::default();
+        let mut props = HashMap::new();
+        props.insert(
+            "q".to_string(),
+            PropertyMeta {
+                r#type: DataType::Int64,
+                nullable: true,
+                added_in: 1,
+                state: SchemaElementState::Active,
+                generation_expression: None,
+                description: None,
+                default: Some(Value::Int(1)),
+            },
+        );
+        schema.properties.insert("L".to_string(), props);
+        let mut absent = HashMap::new();
+        assert!(schema.apply_property_defaults(["L"], &mut absent));
+        assert_eq!(absent.get("q"), Some(&Value::Int(1)));
+        let mut null = HashMap::from([("q".to_string(), Value::Null)]);
+        assert!(!schema.apply_property_defaults(["L"], &mut null));
+        assert_eq!(null.get("q"), Some(&Value::Null));
+    }
+
+    /// A dropped (tombstoned) label's defaults are not applied: the name may
+    /// be reused schemalessly, and the old declaration no longer speaks for it.
+    #[tokio::test]
+    async fn apply_property_defaults_skips_a_dropped_label() {
+        use crate::value::Value;
+        let dir = tempdir().unwrap();
+        let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let manager = SchemaManager::load_from_store(store, &ObjectStorePath::from("schema.json"))
+            .await
+            .unwrap();
+        manager.add_label("L").unwrap();
+        manager
+            .add_property("L", "q", DataType::Int64, true)
+            .unwrap();
+        manager
+            .set_property_default("L", "q", Some(Value::Int(1)))
+            .unwrap();
+        let mut props = HashMap::new();
+        assert!(manager.schema().apply_property_defaults(["L"], &mut props));
+        manager.drop_label("L", false).unwrap();
+        let mut props = HashMap::new();
+        let schema = manager.schema();
+        assert!(!schema.has_property_defaults(["L"]));
+        assert!(!schema.apply_property_defaults(["L"], &mut props));
+        assert!(props.is_empty(), "{props:?}");
+    }
+
     /// A declaration types a property only on the labels in scope. `F` and
     /// `G` declare `v` as `Float64`, `H` as `Int64`; `S` declares nothing.
     #[test]
@@ -2763,6 +3216,7 @@ mod tests {
             state: SchemaElementState::Active,
             generation_expression: None,
             description: None,
+            default: None,
         };
         let mut schema = Schema::default();
         for (label, t) in [

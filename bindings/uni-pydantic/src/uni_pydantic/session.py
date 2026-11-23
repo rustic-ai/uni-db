@@ -119,6 +119,8 @@ class UniTransaction:
         self._tx: uni_db.Transaction | None = None
         self._pending_nodes: list[UniNode] = []
         self._pending_edges: list[tuple[UniNode, str, UniNode, UniEdge | None]] = []
+        # Nodes this transaction's commit created, detached again on rollback.
+        self._created_nodes: list[UniNode] = []
         self._committed = False
         self._rolled_back = False
 
@@ -151,11 +153,17 @@ class UniTransaction:
         **kwargs: Any,
     ) -> None:
         """Create an edge between two nodes in this transaction."""
-        if not source.is_persisted:
-            raise NotPersisted(source)
-        if not target.is_persisted:
-            raise NotPersisted(target)
+        for node in (source, target):
+            if not node.is_persisted and not self._is_pending(node):
+                raise NotPersisted(node)
         self._pending_edges.append((source, edge_type, target, properties))
+
+    def _is_pending(self, node: UniNode) -> bool:
+        """Whether ``node`` was ``add``-ed to this transaction.
+
+        Commit creates pending nodes before edges, so an edge may name one.
+        """
+        return any(pending is node for pending in self._pending_nodes)
 
     def commit(self) -> None:
         """Commit the transaction."""
@@ -170,7 +178,10 @@ class UniTransaction:
         try:
             # Create pending nodes
             for node in self._pending_nodes:
+                was_persisted = node.is_persisted
                 self._session._create_node_in_tx(node, self._tx)
+                if not was_persisted and node.is_persisted:
+                    self._created_nodes.append(node)
 
             # Create pending edges
             for source, edge_type, target, props in self._pending_edges:
@@ -180,6 +191,8 @@ class UniTransaction:
 
             self._tx.commit()
             self._committed = True
+            # Committed: a later rollback has nothing to undo.
+            self._created_nodes.clear()
 
             # Mark nodes as clean
             for node in self._pending_nodes:
@@ -190,14 +203,33 @@ class UniTransaction:
             raise TransactionError(f"Commit failed: {e}") from e
 
     def rollback(self) -> None:
-        """Rollback the transaction."""
-        if self._rolled_back:
+        """Rollback the transaction.
+
+        A no-op once the transaction has committed: an error raised after an
+        explicit ``commit()`` inside the ``with`` block leaves the committed
+        nodes as they are.
+        """
+        if self._rolled_back or self._committed:
             return
-        if self._tx is not None:
-            self._tx.rollback()
-        self._rolled_back = True
-        self._pending_nodes.clear()
-        self._pending_edges.clear()
+        try:
+            if self._tx is not None:
+                self._tx.rollback()
+        finally:
+            self._rolled_back = True
+            self._detach_created_nodes()
+            self._pending_nodes.clear()
+            self._pending_edges.clear()
+
+    def _detach_created_nodes(self) -> None:
+        """Drop the ids and identity-map entries of nodes the rollback undid."""
+        identity_map = self._session._identity_map
+        for node in self._created_nodes:
+            if node._vid is not None:
+                key = (node.__class__.__label__, node._vid)
+                if identity_map.get(key) is node:
+                    del identity_map[key]
+            node._detach_session()
+        self._created_nodes.clear()
 
 
 class UniSession:
@@ -211,7 +243,7 @@ class UniSession:
         >>> from uni_db import Uni
         >>> from uni_pydantic import UniSession
         >>>
-        >>> db = Uni("./my_graph")
+        >>> db = Uni.open("./my_graph")
         >>> session = UniSession(db)
         >>> session.register(Person, Company)
         >>> session.sync_schema()

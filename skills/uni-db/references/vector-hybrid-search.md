@@ -9,7 +9,7 @@ Quick reference for Uni DB's vector similarity, full-text, and hybrid search cap
 <!-- doctest: skip -->
 ```cypher
 CALL uni.vector.query(label, property, query_vector, k [, filter] [, threshold] [, options])
-YIELD node, score, distance, vector_score, rerank_score, vid
+YIELD node, score, distance, rerank_score, vid
 ```
 
 | Parameter | Type | Required | Description |
@@ -28,7 +28,6 @@ YIELD node, score, distance, vector_score, rerank_score, vid
 | `vid` | Integer | Vertex ID for efficient joins (faster than `node`) |
 | `score` | Float | Normalized similarity 0-1, or reranker score when reranker is active |
 | `distance` | Float | Raw distance (lower = closer; metric-dependent) |
-| `vector_score` | Float | Same as `score` (for parity with `uni.search`) |
 | `rerank_score` | Float | Cross-encoder score (null when reranker is not configured) |
 
 **Basic search:**
@@ -113,6 +112,8 @@ Sparse vectors (SPLADE / learned-sparse, BM25-style term weights) are stored as 
 |---|---|---|
 | `DataType::SparseVector { dimensions }` | `sparse_vector(N)` | `dimensions` = term-space cardinality (max term id + 1) |
 
+Write values as a `{indices: [...], values: [...]}` map literal (`CREATE (:Document {sparse_embedding: {indices: [3, 17], values: [0.5, 0.5]}})`) or a native sparse vector parameter: Python `uni_db.SparseVector(indices, values)`, e.g. `tx.execute("CREATE (:Document {sparse_embedding: $sv})", {"sv": uni_db.SparseVector([3, 17], [0.5, 0.5])})`. Both are stored as the same canonical sparse vector (ids sorted, repeated ids summed); a map of any other shape is a `TypeError`.
+
 ### Sparse Index DDL
 
 ```cypher
@@ -130,7 +131,7 @@ OPTIONS { type: 'sparse', quantize: false }
 Procedure path:
 ```cypher
 CALL uni.schema.createIndex('Document', 'sparse_embedding',
-    {"type": "VECTOR", "algorithm": "SPARSE"})
+    {type: 'SPARSE'})
 ```
 
 ### Query Procedure
@@ -200,6 +201,8 @@ A per-row expression for `WHERE`, `RETURN`, `ORDER BY`, and Locy rule bodies. Sc
 | Vector property | Vector literal | **Vector** | Metric-aware similarity per row |
 | Vector property (with embedding config) | String literal | **AutoEmbed** | Embeds query once, then vector similarity per row |
 | String property (with FTS index) | String literal | **FTS** | BM25 score normalized via `score / (score + fts_k)` |
+| Sparse-vector property | Sparse vector (or `{indices, values}` map) | **Sparse** | Dot product per row (unbounded, not normalized) |
+| `LIST<VECTOR(N)>` property (multi-vector) | List of vectors | **MultiVector** | MaxSim per row: each query vector's best match, summed |
 
 Metric is resolved from the vector index at compile time. Defaults to cosine if no index found.
 
@@ -261,7 +264,7 @@ ORDER BY score DESC
 
 **Incorrect — naive addition of two separate calls:**
 ```cypher
-// DON'T: mixes incompatible scales (cosine [0,1] vs unbounded BM25)
+// DON'T: mixes incompatible scales (raw cosine [-1,1] vs unbounded BM25)
 MATCH (d:Doc)
 RETURN d.title,
   (similar_to(d.embedding, $qvec) + similar_to(d.content, $qtxt)) AS score
@@ -292,7 +295,7 @@ The multi-source form normalizes BM25 via `score / (score + fts_k)` before fusio
 <!-- doctest: skip -->
 ```cypher
 CALL uni.fts.query(label, property, search_term, k [, filter] [, threshold] [, options])
-YIELD node, score, fts_score, rerank_score, vid
+YIELD node, score, rerank_score, vid
 ```
 
 | Parameter | Type | Required | Description |
@@ -302,10 +305,10 @@ YIELD node, score, fts_score, rerank_score, vid
 | `search_term` | String | Yes | Search query |
 | `k` | Integer | Yes | Number of results |
 | `filter` | String | No | Pre-filter predicate |
-| `threshold` | Float | No | Minimum score (0-1) |
-| `options` | Map | No | Reranker configuration (see [Section 12](#12-cross-encoder-reranking)) |
+| `threshold` | Float | No | Minimum `score` |
+| `options` | Map | No | `fts_k` (BM25 saturation, default 1.0) plus reranker configuration (see [Section 12](#12-cross-encoder-reranking)) |
 
-Scores are BM25, normalized to 0-1 relative to top match.
+`score` is BM25 squashed to `[0, 1)` as `bm25 / (bm25 + fts_k)`; it is not relative to the top match. A plain list of words is OR-ed (a document matching any term is returned). The query also takes `AND`, `OR`, `NOT word` / `-word`, `"quoted phrases"` and parentheses; `AND` binds tighter than `OR` and adjacency, and the operators are recognised only in upper case. Negated terms exclude but do not score. A blank query returns nothing; a query (or group) of only negated terms, an unbalanced quote or parenthesis, or a dangling operator is an error; a phrase on an index without positions (n-gram) is an error. Flushed, unflushed and schemaless rows get the same semantics.
 
 ```cypher
 CALL uni.fts.query('Article', 'content', 'distributed graph database', 10)
@@ -347,9 +350,9 @@ The sparse arm is **opt-in** and requires **both** halves — either alone is a 
 
 | Option | Values | Default | Description |
 |---|---|---|---|
-| `method` | `'rrf'`, `'weighted'` | `'rrf'` | Fusion algorithm |
+| `method` | `'rrf'`, `'weighted'`, `'relative_score'` (alias `'rsf'`), `'dbsf'` | `'rrf'` | Fusion algorithm. `relative_score` min-max normalizes each source then takes the weighted sum; `dbsf` z-score normalizes each source then sums. An unknown method falls back to RRF |
 | `alpha` | 0.0 - 1.0 | 0.5 | Vector/FTS blend weight (**2-way only**) |
-| `weights` | List\<Float\> | — | 3-way weights `[vector, fts, sparse]` (weighted method) |
+| `weights` | List\<Float\> | equal thirds | 3-way weights `[vector, fts, sparse]` (`weighted`, `relative_score`, `dbsf`) |
 | `rrf_k` | Integer | 60 | RRF constant |
 | `over_fetch` | Float | 2.0 | Over-fetch factor; each branch retrieves `k * over_fetch` |
 | `sparse_query` | Map or sparse vector | `null` | `{indices, values}`; enables the sparse arm (with `sparse:` key) |
@@ -430,7 +433,7 @@ ORDER BY score DESC
 | > 1M vectors, memory-constrained | **IVF-PQ** | Partition-based with product quantization, smallest footprint |
 | > 1M vectors, quality priority | **IVF-SQ** | Partition-based with scalar quantization, better recall than PQ |
 
-> **No-type default = IVF-PQ.** `CREATE VECTOR INDEX ... OPTIONS { metric: 'cosine' }` with no `type` (and the short form `... WITH { metric: 'cosine' }`) produces **IVF-PQ** (256 partitions / 16 sub_vectors / 8 bits), not HNSW-SQ. HNSW-SQ is a *recommended* choice for the 10k–1M band, but it is never the implicit default — request it explicitly with `type: 'hnsw_sq'`.
+> **No-type default = IVF-PQ.** `CREATE VECTOR INDEX ... OPTIONS { metric: 'cosine' }` with no `type` produces **IVF-PQ** (256 partitions / dimension-derived sub_vectors / 8 bits), not HNSW-SQ. HNSW-SQ is a *recommended* choice for the 10k–1M band, but it is never the implicit default — request it explicitly with `type: 'hnsw_sq'`.
 
 ### Algorithm Variants
 
@@ -464,7 +467,7 @@ All 8 algorithms available, grouped by architecture:
 | Parameter | Applies To | Default | Description |
 |---|---|---|---|
 | `partitions` | All IVF variants, all HNSW variants | 256 (IVF) / 1 (HNSW) | Number of Voronoi partitions. HNSW default 1 = single global graph. Increase for >1M vectors. |
-| `sub_vectors` | IVF-PQ, HNSW-PQ | 16 | Number of PQ sub-quantizers. More = better recall, more memory |
+| `sub_vectors` | IVF-PQ, HNSW-PQ | derived from dimension (~32x compression; 16 below 128-d) | Number of PQ sub-quantizers; must divide the dimension. More = better recall, more memory |
 | `num_bits` | IVF-PQ, IVF-RQ | 8 (PQ) / 1 (RQ) | Bits per subvector (PQ) or per dimension (RQ/RaBitQ). RQ: 1=classic RaBitQ, 2/4/8 for higher fidelity |
 | `m` | All HNSW variants | 16 | Edges per node in HNSW graph. Higher = better recall, more memory |
 | `ef_construction` | All HNSW variants | 200 | Build-time search width. Higher = better graph quality, slower build |
@@ -537,12 +540,9 @@ OPTIONS {
     }
 }
 
-// No type given → IVF-PQ (256 partitions / 16 sub_vectors / 8 bits)
+// No type given → IVF-PQ (256 partitions / dimension-derived sub_vectors / 8 bits)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
 OPTIONS { metric: 'cosine' }
-
-// Short form also defaults to IVF-PQ
-CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding) OPTIONS { metric: 'cosine' }
 ```
 
 ### Rust API
@@ -607,7 +607,7 @@ Index is built automatically on creation over existing data. No manual `rebuild_
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
 ```
 
-Enables full-text search on nested JSON/JSONB property values.
+Indexes the string values of the `JSON` property (optionally only those under `OPTIONS { paths: [...] }`) in a derived text column. `uni.fts.query('Data', 'metadata', ...)` searches it, and `d.metadata.path CONTAINS 'x'` is prefiltered from it, with the predicate re-applied.
 
 ### CONTAINS Predicate
 
@@ -655,7 +655,7 @@ OPTIONS {
 ### Direct Xervo API
 
 ```rust
-let xervo = db.xervo()?;
+let xervo = db.xervo();
 
 // Embed
 let vectors = xervo.embed("embed/default", &["query text"]).await?;
@@ -911,10 +911,4 @@ let scored = db.xervo().rerank(
 // scored: Vec<ScoredDoc> sorted by relevance descending
 ```
 
-```python
-scored = db.xervo().rerank(
-    "rerank/minilm",
-    "How does Rust handle memory safety?",
-    ["Rust uses ownership and borrowing.", "Python uses garbage collection."],
-)
-```
+The direct reranker API is Rust-only; the Python `Xervo` facade has no `rerank`. From Python, rerank through the search procedures' `reranker` option.

@@ -14,10 +14,12 @@
   },
   "properties": {
     "City": {
-      "name": { "type": "String", "nullable": true }
+      "name": { "type": "String", "nullable": true },
+      "country": { "type": "String", "nullable": true }
     },
     "Country": {
-      "name": { "type": "String", "nullable": true }
+      "name": { "type": "String", "nullable": true },
+      "capital": { "type": "String", "nullable": true }
     },
     "Person": {
       "name": { "type": "String", "nullable": true }

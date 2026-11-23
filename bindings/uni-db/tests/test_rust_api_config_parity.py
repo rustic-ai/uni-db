@@ -36,6 +36,13 @@ def config_values(tmp_path):
         "lance_index_cache_bytes": 2**20,
         "object_store": {"read_timeout": 3.0, "max_retries": 2},
         "index_rebuild": {"max_index_age": None, "auto_rebuild_enabled": False},
+        "writer_lease": {
+            "ttl": 40.0,
+            "renew_interval": 12.0,
+            "acquire_grace": 2.0,
+            "clock_skew": 3.0,
+        },
+        "read_cut_refresh": 0.5,
         "strict_schema": False,
         "defer_embeddings": True,
         "fork_fragment_warn_threshold": 8,
@@ -381,3 +388,9 @@ def test_cloud_config_preserves_optional_fields_and_refuses_typos(config, builde
     obj = builder.temporary().cloud_config(config)
     with pytest.raises(ValueError, match="cloud config key"):
         obj.cloud_config({**config, "typo": "not-a-credential"})
+
+
+def test_read_cut_refresh_none_round_trips():
+    db = uni_db.UniBuilder.temporary().config({"read_cut_refresh": None}).build()
+    assert db.config()["read_cut_refresh"] is None
+    db.shutdown()

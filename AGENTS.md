@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `crates/`: the Rust workspace (~27 crates). Load-bearing ones:
+- `crates/`: the Rust workspace (29 crates). Load-bearing ones:
   - `uni`: public API facade (`Uni` / `Session` / `Transaction`, forks, plugins host wiring) — also hosts the bulk of the integration tests under `crates/uni/tests/`.
   - `uni-store`: storage engine — Lance (L1) backend, L0 buffers, WAL, OCC/SSI commit machinery, snapshots, compaction.
   - `uni-query`: Cypher planner + DataFusion-based executor, plus the Locy fixpoint runtime (`df_graph/locy_*`).
@@ -86,6 +86,61 @@
   that has not been shown to exist; a progress comment asserts a state the
   merged code has not reached, since local commits sit unpushed.
 
+## Read cut — the manifest is the commit point
+- **Reads see the versions the latest manifest names** (`SnapshotManifest::tables`,
+  `uni_store::storage::read_cut`), not each table's newest. `StorageManager::backend()`
+  reads rows there; `head_backend()` reads newest versions.
+- **A path that reads a table to rewrite it must use `head_backend()`** (compaction,
+  index builds, schema evolution, restore, bulk, backfills). Reading at the cut would
+  drop rows a running flush has committed but not yet published.
+- **Every Lance commit must go through `LanceDbBackend` or a `DatasetCut`**, so it
+  records its version. A raw `Dataset::write` / `restore()` / `create_index` elsewhere
+  leaves the cut naming an older version, and the next writable open rolls it back.
+- **A write outside a flush must call `StorageManager::publish_cut()` before the
+  catalog depends on it** (DDL widening, index builds): other handles read it only once
+  a manifest names it. Never call it from inside a flush (it returns at once there).
+- **Never roll a table back mid-session on suspicion.** A version this handle did not
+  write trips the fence instead; the WAL still holds the handle's unpublished commits.
+- **A multi-table write that publishes its own manifest is a unit.** Flushes, bulk
+  publishes and restores run their table commits under `read_cut::in_unit(manifest_id)`
+  with the unit guard held until the pointer moves. Flush streams also take a
+  `ReadCut::stream_ticket` at rotation (under `flush_lock`) and then `stream_lock`, so they
+  commit one at a time in rotation order; bulk publishes take neither, and their (keeping)
+  units are never waited for and make no table busy. Commits made outside one are loose.
+  A unit's guard must travel with whatever finalizes it (a bulk re-drive's included), so
+  a dropped future closes the unit.
+- **A commit no WAL holds must not be lost by a rollback at open.** Use
+  `open_unit_keeping` for it (bulk), or make the recovery that completes it record it.
+
+## Single writer and hybrid lineage — invariants
+- **Every catalog write is a compare-and-swap from the version this handle last read
+  or wrote** (`catalog/latest`, schema, named snapshots, fork registry, WAL claim,
+  lease). A lost swap trips the fence; a write that failed without a verdict is
+  remembered and adopted if later found stored. Never add a plain `put` of one.
+- **Never write `catalog/wal_claim.json`, `wal_id.json` or `writer_lease.json`
+  directly**: go through `wal_lineage` and `lease`.
+- **A read-only handle writes nothing**: its fence starts tripped, and fork
+  create/drop on it fail with `ReadOnly`. Do not add a write path that skips the fence.
+- **Background jobs check the fence with `check()`, never `is_tripped()`**: only
+  `check()` evaluates the lease deadline.
+
+## Index prefilters and derived columns — invariants
+- **A candidate prefilter must be a superset.** The inverted-index and JSON
+  full-text prefilters (`CandidatePrefilter` in `df_graph/scan.rs`) narrow a
+  scan to candidate vids and leave the predicate above the scan. A change to
+  either index may add candidates (stale terms, case folding, the
+  `OVER_CAP_TERM` posting) but never drop a match: union the unflushed rows,
+  and skip the prefilter where the index cannot vouch for the view (a
+  transaction or pinned snapshot, a fork).
+- **A JSON full-text index's `__jfts_<column>` text is computed at batch build,
+  never stored in L0** (`VertexDataset::build_record_batch_with_timestamps`),
+  so the content UID hashes the row as written. Backfill it in storage before
+  the catalog registers the column.
+- **An update of a flushed vertex keeps its stored `created_at`**:
+  `Writer::write_vertex_row` carries it into the L0 row (batched for SET/REMOVE
+  through `carry_stored_created_at`). Do not stamp an update with `now` when no
+  buffer knows the vertex.
+
 ## Fork system — current invariants (post Phase 7)
 
 The fork track shipped phases 0 through 7. This block captures the
@@ -117,9 +172,30 @@ from each phase for deeper context.
   "absent" for such a label, or promote duplicates every primary row.
 - **Diff identity is content UID, not VID.** Vertex pairing is by
   `compute_vertex_uid(label, ext_id, properties)`; edge pairing is
-  by `(src_uid, dst_uid)` scoped to edge type. VIDs on `DiffVertex`
-  are informational. Two unrelated forks with overlapping VIDs
-  still pair correctly.
+  by `compute_edge_uid(src_uid, dst_uid, type, properties)`. Both keys
+  hash every property, so an edited row has a new UID on the side that
+  edited it. VIDs on `DiffVertex` are informational. Two unrelated
+  forks with overlapping VIDs still pair correctly.
+- **Edited rows pair into `changed` by `(label, ext_id)`, and by id
+  only under shared lineage.** `compute_diff_with_lineage` pairs an
+  added and a deleted row by VID / EID only when one side is the
+  other's ancestor, and only for ids below the fork-point marks
+  (`ForkInfo::fork_point_vid_hwm` / `_eid_hwm`) of the fork directly
+  below the ancestor: siblings, and primary's post-fork rows against a
+  fork's own, reuse ids from the same high-water mark.
+  `Uni::shared_lineage` derives the floors from the registry; never
+  pass a `SharedLineage` for views that do not descend from one another.
+  A fork created before the marks existed has zero floors (ext_id
+  pairing only).
+- **A tagged fork cannot be dropped.** Lance refuses to delete a branch
+  a tag references, even forced, so `drop_fork` / `drop_fork_cascade`
+  check for tags before `begin_drop` and return `ForkTagged`; nothing is
+  tombstoned. Recovery leaves a Tombstoned fork in place (no
+  `finish_drop`) when any branch delete fails, and logs the blocking
+  tags. Lance tags are dataset-wide: every fork tag operation filters on
+  the tag's branch (`BranchTag::branch`), and new tags are named
+  `fork_{fork_id}_{tag}_{dataset}` while the older `fork_{tag}_{dataset}`
+  is still read.
 - **Promote is atomic across patterns.** `Uni::promote_from_fork`
   opens one primary transaction, runs every pattern (vertex first,
   then edge — within-call vertex inserts feed the edge endpoint
@@ -216,13 +292,14 @@ from each phase for deeper context.
 - **Same-fork sessions share an `Arc<UniInner>`** via `UniInner.fork_inners` (cached as `Weak`). A commit on one session is immediately visible to siblings — preserve this when refactoring `ForkBuilder::build` or `Uni::drop_fork`.
 - **`Uni::drop_fork` must check `inflight_tx_count` before `begin_drop`.** The registry transition to Tombstoned cannot be cleanly rolled back; surfacing `ForkInflightTx` early is the contract. The counter is on `UniInner` and paired with `Transaction::new` / `Transaction::drop` (incremented and decremented unconditionally).
 - **On-the-fly fork dataset creation must keep main empty.** `BranchedBackend::ensure_branch_for_new` materializes an empty parent on `main`, branches from it, then writes the actual batches to the branch. Calling `create_dataset_then_branch` directly with the batches would leak fork data into primary's view.
-- **Fork compaction is deferred to Phase 5.** Long-lived heavy-write forks should be `drop_fork`-and-recreate. The `uni_fork_l1_flushes` gauge plus `fork_fragment_warn_threshold` warn surface the risk operationally.
+- **Forks are not compacted.** Long-lived heavy-write forks should be `drop_fork`-and-recreate. The `uni_fork_l1_flushes` gauge plus `fork_fragment_warn_threshold` warn surface the risk operationally.
 - **Fork-local schema additions go through `Session::fork_schema()`.** Never call `SchemaManager::save()` from a fork code path — the fork's `SchemaManager` shares primary's `path` and `store` (per `with_overlay`'s implementation), so a `save()` would overwrite primary's `catalog/schema.json` with the fork's merged view. Persistence for fork-local additions goes via `catalog/fork_schemas/{fork_id}.json` through `ForkRegistryHandle::update_schema_overlay`.
 - **`StorageManager::at_fork_with_schema` must receive the merged schema.** `at_fork` (no-schema variant) clones primary's `schema_manager` into the fork's storage, which means `uni-query`'s strict-schema check sees primary's view, not the fork's. Always use `at_fork_with_schema(scope, merged_schema)` from `UniInner::at_fork` so the fork's storage and its `UniInner` share the same `Arc<SchemaManager>` and a fork-local `add_label` is visible to subsequent writes.
 
 ## Fork invariants (Phase 6b — diff & promote)
-- **Diff identity is content-addressed UID, not VID.** `compute_diff` in `crates/uni-fork/src/diff.rs` (driven from `crates/uni/src/api/fork_admin.rs`) buckets vertex rows by `compute_vertex_uid(label, None, properties)` and edge rows by `(src_uid, dst_uid)` scoped to the edge type — siblings off the same parent and totally unrelated forks compare correctly even when VIDs collide. `DiffVertex.vid` survives as an informational `Option<Vid>`; never branch on it for pairing.
+- **Diff identity is content-addressed UID, not VID.** `compute_diff` in `crates/uni-fork/src/diff.rs` (driven from `crates/uni/src/api/fork_admin.rs`) buckets vertex rows by `compute_vertex_uid(label, ext_id, properties)` and edge rows by `compute_edge_uid(src_uid, dst_uid, type, properties)` — siblings off the same parent and totally unrelated forks compare correctly even when VIDs collide. `DiffVertex.vid` survives as an informational `Option<Vid>`; never pair on it outside a `SharedLineage` (ids pair only below the fork-point marks, and only when one side is the other's ancestor — see the current-invariants block).
 - **Promote runs inside one primary transaction.** `Uni::promote_from_fork` opens a single `Session::tx()` against primary, runs every pattern, and commits at the end. Partial-failure semantics inherit from the underlying tx — a failure on pattern N rolls back patterns 1..N-1. Don't refactor into per-pattern transactions without preserving that atomicity.
+- **Promote dedup covers unflushed primary rows.** `batch_resolve_primary_vids` resolves through the flushed UidIndex, then looks up the UIDs it missed by a content scan of the label on primary (`resolve_primary_vids_by_scan`), which reads L0. Without the scan, a vertex primary committed after the fork point but has not flushed is promoted again as a duplicate.
 - **Edge endpoints must exist on primary at edge-promote time.** `run_promote` checks the `just_inserted` cache (vertices added earlier in the same call) before falling back to `batch_resolve_primary_vids` (`crates/uni-fork/src/diff.rs`) (UidIndex + Cypher MATCH-by-VID verify on primary). Fork-only endpoints surface as `edges_skipped_no_endpoint`; mix `PromotePattern::label(...)` and `PromotePattern::edge_type(...)` in one call to promote endpoints together with their edges.
 - **The shared `UidIndex` is not branch-isolated.** Both primary and the fork write UID→VID entries into the same Lance dataset under `indexes/uni_id_to_vid/{label}/index.lance`. `get_vid` returns *any* registered VID (fork or primary), so always verify via `MATCH (n:Label) WHERE id(n) = $vid` on a primary session before treating the result as a primary endpoint. The helper `batch_resolve_primary_vids` (`crates/uni-fork/src/diff.rs`) does this round-trip; route every primary UID lookup through it.
 - **Promote flushes the fork before scanning.** `Uni::promote_from_fork` calls `fork.flush().await?` immediately after opening the fresh fork session. Without this, edges committed via a now-dropped earlier fork session aren't visible to the new session's read path. Vertices happen to be visible without flush in practice, but edges depend on it — relying on that asymmetry would silently miss edge promotion targets.
@@ -234,16 +311,16 @@ from each phase for deeper context.
 - **`BranchedBackend::vector_search` and `full_text_search` route through the fork's branch when one exists.** Phase 5b lifted the Phase 1 stub. `lance_branch::vector_search_on_branch` and `full_text_search_on_branch` open the branch and call Lance's native nearest-K / FTS — the `base_paths` chain on the branch surfaces both fork-local and parent-inherited rows in one scan, giving fused results. When the fork has no branch for the table (label never written through the fork), the BranchedBackend falls back to primary's path.
 - **`FilterExpr` pushdown is dropped on the branch path.** Phase 5b's MVP doesn't push predicates through to `lance::Dataset::scan`; the caller above re-applies. Tighten in a 5b-followup if filter pushdown shows up in benchmarks.
 - **Phase 5b doesn't add bespoke `FusedVectorSearchExec` / `FusedFullTextSearchExec` operators.** Lance's per-branch reads via `base_paths` are sufficient for the MVP. The runtime fusion happens at the `BranchedBackend` layer; bespoke physical operators are reserved for the case where recall benchmarks demand an explicit two-side merge with exact rerank.
-- **Planner emission for vector/FTS uses `LogicalPlan::FusedIndexScanWrapped`** — a thin wrapper variant that carries `Box<LogicalPlan>` for the original operator (`VectorKnn`, `InvertedIndexLookup`, or a `ProcedureCall` to `uni.vector.query` / `uni.fts.query`) plus a `kind: FusionKind`. The physical planner unwraps and recurses on `inner`; runtime behavior is identical to the unwrapped node. The wrap is purely for explain-plan and runtime-stats observability so users can see that fusion is engaged. **The CALL-style invocations land as `ProcedureCall` not `VectorKnn`/`InvertedIndexLookup`** — the rewrite in `planner.rs::procedure_call_fusion_kind` matches by procedure name and the shape of the first two arguments.
-- **Recall is measured at `crates/uni/tests/fork_index_recall_bench.rs`.** Phase 5b's MVP test (n=1000+100, q=20, K=10) shows recall@10 = 1.000 because Lance falls back to brute-force on small datasets. For spec §8.2's 95% recall@K target on N=100k+ items, write a Criterion bench at `crates/uni/benches/fork_index.rs` and capture in `compliance_reports/fork_index_<date>.md` — the test scaffold is the on-ramp.
+- **Planner emission for vector/FTS uses `LogicalPlan::FusedIndexScanWrapped`** — a thin wrapper variant that carries `Box<LogicalPlan>` for the original operator (`VectorKnn` or a `ProcedureCall` to `uni.vector.query` / `uni.fts.query`) plus a `kind: FusionKind`. The physical planner unwraps and recurses on `inner`; runtime behavior is identical to the unwrapped node. The wrap is purely for explain-plan and runtime-stats observability so users can see that fusion is engaged. **The CALL-style invocations land as `ProcedureCall` not `VectorKnn`** — the rewrite in `planner.rs::procedure_call_fusion_kind` matches by procedure name and the shape of the first two arguments.
+- **Recall is measured at `crates/uni/tests/common/fork/fork_index_recall_bench.rs`.** Phase 5b's MVP test (n=1000+100, q=20, K=10) shows recall@10 = 1.000 because Lance falls back to brute-force on small datasets. For spec §8.2's 95% recall@K target on N=100k+ items, write a Criterion bench at `crates/uni/benches/fork_index.rs` and capture in `compliance_reports/fork_index_<date>.md` — the test scaffold is the on-ramp.
 
 ## Fork invariants (Phase 5a-impl — fork-local index fusion)
 - **Fork-local index files live under the fork's branch directory.** Confirmed by the Phase 5a spike (`crates/uni-store/src/backend/lance_branch.rs::tests::phase5a_spike_per_branch_index`): Lance writes index files branch-locally when `create_index_builder` runs against a branch-checked-out dataset. `drop_fork`/`drop_fork_cascade` cleans them up automatically — never special-case index file deletion in the fork drop path.
 - **`ForkScope.fork_local_indexes` is registered ONLY after a successful build.** The `IndexRebuildManager`-style auto-builder and the manual `Session::build_fork_local_index` trigger both call `scope.register_fork_local_index` only on success; a failed build leaves the registry untouched so the trigger fires again on the next tick.
 - **`VidUid` fork-local "index" is a planner marker, not a Lance file.** Lance's `base_paths` chain on the fork's branch already provides fork-first lookup semantics. The registry entry tells the planner to emit `FusedIndexScan { kind: VidUidForkFirst }`; no on-disk artifact is written. Don't add Lance build code for VidUid.
 - **The planner emits `FusedIndexScan` only when the active session is forked AND `StorageManager::fork_index_exists(label, column)` returns `Some(_)`.** The rewrite happens in `uni_query::rewrite_for_fork_fusion`, called once after `planner.plan(ast)` at every query call site in `crates/uni/src/api/impl_query.rs`. Anywhere else in the codebase that constructs a logical plan from Cypher must apply the same rewrite — otherwise fork-local indexes silently won't fuse.
-- **Phase 5a-impl decays `FusedIndexScan` to `Scan` in the physical planner.** This is intentional: Lance's per-branch index reads via `base_paths` produce correct fused results without bespoke physical operators. Phase 5b will replace the decay with `FusedVectorSearchExec` and `FusedFullTextSearchExec` for lossy types that genuinely need rerank/RRF.
-- **The auto-builder (`fork_index_builder.rs`) only builds `ScalarBtree` for now.** `Sorted` and `VidUid` are explicit-only (manual trigger) — the auto-builder doesn't know if the user wants ORDER BY semantics or fork-first lookup semantics on a given column. Tests that need those kinds use `Session::build_fork_local_index` directly.
+- **Phase 5a-impl decays `FusedIndexScan` to `Scan` in the physical planner.** This is intentional: Lance's per-branch index reads via `base_paths` produce correct fused results without bespoke physical operators. Phase 5b kept the decay: it added no bespoke physical operators (see the Phase 5b block).
+- **The auto-builder (`crates/uni-fork/src/maintenance.rs`, driven from `crates/uni/src/api/fork_maintenance.rs`) only builds `ScalarBtree` for now.** `Sorted` and `VidUid` are explicit-only (manual trigger) — the auto-builder doesn't know if the user wants ORDER BY semantics or fork-first lookup semantics on a given column. Tests that need those kinds use `Session::build_fork_local_index` directly.
 - **`ForkScope.fragment_counts` is in-memory only.** A process restart resets it to 0, and the trigger re-fires on the next flush. Don't try to persist it — Lance's per-fragment row counts on disk are the ground truth; the in-memory counter is a flush-time accumulator that drives the *trigger heuristic*, not the build itself.
 
 ## Fork invariants (Phase 4b — Python bindings)
@@ -254,7 +331,7 @@ from each phase for deeper context.
 
 ## Fork invariants (Phase 4a — lifecycle & admin)
 - **`UniConfig::disable_fork_sweeper` must be `true` in tests that race against TTL.** The sweeper runs every `fork_sweeper_interval` (default 60s) and calls `drop_fork_cascade` on any fork whose `ttl_expires_at` is in the past. Tests that don't disable the sweeper *and* set short intervals will produce flakes when timing slips. The Phase 4a TTL tests (`fork_ttl.rs`) intentionally exercise the sweeper end-to-end and use the multi-threaded tokio flavor so the sweeper makes progress.
-- **`Uni::tag_fork` writes Lance tags namespaced `fork_{tag}_{dataset}`.** Each tag pins the fork branch's *current* version; subsequent fork writes do not move the tag. Tagged refs survive Lance compaction's GC sweep — this is what makes a tag-then-drop safe for audit retention. Never strip the namespace prefix when listing user-visible tags; `Uni::list_fork_tags` already does this.
+- **`Uni::tag_fork` writes Lance tags namespaced `fork_{fork_id}_{tag}_{dataset}`** (earlier releases wrote `fork_{tag}_{dataset}`, which is still read). It flushes the fork first and errors at stage `tag` when the fork has no branched datasets. Each tag pins the fork branch's version at that point; subsequent fork writes do not move the tag. Tagged refs survive Lance compaction's GC sweep. A tagged branch cannot be deleted, so `drop_fork` refuses a tagged fork with `ForkTagged` before tombstoning: untag first. Never strip the namespace prefix when listing user-visible tags; `Uni::list_fork_tags` already does this.
 - **`max_forks` budget counts Active + Pending + Tombstoned.** Tombstoned forks still hold branch state on disk until recovery completes, so counting them prevents create/drop churn from slipping past the cap.
 - **Cancellation: forked sessions hold `parent_token.child_token()` — never rebuild the token from scratch in a forked-session code path.** Cancelling the parent cascades to children; cancelling a child does not affect the parent. `Session::cancel()` cancels the currently-held token and replaces it with a fresh one — to observe propagation in tests, capture token clones BEFORE calling cancel.
 - **`StorageManager::pinned()` now preserves `fork_scope`.** Phase 4a lifted the Phase 1 debug_assert that forbade pin+fork. A pinned forked session reads through both the fork's branches (`fork_scope`) and at the pinned version (`pinned_snapshot`); writes are gated by `Session::is_pinned` at the API layer.

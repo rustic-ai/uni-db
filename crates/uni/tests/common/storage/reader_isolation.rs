@@ -137,8 +137,9 @@ async fn second_handle_sees_committed_edges() -> Result<()> {
         "writing handle lost its own committed data"
     );
 
-    // Second handle, same path, still open alongside the first.
-    let reader = Uni::open(&path).build().await?;
+    // Second handle, same path, still open alongside the first. It is
+    // read-only: a second writable handle is refused (issue #348).
+    let reader = Uni::open(&path).read_only().build().await?;
     let reader_session = reader.session();
     let (r_vertices, r_edges) = survey(&reader_session).await?;
 

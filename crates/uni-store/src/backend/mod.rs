@@ -13,6 +13,7 @@ pub mod capabilities;
 pub mod eval;
 #[cfg(feature = "lance-backend")]
 pub mod fts_analyzer;
+pub mod fts_query;
 #[cfg(feature = "lance-backend")]
 pub mod lance;
 #[cfg(feature = "lance-backend")]
@@ -21,6 +22,7 @@ pub mod lance_branch;
 pub mod lance_directory;
 #[cfg(feature = "lance-backend")]
 pub(crate) mod lance_fts;
+pub mod read_cut_view;
 #[cfg(feature = "lance-backend")]
 pub(crate) use lance_fts::score_documents;
 
@@ -39,7 +41,7 @@ pub mod table_names;
 pub mod traits;
 pub mod types;
 
-pub use branching::ForkBranching;
+pub use branching::{BranchTag, ForkBranching};
 pub use capabilities::{FullTextSearchCapability, ScalarIndexCapability, VectorSearchCapability};
 pub use traits::StorageBackend;
 pub use types::*;

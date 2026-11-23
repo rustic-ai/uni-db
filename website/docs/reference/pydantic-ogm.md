@@ -12,7 +12,7 @@ Or install from source:
 
 ```bash
 cd bindings/uni-pydantic
-poetry install
+uv sync        # also builds uni-db from ../uni-db
 ```
 
 ## Quick Start
@@ -494,7 +494,7 @@ for doc in hits:
 deleted = session.query(Person).filter(Person.age < 18).delete()
 
 # Bulk update
-updated = session.query(Person).filter(Person.age < 18).update(status="minor")
+updated = session.query(Person).filter(Person.name == "Alice").update(age=31)
 ```
 
 ---
@@ -504,21 +504,28 @@ updated = session.query(Person).filter(Person.age < 18).update(status="minor")
 ```python
 # Context manager (auto-commit/rollback)
 with session.transaction() as tx:
-    alice = Person(name="Alice")
-    bob = Person(name="Bob")
+    alice = Person(name="Alice", email="alice@example.com")
+    bob = Person(name="Bob", email="bob@example.com")
     tx.add(alice)
     tx.add(bob)
+    # Commit creates the added nodes before the edges, so an edge may join
+    # nodes added in the same transaction as well as persisted ones
     tx.create_edge(alice, "FRIEND_OF", bob)
     # Auto-commits on success, rolls back on exception
 
 # Manual control
 tx = session.begin()
 try:
-    tx.add(Person(name="Charlie"))
+    tx.add(Person(name="Charlie", email="charlie@example.com"))
     tx.commit()
 except Exception:
     tx.rollback()
 ```
+
+`tx.create_edge` accepts a node that is persisted or was `tx.add`-ed to the same
+transaction; any other unsaved node raises `NotPersisted`. When a commit fails, the
+transaction rolls back and the nodes it had created get their unsaved state back
+(no `vid`, not in the session's identity map), so they can be added again.
 
 ---
 
@@ -586,7 +593,8 @@ Automatic conversion between Python and Uni types:
 | `dict` | `json` | JSON object |
 | `list[T]` | `list:T` | Typed list |
 | `Vector[N]` | `vector:N` | N-dim vector |
-| `T \| None` | `T` + nullable | Optional field |
+| `SparseVector[N]` | `sparse_vector:N` | Learned-sparse vector, saved as `uni_db.SparseVector` |
+| `T \| None` | `T` + nullable | Optional field (`Vector[N] \| None` is a nullable vector column) |
 
 ---
 
@@ -625,7 +633,6 @@ class User(UniNode):
     email: str = Field(unique=True, index="btree")
     name: str = Field(index="btree")
     bio: str | None = Field(default=None, index="fulltext")
-    embedding: Vector[384] | None = None
     created_at: date | None = None
 
     posts: list["Post"] = Relationship("AUTHORED", direction="outgoing")
@@ -641,7 +648,7 @@ class Post(UniNode):
 
     title: str
     content: str = Field(index="fulltext")
-    embedding: Vector[384]
+    embedding: Vector[384] | None = None
 
     author: User | None = Relationship("AUTHORED", direction="incoming")
 

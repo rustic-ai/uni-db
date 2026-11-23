@@ -243,6 +243,10 @@ fn fork_staged(
 
 #[async_trait]
 impl StorageBackend for BranchedBackend {
+    fn check_write_fence(&self) -> Result<()> {
+        self.inner.check_write_fence()
+    }
+
     // ── Reads — branch-aware ─────────────────────────────────────────
 
     async fn scan(&self, request: ScanRequest) -> Result<Vec<RecordBatch>> {
@@ -267,19 +271,20 @@ impl StorageBackend for BranchedBackend {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
         _counters: Option<Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<TextSearch> {
         if let Some(branch) = self.scope.branch_for(table) {
             return self
                 .branching()?
                 .full_text_search_with_unstored_on_branch(
-                    table, &branch, column, query, k, &filter, unstored,
+                    table, &branch, column, query, k, &filter, unstored, analyzer,
                 )
                 .await;
         }
         Ok(TextSearch {
             stored: Vec::new(),
-            unstored: super::score_documents(column, query, unstored, || Ok(())).await?,
+            unstored: super::score_documents(column, query, unstored, analyzer, || Ok(())).await?,
         })
     }
 
@@ -415,6 +420,7 @@ impl StorageBackend for BranchedBackend {
     }
 
     async fn create_table(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
+        self.check_write_fence()?;
         if batches.is_empty() {
             anyhow::bail!(
                 "create_table('{name}') on a forked backend requires at least \
@@ -430,6 +436,7 @@ impl StorageBackend for BranchedBackend {
     }
 
     async fn create_empty_table(&self, name: &str, schema: Arc<ArrowSchema>) -> Result<()> {
+        self.check_write_fence()?;
         self.ensure_branch_for_new(name, schema, Vec::new()).await?;
         Ok(())
     }
@@ -443,6 +450,7 @@ impl StorageBackend for BranchedBackend {
         if self.scope.branch_for(name).is_some() {
             return Ok(());
         }
+        self.check_write_fence()?;
         self.ensure_branch_for_new(name, schema, Vec::new()).await?;
         Ok(())
     }
@@ -463,6 +471,7 @@ impl StorageBackend for BranchedBackend {
         add: &[arrow_schema::Field],
         relax_nullable: &[String],
     ) -> Result<()> {
+        self.check_write_fence()?;
         if add.is_empty() && relax_nullable.is_empty() {
             return Ok(());
         }
@@ -488,6 +497,7 @@ impl StorageBackend for BranchedBackend {
         batches: Vec<RecordBatch>,
         mode: WriteMode,
     ) -> Result<()> {
+        self.check_write_fence()?;
         if batches.is_empty() {
             return Ok(());
         }
@@ -535,6 +545,7 @@ impl StorageBackend for BranchedBackend {
     }
 
     async fn delete_rows(&self, table_name: &str, filter: &FilterExpr) -> Result<()> {
+        self.check_write_fence()?;
         let branch = self.ensure_branch_for_existing(table_name).await?;
         self.branching()?
             .delete_from_branch(table_name, &branch, filter)
@@ -547,6 +558,7 @@ impl StorageBackend for BranchedBackend {
         on: &[&str],
         batches: Vec<RecordBatch>,
     ) -> Result<()> {
+        self.check_write_fence()?;
         if batches.is_empty() {
             return Ok(());
         }
@@ -569,6 +581,7 @@ impl StorageBackend for BranchedBackend {
         batches: Vec<RecordBatch>,
         schema: Arc<ArrowSchema>,
     ) -> Result<()> {
+        self.check_write_fence()?;
         // On a fork, "replace the table atomically" means "replace the
         // branch's tip" — Lance commits a delete-all then an append.
         // Two manifest commits, not one; primary's main branch is
@@ -607,6 +620,7 @@ impl StorageBackend for BranchedBackend {
         table_name: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<crate::backend::traits::StagedAppend> {
+        self.check_write_fence()?;
         let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
         if rows == 0 {
             return Ok(crate::backend::traits::StagedAppend::visible(0));
@@ -635,6 +649,7 @@ impl StorageBackend for BranchedBackend {
         table_name: &str,
         staged: Vec<crate::backend::traits::StagedAppend>,
     ) -> Result<()> {
+        self.check_write_fence()?;
         let (branch, rows, payloads) = fork_staged(table_name, staged)?;
         let Some(branch) = branch else {
             return Ok(());
@@ -692,6 +707,7 @@ impl StorageBackend for BranchedBackend {
         record: &serde_json::Value,
         published_after: Option<u64>,
     ) -> Result<crate::backend::traits::RecordedPublish> {
+        self.check_write_fence()?;
         // `published_after` is the version the fork backend reported for the
         // table before the publish, which is the primary's (see
         // `get_table_version`); the branch publish searches the branch's own
@@ -757,6 +773,7 @@ impl StorageBackend for BranchedBackend {
         table_name: &str,
         version_retention: std::time::Duration,
     ) -> Result<OptimizeReport> {
+        self.check_write_fence()?;
         // Compaction on a fork is a Phase 5 concern. Phase 1 silently
         // delegates to the primary backend; for a fork-only table this
         // is a no-op because the fork has no L1 fragments yet.
@@ -829,6 +846,7 @@ impl StorageBackend for BranchedBackend {
         _name: &str,
         _params: VectorIndexParams,
     ) -> Result<()> {
+        self.check_write_fence()?;
         anyhow::bail!("create_vector_index on a forked backend is not supported")
     }
 
@@ -840,6 +858,7 @@ impl StorageBackend for BranchedBackend {
         _tokenizer: &uni_common::core::schema::TokenizerConfig,
         _with_positions: bool,
     ) -> Result<()> {
+        self.check_write_fence()?;
         anyhow::bail!("create_fts_index on a forked backend is not supported")
     }
 
@@ -850,6 +869,7 @@ impl StorageBackend for BranchedBackend {
         _index_type: ScalarIndexType,
         _name: Option<&str>,
     ) -> Result<()> {
+        self.check_write_fence()?;
         anyhow::bail!("create_scalar_index on a forked backend is not supported")
     }
 

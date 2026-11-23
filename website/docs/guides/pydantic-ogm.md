@@ -241,8 +241,8 @@ deleted_count = (
 # Update all matching
 updated_count = (
     session.query(Person)
-    .filter(Person.status == "pending")
-    .update(status="approved")
+    .filter(Person.age.is_null())
+    .update(age=0)
 )
 ```
 
@@ -352,6 +352,7 @@ with session.transaction() as tx:
     bob = Person(name="Bob", email="bob@example.com")
     tx.add(alice)
     tx.add(bob)
+    tx.create_edge(alice, "FRIEND_OF", bob)  # nodes added above are fine
     # Commits automatically, rolls back on exception
 
 # Manual transaction
@@ -394,18 +395,21 @@ class Person(UniNode):
 ## Working with Vectors
 
 ```python
-from uni_pydantic import Vector
+from uni_pydantic import SparseVector, Vector
 
 class Document(UniNode):
     title: str
     content: str
     embedding: Vector[1536]  # OpenAI ada-002 dimensions
+    summary_vec: Vector[768] | None = None  # optional: a nullable vector column
+    splade: SparseVector[30522] | None = None  # learned-sparse term weights
 
 # Create with embedding
 doc = Document(
     title="My Document",
     content="...",
-    embedding=[0.1, 0.2, ...]  # 1536 floats
+    embedding=[0.1, 0.2, ...],  # 1536 floats
+    splade={1: 1.4, 7: 0.9},  # {term_id: weight}, saved as uni_db.SparseVector
 )
 session.add(doc)
 session.commit()
@@ -487,12 +491,13 @@ session.commit()
 ### 4. Use Transactions for Related Operations
 
 ```python
+# Commit creates the transaction's nodes before its edges, so an edge may
+# join nodes added in the same transaction (or nodes saved earlier)
 with session.transaction() as tx:
-    alice = Person(name="Alice")
-    bob = Person(name="Bob")
-    tx.add(alice)
-    tx.add(bob)
+    for person in (alice, bob, charlie):
+        tx.add(person)
     tx.create_edge(alice, "FRIEND_OF", bob)
+    tx.create_edge(alice, "FRIEND_OF", charlie)
     # All or nothing
 ```
 

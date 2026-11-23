@@ -6,16 +6,17 @@ Uni includes **35+ graph algorithms** accessible via `CALL uni.algo.<name>(...)`
 
 ## 1. Algorithm Catalog
 
-### Path Finding (7 algorithms)
+### Path Finding (8 algorithms)
 
 | Procedure | Description | Use Case | Execution Mode |
 |---|---|---|---|
 | `uni.algo.shortestPath` | Single-source shortest path (unweighted BFS) | Routing, navigation | DirectTraversal |
+| `uni.algo.dijkstra` | Single-source shortest paths (weighted Dijkstra) | Routing, reachability cost | GraphProjection |
 | `uni.algo.bidirectionalDijkstra` | Bidirectional shortest path (weighted) | Faster point-to-point | GraphProjection |
 | `uni.algo.bellmanFord` | Shortest path with negative weights | Financial arbitrage | GraphProjection |
 | `uni.algo.astar` | A* with heuristic guidance | Spatial routing | GraphProjection |
 | `uni.algo.kShortestPaths` | K distinct shortest paths | Alternative routes | GraphProjection |
-| `uni.algo.allSimplePaths` | All simple paths between two nodes | Dependency analysis | DirectTraversal |
+| `uni.algo.allSimplePaths` | All simple paths between two nodes | Dependency analysis | GraphProjection (positional args) |
 | `uni.algo.allPairsShortestPath` | Floyd-Warshall all pairs | Network diameter | GraphProjection |
 
 ### Centrality (7 algorithms)
@@ -100,13 +101,13 @@ YIELD col1, col2, ...
 RETURN col1, col2
 ```
 
-DirectTraversal algorithms (shortestPath, allSimplePaths) use positional arguments instead of nodeLabels/relationshipTypes.
+shortestPath and allSimplePaths take positional arguments (start, end, relationship types) instead of leading nodeLabels/relationshipTypes. Built-in algorithms require declared labels and edge types.
 
 ### Execution Modes
 
 **DirectTraversal** -- Zero-copy BFS on AdjacencyManager + L0Buffer. Used for single-source path queries. Fast startup, streaming results, no materialization.
 
-**GraphProjection** -- Materialized dense CSR graph in memory. Used for iterative algorithms (PageRank, WCC, Louvain, betweenness, eigenvector, etc.). Limits: `max_projection_memory` (1 GB default), `max_vertices` (100M default).
+**GraphProjection** -- Materialized dense CSR graph in memory. Used for iterative algorithms (PageRank, WCC, Louvain, betweenness, eigenvector, etc.).
 
 ---
 
@@ -124,6 +125,23 @@ Mode:     DirectTraversal
 CALL uni.algo.shortestPath($startId, $endId, ['ROAD'])
 YIELD nodeIds, length
 RETURN nodeIds, length
+```
+
+### uni.algo.dijkstra
+
+```
+Args:     nodeLabels (List), relationshipTypes (List), startNode (Node)
+Optional: endNode (Node), weightProperty (String), maxDistance (Float)
+Yields:   nodeId (Int), distance (Float), path (List)
+Note:     Without endNode, yields every reachable node (path is empty).
+          Optional args are positional: pass endNode to pass weightProperty.
+          Unweighted (distance = hop count) without weightProperty.
+```
+
+```cypher
+CALL uni.algo.dijkstra(['City'], ['ROUTE'], $sourceId, $targetId, 'cost')
+YIELD nodeId, distance, path
+RETURN nodeId, distance, path
 ```
 
 ### uni.algo.bellmanFord
@@ -162,8 +180,8 @@ Yields:   path (List), cost (Float), rank (Int)
 ```
 Args:     startNode (Node), endNode (Node), relationshipTypes (List), maxLength (Int)
 Optional: nodeLabels (List, default: null)
-Yields:   path (List)
-Mode:     DirectTraversal
+Yields:   path (List of node ids)
+Note:     Builds a projection over relationshipTypes; returns at most 1000 paths.
 ```
 
 ### uni.algo.allPairsShortestPath
@@ -290,7 +308,8 @@ ORDER BY size DESC
 ```
 Args:     nodeLabels (List), relationshipTypes (List)
 Optional: maxIterations (Int, default: 10), write (Bool, default: false),
-          writeProperty (String, default: 'community')
+          writeProperty (String, default: 'community'),
+          seed (Int, default: null -- fixed default seed)
 Yields:   nodeId (Int), communityId (Int)
 ```
 
@@ -325,6 +344,8 @@ ORDER BY similarity DESC
 
 ## 7. Structural & Connectivity
 
+bridges, articulationPoints, mst, maxMatching and dijkstra return integer node ids; resolve them with `MATCH (n:Label) WHERE id(n) = node`.
+
 ### uni.algo.triangleCount
 
 ```
@@ -358,14 +379,21 @@ Yields:   isBipartite (Bool), partition (Map)
 
 ```
 Args:     nodeLabels (List), relationshipTypes (List)
-Yields:   source (Node), target (Node)
+Yields:   source (Int), target (Int)     -- node ids
 ```
 
 ### uni.algo.articulationPoints
 
 ```
 Args:     nodeLabels (List), relationshipTypes (List)
-Yields:   node (Node)
+Yields:   node (Int)                     -- node id
+```
+
+### uni.algo.mst
+
+```
+Args:     nodeLabels (List), relationshipTypes (List), weightProperty (String)
+Yields:   source (Int), target (Int), weight (Float)     -- node ids
 ```
 
 ### uni.algo.kCore
@@ -414,7 +442,8 @@ RETURN maxFlow
 
 ```
 Args:     nodeLabels (List), relationshipTypes (List)
-Yields:   node1 (Node), node2 (Node), matchId (Int)
+Yields:   node1 (Int), node2 (Int), matchId (Int)     -- node ids
+Note:     Errors if the graph is not bipartite.
 ```
 
 ---
@@ -433,16 +462,9 @@ Projection-based algorithms automatically build a CSR from the specified labels 
 | `capacityProperty` | Edge property for flow capacity (fordFulkerson, maxFlow) |
 | `heuristicProperty` | Node property for A* heuristic |
 
-### Projection Limits
-
-| Setting | Default | Description |
-|---|---|---|
-| `max_projection_memory` | 1 GB | Maximum memory for a single graph projection |
-| `max_vertices` | 100M | Maximum number of vertices in a projection |
-
 ### Directed vs. Undirected
 
-Most algorithms (pageRank, wcc, louvain, betweenness, triangleCount, bridges, etc.) include reverse edges automatically to treat the graph as undirected. Algorithms that are inherently directed (scc, topoSort, hasCycle) do not include reverse edges. `degreeCentrality` direction is controlled via the `direction` parameter.
+Projections build in-neighbor (reverse) adjacency by default; bellmanFord, dijkstra, kShortestPaths, mst, eigenvectorCentrality, katzCentrality, fordFulkerson, maxFlow, diameter and metrics skip it. Each algorithm defines its own direction semantics: scc, topoSort and hasCycle follow edge direction. `degreeCentrality` direction is controlled via the `direction` parameter.
 
 ---
 
@@ -465,7 +487,7 @@ Most algorithms (pageRank, wcc, louvain, betweenness, triangleCount, bridges, et
 
 ### Performance Tips
 
-- **Use DirectTraversal for single-path queries.** shortestPath and allSimplePaths use zero-copy BFS -- much faster than projection-based alternatives for point queries.
+- **Use DirectTraversal for single-path queries.** shortestPath uses zero-copy BFS -- much faster than projection-based alternatives for point queries.
 - **Project only needed labels/types.** Smaller projection = faster execution + less memory.
 - **Set iteration limits.** Always set `maxIterations` and `tolerance` on convergence algorithms (pageRank, eigenvector, katz, louvain) to prevent runaway computation.
 - **Use samplingSize for betweenness.** On large graphs, approximate betweenness with `samplingSize` to avoid O(V*E) cost.
@@ -533,7 +555,8 @@ LIMIT 50
 // Find single points of failure
 CALL uni.algo.articulationPoints(['Service'], ['DEPENDS_ON'])
 YIELD node
-RETURN node AS criticalService
+MATCH (s:Service) WHERE id(s) = node
+RETURN s.name AS criticalService
 ```
 
 ```cypher
@@ -617,7 +640,7 @@ Ask for an op that is not in a vocabulary and the engine answers with the remedy
 
 ```
 bad ewise op `gt` — elementwise comparison is composable: compare(a, b, "gt");
-valid ewise ops: add, mul, min, max, axpy, div
+valid ewise ops: add, mul, min, max, axpy, div, mod
 ```
 
 | You wanted | Compose it as |
@@ -647,7 +670,7 @@ These identities are executed against an independent scalar oracle on every CI r
 (`composition_recipes.rs`), so a recipe that stops being true breaks the build rather than
 quietly misleading you.
 
-Arena — the tree-search substrate, now **11 kernels**:
+Arena — the tree-search substrate, **12 kernels**:
 
 | Kernel | Effect |
 |---|---|

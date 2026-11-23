@@ -114,7 +114,7 @@ class TestUseCases(unittest.TestCase):
             "IN_CATEGORY", ["Product"], ["Category"]
         ).done().apply()
 
-        db.schema().label("Product").index(
+        db.schema().label("Product").property("embedding", "vector:4").index(
             "embedding", {"type": "vector", "metric": "cosine"}
         ).apply()
 
@@ -161,7 +161,7 @@ class TestUseCases(unittest.TestCase):
             "Entity"
         ).done().edge_type("MENTIONS", ["Chunk"], ["Entity"]).done().apply()
 
-        db.schema().label("Chunk").index(
+        db.schema().label("Chunk").property("embedding", "vector:4").index(
             "embedding", {"type": "vector", "metric": "cosine"}
         ).apply()
 

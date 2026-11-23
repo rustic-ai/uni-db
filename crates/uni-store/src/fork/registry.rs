@@ -56,6 +56,18 @@ impl std::fmt::Debug for ForkRegistryHandle {
 
 struct ForkRegistryInner {
     store: Arc<dyn ObjectStore>,
+    /// The registry object as last read or written, for compare-and-swap:
+    /// `None` = absent, `Some(v)` = at version `v`. Unknown on a store that
+    /// cannot swap (a local filesystem, which its OS lock guards instead).
+    stored: AsyncMutex<Option<Option<object_store::UpdateVersion>>>,
+    /// Whether the handle may still write; checked before every registry
+    /// write, tripped by a lost compare-and-swap.
+    fence: parking_lot::RwLock<Option<Arc<crate::lease::WriteFence>>>,
+    /// The bytes of the last registry write that failed without a verdict
+    /// (a timeout, a transport error): it may have landed, and a later swap
+    /// that finds it stored adopts it instead of taking it for another
+    /// writer's.
+    unconfirmed: parking_lot::Mutex<Option<Bytes>>,
     /// In-memory authoritative cache of `catalog/fork_registry.json`.
     cache: AsyncMutex<ForkRegistryFile>,
     /// Per-name mutex serializing concurrent open-or-create on the same
@@ -147,6 +159,14 @@ fn lifecycle_anyhow(name: &str, stage: &'static str, source: anyhow::Error) -> U
     }
 }
 
+/// What one registry swap attempt decided.
+enum Swap {
+    Done,
+    /// This handle's own unconfirmed write was found stored; swap again
+    /// from it.
+    Retry,
+}
+
 impl ForkRegistryHandle {
     /// Load the registry from disk, creating an empty one if absent.
     ///
@@ -157,8 +177,13 @@ impl ForkRegistryHandle {
     #[instrument(skip(store), level = "info")]
     pub async fn load(store: Arc<dyn ObjectStore>) -> Result<Self, UniError> {
         let path = registry_path();
+        let mut stored = Some(None);
         let cache = match get_with_timeout(&store, &path, DEFAULT_TIMEOUT).await {
             Ok(result) => {
+                stored = Some(Some(object_store::UpdateVersion {
+                    e_tag: result.meta.e_tag.clone(),
+                    version: result.meta.version.clone(),
+                }));
                 let bytes = result
                     .bytes()
                     .await
@@ -189,6 +214,9 @@ impl ForkRegistryHandle {
         Ok(Self {
             inner: Arc::new(ForkRegistryInner {
                 store,
+                stored: AsyncMutex::new(stored),
+                fence: parking_lot::RwLock::new(None),
+                unconfirmed: parking_lot::Mutex::new(None),
                 cache: AsyncMutex::new(cache),
                 name_locks: DashMap::new(),
                 holders: DashMap::new(),
@@ -346,6 +374,11 @@ impl ForkRegistryHandle {
     // Internal persistence helpers — every PUT goes through these.
     // ============================================================
 
+    /// Gates registry writes on `fence`.
+    pub fn set_write_fence(&self, fence: Arc<crate::lease::WriteFence>) {
+        *self.inner.fence.write() = Some(fence);
+    }
+
     /// Replace the registry file on disk with `cache`.
     ///
     /// Caller must hold the cache lock; this function only does IO.
@@ -355,16 +388,135 @@ impl ForkRegistryHandle {
         name: &str,
         stage: &'static str,
     ) -> Result<(), UniError> {
+        self.check_fence()?;
         let json = serde_json::to_vec_pretty(cache).map_err(|e| lifecycle(name, stage, e))?;
-        put_with_timeout(
-            &self.inner.store,
-            &registry_path(),
-            Bytes::from(json),
+        let bytes = Bytes::from(json);
+        // Replace only the registry this handle last saw, so a stale writer
+        // cannot overwrite another's fork records.
+        let mut stored = self.inner.stored.lock().await;
+        // At most twice: a second attempt follows adopting this handle's own
+        // earlier write, found stored.
+        for _ in 0..2 {
+            match self
+                .put_registry_once(&mut stored, &bytes, name, stage)
+                .await?
+            {
+                Swap::Done => return Ok(()),
+                Swap::Retry => continue,
+            }
+        }
+        Err(lifecycle(
+            name,
+            stage,
+            std::io::Error::other("the fork registry swap did not settle"),
+        ))
+    }
+
+    fn check_fence(&self) -> Result<(), UniError> {
+        if let Some(fence) = self.inner.fence.read().clone() {
+            fence.check().map_err(|e| match e.downcast::<UniError>() {
+                Ok(typed) => typed,
+                Err(other) => UniError::Internal(other),
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn put_registry_once(
+        &self,
+        stored: &mut Option<Option<object_store::UpdateVersion>>,
+        bytes: &Bytes,
+        name: &str,
+        stage: &'static str,
+    ) -> Result<Swap, UniError> {
+        let mode = match stored.as_ref() {
+            None => object_store::PutMode::Overwrite,
+            Some(None) => object_store::PutMode::Create,
+            Some(Some(v)) => object_store::PutMode::Update(v.clone()),
+        };
+        let result = tokio::time::timeout(
             DEFAULT_TIMEOUT,
+            self.inner
+                .store
+                .put_opts(&registry_path(), bytes.clone().into(), mode.into()),
         )
         .await
-        .map_err(|e| lifecycle_anyhow(name, stage, e))?;
-        Ok(())
+        .map_err(|_| {
+            *self.inner.unconfirmed.lock() = Some(bytes.clone());
+            lifecycle(
+                name,
+                stage,
+                std::io::Error::other("fork registry write timed out"),
+            )
+        })?;
+        match result {
+            Ok(put) => {
+                *stored = Some(Some(object_store::UpdateVersion {
+                    e_tag: put.e_tag,
+                    version: put.version,
+                }));
+                *self.inner.unconfirmed.lock() = None;
+            }
+            Err(object_store::Error::NotImplemented { .. })
+            | Err(object_store::Error::NotSupported { .. }) => {
+                put_with_timeout(
+                    &self.inner.store,
+                    &registry_path(),
+                    bytes.clone(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .map_err(|e| lifecycle_anyhow(name, stage, e))?;
+                *stored = None;
+            }
+            Err(object_store::Error::Precondition { .. })
+            | Err(object_store::Error::AlreadyExists { .. }) => {
+                // Our own earlier attempt may have landed with its response lost.
+                if let Ok(current) =
+                    object_store::ObjectStoreExt::get(&self.inner.store, &registry_path()).await
+                {
+                    let version = object_store::UpdateVersion {
+                        e_tag: current.meta.e_tag.clone(),
+                        version: current.meta.version.clone(),
+                    };
+                    let held = current.bytes().await.ok();
+                    if held.as_ref() == Some(bytes) {
+                        *stored = Some(Some(version));
+                        *self.inner.unconfirmed.lock() = None;
+                        return Ok(Swap::Done);
+                    }
+                    // This handle's own earlier write, which failed without
+                    // a verdict and landed: swap from it.
+                    let ours = {
+                        let mut unconfirmed = self.inner.unconfirmed.lock();
+                        let ours = held.is_some() && unconfirmed.as_ref() == held.as_ref();
+                        if ours {
+                            *unconfirmed = None;
+                        }
+                        ours
+                    };
+                    if ours {
+                        *stored = Some(Some(version));
+                        return Ok(Swap::Retry);
+                    }
+                }
+                if let Some(fence) = self.inner.fence.read().clone() {
+                    fence.trip("the fork registry was changed by another writer".to_string());
+                }
+                return Err(lifecycle(
+                    name,
+                    stage,
+                    std::io::Error::other(
+                        "the fork registry was changed by another writer since this handle read it",
+                    ),
+                ));
+            }
+            Err(e) => {
+                *self.inner.unconfirmed.lock() = Some(bytes.clone());
+                return Err(lifecycle(name, stage, e));
+            }
+        }
+        Ok(Swap::Done)
     }
 
     async fn put_schema_overlay(
@@ -373,6 +525,7 @@ impl ForkRegistryHandle {
         delta: &SchemaDelta,
         name: &str,
     ) -> Result<(), UniError> {
+        self.check_fence()?;
         let json =
             serde_json::to_vec_pretty(delta).map_err(|e| lifecycle(name, "schema_overlay", e))?;
         put_with_timeout(
@@ -387,6 +540,7 @@ impl ForkRegistryHandle {
     }
 
     async fn put_tombstone(&self, info: &ForkInfo) -> Result<(), UniError> {
+        self.check_fence()?;
         let json =
             serde_json::to_vec_pretty(info).map_err(|e| lifecycle(&info.name, "tombstone", e))?;
         put_with_timeout(
@@ -1009,5 +1163,47 @@ mod tests {
                 .await,
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod cas_tests {
+    use super::*;
+    use object_store::ObjectStoreExt;
+
+    /// A stale handle cannot overwrite another writer's fork registry.
+    #[tokio::test]
+    async fn a_stale_registry_handle_does_not_overwrite_the_registry() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let a = ForkRegistryHandle::load(store.clone()).await.unwrap();
+        let fence = crate::lease::WriteFence::new();
+        a.set_write_fence(Arc::clone(&fence));
+        // Another writer creates the registry after `a` found none.
+        store
+            .put(&registry_path(), b"{\"forks\":{}}".to_vec().into())
+            .await
+            .unwrap();
+        let err = a
+            .put_registry(&ForkRegistryFile::default(), "<test>", "test")
+            .await
+            .expect_err("a stale handle overwrote the registry");
+        assert!(err.to_string().contains("another writer"), "{err}");
+        assert!(
+            fence.is_tripped(),
+            "a lost registry swap did not fence the handle"
+        );
+        let held = store
+            .get(&registry_path())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&held[..], b"{\"forks\":{}}");
+        // A fresh handle that read it can write.
+        let b = ForkRegistryHandle::load(store.clone()).await.unwrap();
+        b.put_registry(&ForkRegistryFile::default(), "<test>", "test")
+            .await
+            .unwrap();
     }
 }

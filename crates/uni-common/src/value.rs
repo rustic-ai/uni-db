@@ -1233,6 +1233,43 @@ impl Value {
         }
     }
 
+    /// The `(term ids, weights)` of a sparse vector: a native
+    /// [`Value::SparseVector`], or the `{indices: [...], values: [...]}` map a
+    /// sparse vector is written as in Cypher (or degrades to through untagged
+    /// serde). Term ids must be non-negative integers that fit a `u32`,
+    /// weights numbers, and the two lists equally long; otherwise `None`.
+    /// The pairs are returned as given: not sorted or deduplicated.
+    pub fn sparse_parts(&self) -> Option<(Vec<u32>, Vec<f32>)> {
+        match self {
+            Value::SparseVector { indices, values } => {
+                (indices.len() == values.len()).then(|| (indices.clone(), values.clone()))
+            }
+            Value::Map(m) => {
+                if m.len() != 2 {
+                    return None;
+                }
+                let (Some(Value::List(idx)), Some(Value::List(vals))) =
+                    (m.get("indices"), m.get("values"))
+                else {
+                    return None;
+                };
+                if idx.len() != vals.len() {
+                    return None;
+                }
+                let indices = idx
+                    .iter()
+                    .map(|x| x.as_u64().and_then(|n| u32::try_from(n).ok()))
+                    .collect::<Option<Vec<u32>>>()?;
+                let values = vals
+                    .iter()
+                    .map(|x| x.as_f64().map(|f| f as f32))
+                    .collect::<Option<Vec<f32>>>()?;
+                Some((indices, values))
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the string slice if this is `String`, otherwise `None`.
     pub fn as_str(&self) -> Option<&str> {
         match self {

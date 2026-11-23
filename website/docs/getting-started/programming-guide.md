@@ -12,7 +12,7 @@ Before starting, ensure you have Uni installed for your language:
 
     ```toml
     [dependencies]
-    uni-db = { git = "https://github.com/rustic-ai/uni" }
+    uni-db = "6"
     tokio = { version = "1", features = ["full"] }
     ```
 
@@ -44,12 +44,13 @@ The first step is opening or creating a database. Uni uses a builder pattern for
     async fn main() -> Result<()> {
         // Open or create a database (creates if doesn't exist)
         let db = Uni::open("./my-graph").build().await?;
+        db.shutdown().await?; // release the store before opening it again
 
         // Open existing database (fails if doesn't exist)
         let db = Uni::open_existing("./my-graph").build().await?;
 
         // Create new database (fails if already exists)
-        let db = Uni::create("./my-graph").build().await?;
+        let db = Uni::create("./new-graph").build().await?;
 
         // In-memory database (for testing)
         let db = Uni::in_memory().build().await?;
@@ -122,8 +123,16 @@ Open databases directly from cloud object stores:
     // Google Cloud Storage
     let db = Uni::open("gs://my-bucket/graph-data").build().await?;
 
-    // Azure Blob Storage
+    // Azure Blob Storage (account from AZURE_STORAGE_ACCOUNT_NAME or the config)
     let db = Uni::open("az://my-container/graph-data").build().await?;
+
+    // An S3-compatible service with explicit settings
+    let db = Uni::open("s3://my-bucket/graph-data")
+        .storage_option("aws_endpoint", "http://localhost:9000")
+        .storage_option("aws_access_key_id", "minio")
+        .storage_option("aws_secret_access_key", "minio-secret")
+        .build()
+        .await?;
     ```
 
 === "Python"
@@ -137,26 +146,44 @@ Open databases directly from cloud object stores:
 
     # Azure Blob Storage
     db = uni_db.UniBuilder.open("az://my-container/graph-data").build()
+
+    # An S3-compatible service with explicit settings
+    db = (
+        uni_db.UniBuilder.open("s3://my-bucket/graph-data")
+        .storage_options({
+            "aws_endpoint": "http://localhost:9000",
+            "aws_access_key_id": "minio",
+            "aws_secret_access_key": "minio-secret",
+        })
+        .build()
+    )
     ```
 
-Credentials are resolved automatically from environment variables or standard config files (AWS credentials, GCP Application Default Credentials, Azure CLI).
+Credentials and endpoints come from the environment (`AWS_*` including web identity, container credentials and a named profile through `AWS_PROFILE`, `GOOGLE_*` / `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). A typed configuration (`cloud_storage` in Rust, `cloud_config` in Python) overrides the environment, and raw storage options override both. Each store keeps everything it writes under its own prefix, so several stores can share a bucket. See [Storage & Cloud Durability](../features/storage-cloud.md) for the layout and the full precedence rules.
 
 ### Hybrid Mode (Local + Cloud)
 
-For optimal write performance with cloud durability, use hybrid mode:
+Hybrid mode keeps commits in a local WAL, so they don't wait on the object store, and keeps the data in the object store:
 
 === "Rust"
 
     ```rust
-    use uni_common::CloudStorageConfig;
+    use uni_db::CloudStorageConfig;
 
-    // Local cache with S3 backend
-    let db = Uni::open("./local-cache")
-        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::S3 {
+    // WAL and ID allocator local, data in S3, configured from the environment
+    let db = Uni::open("./local-wal")
+        .hybrid("s3://my-bucket/graph-data")
+        .build()
+        .await?;
+
+    // ... or with an explicit configuration
+    let db = Uni::open("./local-wal")
+        .hybrid("s3://my-bucket/graph-data")
+        .cloud_storage(CloudStorageConfig::S3 {
             bucket: "my-bucket".to_string(),
             region: Some("us-east-1".to_string()),
             endpoint: None,
-            access_key_id: None,
+            access_key_id: None, // None: from the environment
             secret_access_key: None,
             session_token: None,
             virtual_hosted_style: false,
@@ -168,19 +195,22 @@ For optimal write performance with cloud durability, use hybrid mode:
 === "Python"
 
     ```python
-    # Local cache with S3 backend
     db = (
-        uni_db.UniBuilder.open("./local-cache")
-        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
+        uni_db.UniBuilder.open("./local-wal")
+        .hybrid("./local-wal", "s3://my-bucket/graph-data")
         .build()
     )
     ```
 
 In hybrid mode:
 
-- **Writes** go to local WAL + L0 buffer (low latency)
+- **Writes** go to the local WAL + L0 buffer, so commits don't wait on the object store
 - **Flushes** persist data to cloud storage (configurable interval, default 5 seconds)
 - **Reads** merge local L0 with cloud storage data
+- **`shutdown()`** flushes, so after a clean close every commit is in the object store (a flush that fails there is logged, and the commits stay in the local WAL)
+- **One host at a time** holds the store; a second host's writable open fails with `StoreLocked`
+- A lost local directory loses only commits not yet flushed; the store reopens from the object store with a fresh directory.
+- A host that crashed with unflushed commits and comes back after another host has opened the store fails with `StaleWal` instead of replaying a WAL the store has moved on from. `set_aside_stale_wal()` moves that WAL aside and opens.
 
 ### Auto-Flush Configuration
 
@@ -466,7 +496,7 @@ Execute Cypher queries to read and write data.
     // Simple query
     let results = session.query("MATCH (p:Person) RETURN p.name, p.age").await?;
 
-    for row in &results {
+    for row in results.rows() {
         let name: String = row.get("p.name")?;
         let age: i32 = row.get("p.age")?;
         println!("{} is {} years old", name, age);
@@ -481,7 +511,7 @@ Execute Cypher queries to read and write data.
         LIMIT 10
     "#).await?;
 
-    for row in &results {
+    for row in results.rows() {
         println!("{}: {}", row.get::<String>("name")?, row.get::<i32>("age")?);
     }
     ```
@@ -537,10 +567,10 @@ Always use parameters for user-provided values to prevent injection attacks:
         .await?;
 
     // Parameters from HashMap
-    let params = hashmap! {
-        "name" => "Alice".into(),
-        "company" => "TechCorp".into(),
-    };
+    let params = HashMap::from([
+        ("name", Value::from("Alice")),
+        ("company", Value::from("TechCorp")),
+    ]);
     let results = session.query_with(
         "MATCH (p:Person {name: $name})-[:WORKS_AT]->(c:Company {name: $company}) RETURN p, c"
     )
@@ -944,10 +974,10 @@ For large datasets, use the bulk writer for efficient loading.
 
     // Insert vertices in bulk
     let people: Vec<HashMap<String, Value>> = (0..100_000)
-        .map(|i| hashmap! {
-            "name" => format!("Person-{}", i).into(),
-            "age" => (20 + i % 50).into(),
-        })
+        .map(|i| HashMap::from([
+            ("name".to_string(), Value::from(format!("Person-{}", i))),
+            ("age".to_string(), Value::from(20 + i % 50)),
+        ]))
         .collect();
 
     let vids = bulk.insert_vertices("Person", people).await?;
@@ -955,9 +985,9 @@ For large datasets, use the bulk writer for efficient loading.
     // Insert edges in bulk (src_vid, dst_vid, properties)
     let edges: Vec<EdgeData> = vids.windows(2)
         .map(|pair| EdgeData {
-            src: pair[0],
-            dst: pair[1],
-            properties: hashmap! { "since" => 2024.into() },
+            src_vid: pair[0],
+            dst_vid: pair[1],
+            properties: HashMap::from([("since".to_string(), Value::from(2024))]),
         })
         .collect();
 
@@ -1021,17 +1051,17 @@ Sessions provide scoped context for multi-tenant queries and are the primary sco
     session.params().set("tenant_id", "acme-corp");
     session.params().set("user_id", "user-123");
 
-    // All queries have access to session parameters
+    // All queries see session parameters as $session.<key>
     let results = session.query(r#"
         MATCH (d:Document)
-        WHERE d.tenant_id = $tenant_id
+        WHERE d.tenant_id = $session.tenant_id
         RETURN d.title AS title
     "#).await?;
 
     // Query with additional parameters
     let results = session.query_with(r#"
         MATCH (d:Document)
-        WHERE d.tenant_id = $tenant_id
+        WHERE d.tenant_id = $session.tenant_id
           AND d.status = $status
         RETURN d.title AS title
     "#)
@@ -1051,10 +1081,10 @@ Sessions provide scoped context for multi-tenant queries and are the primary sco
     session.params().set("tenant_id", "acme-corp")
     session.params().set("user_id", "user-123")
 
-    # Execute queries with session context
+    # Queries see session parameters as $session.<key>
     results = session.query("""
         MATCH (d:Document)
-        WHERE d.tenant_id = $tenant_id
+        WHERE d.tenant_id = $session.tenant_id
         RETURN d.title AS title
     """)
 
@@ -1092,13 +1122,13 @@ Analyze query execution plans.
 
     # Get query plan without executing
     plan = session.query_with("MATCH (p:Person) WHERE p.age > 25 RETURN p.name AS name").explain()
-    print(f"Plan:\n{plan['plan_text']}")
-    print(f"Estimated cost: {plan['cost_estimates']}")
+    print(f"Plan:\n{plan.plan_text}")
+    print(f"Estimated cost: {plan.cost_estimates['estimated_cost']}")
 
     # Execute with profiling
     results, profile = session.query_with("MATCH (p:Person) WHERE p.age > 25 RETURN p.name AS name").profile()
-    print(f"Total time: {profile['total_time_ms']}ms")
-    print(f"Peak memory: {profile['peak_memory_bytes']} bytes")
+    print(f"Total time: {profile.total_time_ms}ms")
+    print(f"Peak memory: {profile.peak_memory_bytes} bytes")
     ```
 
 ---
@@ -1296,15 +1326,19 @@ Handle errors appropriately in your application.
 === "Python"
 
     ```python
+    import uni_db
+
     session = db.session()
     try:
         results = session.query("INVALID CYPHER")
-    except RuntimeError as e:
-        print(f"Query error: {e}")
-    except ValueError as e:
-        print(f"Invalid parameter: {e}")
-    except OSError as e:
-        print(f"Database I/O error: {e}")
+    except uni_db.UniParseError as e:
+        print(f"Syntax error: {e}")
+    except uni_db.UniQueryError as e:
+        print(f"Query execution error: {e}")
+    except uni_db.UniTimeoutError as e:
+        print(f"Query timed out: {e}")
+    except uni_db.UniError as e:
+        print(f"Error: {e}")
     ```
 
 ---
@@ -1383,7 +1417,7 @@ Here's a complete example building a simple social network application.
             .await?;
 
         println!("Alice's Feed:");
-        for row in &feed {
+        for row in feed.rows() {
             println!("  @{}: {}",
                 row.get::<String>("author")?,
                 row.get::<String>("content")?
@@ -1404,7 +1438,7 @@ Here's a complete example building a simple social network application.
             .await?;
 
         println!("\nFriend Suggestions:");
-        for row in &suggestions {
+        for row in suggestions.rows() {
             println!("  @{} ({} mutual)",
                 row.get::<String>("username")?,
                 row.get::<i64>("mutual")?
@@ -1422,7 +1456,7 @@ Here's a complete example building a simple social network application.
         "#).await?;
 
         println!("\nMost Influential Users:");
-        for row in &influential {
+        for row in influential.rows() {
             println!("  @{}: {:.4}",
                 row.get::<String>("username")?,
                 row.get::<f64>("score")?

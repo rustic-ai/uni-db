@@ -9,7 +9,7 @@ WASM wrapper, and no separate runtime to install.
     The Rhai loader is loadable from both Rust (`Uni::load_rhai_plugin`) and
     Python (`Uni.load_rhai_plugin(script, grants=...)`, or its awaitable
     `AsyncUni` counterpart). It authors scalar / aggregate / procedure surfaces
-    only in v1. See [Scope & limitations](#scope-limitations).
+    and graph algorithms in v1. See [Scope & limitations](#scope-limitations).
 
 ## Overview
 
@@ -106,7 +106,8 @@ script declared but the host did not grant.
     script as a string and a list of capability grant names (defaulting to
     `ScalarFn` / `AggregateFn` / `Procedure` when omitted). It returns a dict
     with `plugin_id`, `version`, `scalars_registered`, `aggregates_registered`,
-    `procedures_registered`, and `denied_capabilities`. The plugin is registered
+    `procedures_registered`, `algorithms_registered`, and `denied_capabilities`.
+    Unknown, quota and internal grant names raise `ValueError`. The plugin is registered
     on the instance, so every session sees it. `AsyncUni` exposes an awaitable
     `load_rhai_plugin` with the same signature and return shape.
 
@@ -172,8 +173,9 @@ trig functions differ by at most a few ULP).
     - **Loadable from Rust and Python.** Use `Uni::load_rhai_plugin` from Rust,
       or `Uni.load_rhai_plugin(script, grants=...)` from Python — `AsyncUni`
       exposes an awaitable counterpart.
-    - **Scalar / aggregate / procedure only.** v1 lets a script author scalar
-      functions, aggregate functions, and procedures. Other extension surfaces
+    - **Scalar / aggregate / procedure / algorithm.** v1 lets a script author
+      scalar functions, aggregate functions, procedures, and graph algorithms
+      (see [Graph Algorithms](../graph-algorithms.md)). Other extension surfaces
       are not yet supported.
     - **Sandboxed posture.** Rhai has no ambient I/O; all effects flow through
       capability-gated host functions, and ungranted host fns are simply not

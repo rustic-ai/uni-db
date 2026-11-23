@@ -546,7 +546,11 @@ impl AsyncDatabase {
         }
     }
 
-    /// Flush data and prepare for shutdown.
+    /// Shut the database down: flush, stop background tasks, release the store.
+    ///
+    /// Waits for every background task to stop, then gives up the writer lock
+    /// or lease, so another handle can open the store for writing at once. A
+    /// flush failure is logged, not raised.
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1205,8 +1209,10 @@ pub struct AsyncDatabaseBuilder {
     cloud_config: Option<uni_common::CloudStorageConfig>,
     uni_config: Option<uni_common::UniConfig>,
     read_only: bool,
+    set_aside_stale_wal: bool,
     write_lease: Option<crate::types::PyWriteLease>,
     skip_invalid_locy_rules: bool,
+    storage_options: crate::core::RedactedOptions,
 }
 
 impl Default for AsyncDatabaseBuilder {
@@ -1225,8 +1231,10 @@ impl Default for AsyncDatabaseBuilder {
             cloud_config: None,
             uni_config: None,
             read_only: false,
+            set_aside_stale_wal: false,
             write_lease: None,
             skip_invalid_locy_rules: false,
+            storage_options: Default::default(),
         }
     }
 }
@@ -1275,7 +1283,9 @@ impl AsyncDatabaseBuilder {
         Self::temporary()
     }
 
-    /// Configure hybrid storage.
+    /// Configure hybrid storage: data in the object store at `remote_url`,
+    /// the WAL and ID allocator in `local_path`, which must be the path the
+    /// builder was opened at.
     fn hybrid(
         mut slf: PyRefMut<'_, Self>,
         local_path: String,
@@ -1340,6 +1350,10 @@ impl AsyncDatabaseBuilder {
     }
 
     /// Configure cloud storage credentials (dict with 'provider' key: 's3', 'gcs', or 'azure').
+    ///
+    /// Applies to a remote-only store (`open("s3://bucket/prefix")`) and to
+    /// the remote half of a hybrid store. Unset fields fall back to the
+    /// environment.
     fn cloud_config(
         mut slf: PyRefMut<'_, Self>,
         config: std::collections::HashMap<String, Py<PyAny>>,
@@ -1347,6 +1361,17 @@ impl AsyncDatabaseBuilder {
         let py = slf.py();
         slf.cloud_config = Some(crate::convert::extract_cloud_config(py, &config)?);
         Ok(slf)
+    }
+
+    /// Set raw object-store options (``object_store`` keys such as
+    /// ``aws_endpoint`` or ``azure_storage_use_emulator``), passed to both
+    /// storage clients. They override ``cloud_config`` and the environment.
+    fn storage_options(
+        mut slf: PyRefMut<'_, Self>,
+        options: std::collections::HashMap<String, String>,
+    ) -> PyRefMut<'_, Self> {
+        slf.storage_options.0.extend(options);
+        slf
     }
 
     /// Configure database options (query_timeout, max_query_memory, etc.).
@@ -1381,6 +1406,14 @@ impl AsyncDatabaseBuilder {
     /// Open the database in read-only mode (no writes allowed).
     fn read_only(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf.read_only = true;
+        slf
+    }
+
+    /// Open a hybrid store whose local WAL belongs to an earlier writer,
+    /// moving that WAL's segments to `wal_set_aside/` (never deleting them).
+    /// Without it such an open raises `UniStaleWalError`.
+    fn set_aside_stale_wal(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.set_aside_stale_wal = true;
         slf
     }
 
@@ -1470,7 +1503,9 @@ impl AsyncDatabaseBuilder {
         let uni_config = self.uni_config.clone();
         let read_only = self.read_only;
         let skip_invalid_locy_rules = self.skip_invalid_locy_rules;
+        let set_aside_stale_wal = self.set_aside_stale_wal;
         let xervo_runtime = self.xervo_runtime.as_ref().map(|rt| rt.inner.clone());
+        let storage_options = self.storage_options.0.clone();
         // `Custom` is read-back only: the Rust variant wraps a
         // `Box<dyn WriteLeaseProvider>` that Python cannot supply. It reaches a
         // `PyWriteLease` only by being read off a database configured in Rust,
@@ -1481,6 +1516,9 @@ impl AsyncDatabaseBuilder {
             Some(wl) => Some(match &wl.variant {
                 crate::types::WriteLeaseVariant::Local => {
                     ::uni_db::api::multi_agent::WriteLease::Local
+                }
+                crate::types::WriteLeaseVariant::Unenforced => {
+                    ::uni_db::api::multi_agent::WriteLease::Unenforced
                 }
                 crate::types::WriteLeaseVariant::DynamoDB { table } => {
                     ::uni_db::api::multi_agent::WriteLease::DynamoDB {
@@ -1513,7 +1551,9 @@ impl AsyncDatabaseBuilder {
                 read_only,
                 rust_write_lease,
                 skip_invalid_locy_rules,
+                set_aside_stale_wal,
                 xervo_runtime,
+                storage_options,
             )
             .await
             .map_err(crate::exceptions::uni_error_to_pyerr)?;

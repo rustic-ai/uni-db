@@ -32,7 +32,7 @@ Uni / AsyncUni (database handle)
 Session / AsyncSession (read scope)
   +-- Parameters: params().set(), params().get()
   +-- Reads: query(), locy()
-  +-- Analysis: explain(), profile()
+  +-- Analysis: query_with(q).explain() / .profile()
   +-- Factory: tx() -> Transaction
 
 Transaction / AsyncTransaction (write scope)
@@ -146,7 +146,7 @@ async fn main() -> uni_db::Result<()> {
 | `Uni.in_memory()` | Alias for `temporary()`; uses a temporary filesystem directory |
 | `Uni.builder()` | Advanced configuration via `UniBuilder` |
 
-**Storage backends**: local filesystem, S3 (`s3://bucket/path`), GCS (`gs://bucket/path`), Azure (`az://account/container/path`).
+**Storage backends**: local filesystem, S3 (`s3://bucket/path`), GCS (`gs://bucket/path`), Azure (`az://container/path`, account from config/env, or `abfss://container@account.dfs.core.windows.net/path`).
 
 ---
 
@@ -166,11 +166,11 @@ async fn main() -> uni_db::Result<()> {
 | Duration | `DataType.DURATION()` | `DataType::Duration` | `DURATION` |
 | Btic | `DataType.BTIC()` | `DataType::Btic` | `BTIC` |
 | Vector(N) | `DataType.vector(N)` | `DataType::Vector { dimensions: N }` | `VECTOR(N)` |
-| List(T) | `DataType.list(inner)` | `DataType::List(Box<T>)` | `LIST(T)` |
-| Map(K,V) | `DataType.map(k, v)` | `DataType::Map(Box<K>, Box<V>)` | `MAP(K, V)` |
+| List(T) | `DataType.list(inner)` | `DataType::List(Box<T>)` | `LIST<T>` |
+| Map(K,V) | `DataType.map(k, v)` | `DataType::Map(Box<K>, Box<V>)` | `MAP<STRING, V>` |
 | JSON | `DataType.JSON()` | `DataType::CypherValue` | `JSON` |
 | Bytes | `DataType.BYTES()` | `DataType::Bytes` | `BYTES` |
-| CRDT types | `DataType.crdt(CrdtType.G_COUNTER())` | `DataType::Crdt(CrdtKind::GCounter)` | `CRDT(GCOUNTER)` |
+| CRDT types | `DataType.crdt(CrdtType.G_COUNTER())` | `DataType::Crdt(CrdtType::GCounter)` | `GCOUNTER`, `LWWREGISTER` |
 
 CRDT types: `GCounter`, `GSet`, `ORSet`, `LWWRegister`, `LWWMap`, `Rga`, `VectorClock`, `VCRegister`.
 
@@ -215,7 +215,7 @@ result = session.query(
 
 # Python — session-level params
 session.params().set("min_age", 25)
-result = session.query("MATCH (p:Person) WHERE p.age > $min_age RETURN p")
+result = session.query("MATCH (p:Person) WHERE p.age > $session.min_age RETURN p")
 
 # Python — builder pattern
 result = session.query_with("MATCH (n:Person) WHERE n.age > $age") \
@@ -276,7 +276,7 @@ db.schema() \
 ```python
 session = db.session()
 session.params().set("company", "Acme")
-result = session.query("MATCH (c:Company {name: $company}) RETURN c")
+result = session.query("MATCH (c:Company {name: $session.company}) RETURN c")
 ```
 
 ### Vector Search
@@ -335,7 +335,7 @@ result = session.locy("""
 
     QUERY reachable
 """)
-for row in result["reachable"]:
+for row in result.derived["reachable"]:
     print(row)
 ```
 
@@ -417,7 +417,7 @@ RETURN n, updated_at(n) AS last_modified
 
 MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 ```
-`updated_at` bumps on any write that touches the row — including idempotent MERGE / same-value SET.
+`updated_at` bumps on any write that touches the row — including idempotent MERGE / same-value SET. Both work on schemaless labels and edge types, before and after a flush; `updated_at >= created_at` always.
 
 ---
 
@@ -447,7 +447,7 @@ MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 
 12. **Cartesian products from disconnected patterns** -- `MATCH (a:Person), (b:Company)` creates a cross product of all persons and companies. Connect patterns or use WITH to pipeline results.
 
-13. **BulkWriter for initial data loading** -- `tx.bulk_writer()` bypasses WAL and can defer index rebuilds. Already-flushed batches cannot be rolled back; use ordinary transactions when atomic rollback is required. Measure throughput for your workload.
+13. **BulkWriter for initial data loading** -- `tx.bulk_writer()` bypasses WAL and can defer index rebuilds. Rows are staged and become visible only at `commit()`; `abort()` discards everything the load wrote. Measure throughput for your workload.
 
 14. **Context managers for transactions** -- Always use `with session.tx() as tx:` (or `async with`) to guarantee auto-rollback on exceptions. Explicitly commit successful work; leaving the context without committing rolls it back.
 

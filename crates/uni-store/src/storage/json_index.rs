@@ -13,6 +13,10 @@ use uni_common::core::id::Vid;
 
 pub struct JsonPathIndex {
     uri: String,
+    /// The store's read cut: lookups read the version it publishes, writes
+    /// record theirs (an unrecorded dataset under `indexes/` is deleted by
+    /// a writable open's reconciliation).
+    cut: crate::storage::index_datasets::DatasetCut,
 }
 
 impl JsonPathIndex {
@@ -20,11 +24,26 @@ impl JsonPathIndex {
         // Path might contain special chars like $.title -> idx_label_title
         let safe_path = path.replace(|c: char| !c.is_alphanumeric(), "_");
         let uri = format!("{}/indexes/idx_{}_{}", base_uri, label, safe_path);
-        Self { uri }
+        Self {
+            uri,
+            cut: crate::storage::index_datasets::DatasetCut::none(),
+        }
+    }
+
+    /// The index under `base_uri`'s read cut `cut`.
+    #[must_use]
+    pub fn with_read_cut(
+        mut self,
+        base_uri: &str,
+        cut: Arc<crate::storage::read_cut::ReadCut>,
+    ) -> Self {
+        self.cut =
+            crate::storage::index_datasets::DatasetCut::new(Some(cut), base_uri, &self.uri, true);
+        self
     }
 
     pub async fn open(&self) -> Result<Arc<Dataset>> {
-        let ds = crate::backend::lance_directory::open_dataset_uri(&self.uri).await?;
+        let ds = self.cut.open(&self.uri).await?;
         Ok(Arc::new(ds))
     }
 
@@ -67,6 +86,7 @@ impl JsonPathIndex {
             schema,
             vec![batch],
             WriteMode::Append,
+            &self.cut.for_writes(),
         )
         .await?;
         Ok(())

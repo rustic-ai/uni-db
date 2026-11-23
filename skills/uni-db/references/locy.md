@@ -21,8 +21,7 @@ Locy (Logic + Cypher) is a Datalog-inspired logic programming language extending
 
 ```
 MODULE namespace.path              -- Optional module namespace (at most one)
-USE other.module { rule1, rule2 }  -- Optional selective import
-USE another.module                 -- Optional glob import (all rules)
+USE other.module { rule1, rule2 }  -- Import a registered module's rules (see §13)
 
 -- Statements: rules and commands (any order, any count)
 CREATE RULE ... AS ...
@@ -34,7 +33,7 @@ MATCH (n) RETURN n                 -- Plain Cypher passthrough
 
 Rules are compiled first (grouped, stratified, typechecked). Commands execute second, in order. Cypher statements return `CommandResult::Cypher(Vec<FactRow>)`.
 
-Multiple query blocks can be combined with `UNION` (dedup) or `UNION ALL` (keep duplicates).
+Plain Cypher queries in a program can be combined with `UNION` (dedup) or `UNION ALL` (keep duplicates); `UNION` does not combine Locy commands such as `QUERY`.
 
 ---
 
@@ -73,7 +72,7 @@ CREATE RULE acme.risk_score AS ...     -- Qualified name
 CREATE RULE `my-rule` AS ...           -- Backtick-quoted for reserved words
 ```
 
-Identifiers: `[a-zA-Z_][a-zA-Z0-9_]*`. Reserved keywords that must be backtick-quoted if used as identifiers: `RULE`, `ALONG`, `PREV`, `FOLD`, `BEST`, `DERIVE`, `ASSUME`, `ABDUCE`, `QUERY`.
+Identifiers: `[a-zA-Z_][a-zA-Z0-9_]*`. Reserved keywords that must be backtick-quoted if used as identifiers: `RULE`, `ALONG`, `PREV`, `FOLD`, `BEST`, `DERIVE`, `ASSUME`, `ABDUCE`, `QUERY`, `MODEL`.
 
 ### Multi-Clause Union Semantics
 
@@ -321,6 +320,7 @@ aggregates reload normally.
 | `MMAX(expr)` | `max(acc, val)` | Non-decreasing | -infinity | None |
 | `MMIN(expr)` | `min(acc, val)` | Non-increasing | +infinity | None |
 | `MCOUNT(expr)` | `acc + 1` | Non-decreasing | 0 | None |
+| `MCOUNT(*)` / `MCOUNT()` | `acc + 1` per row | Non-decreasing | 0 | None |
 | `MNOR(expr)` | `1 - (1-acc)(1-val)` | Non-decreasing | 0.0 | [0, 1] |
 | `MPROD(expr)` | `acc * val` | Non-increasing | 1.0 | [0, 1] |
 
@@ -354,7 +354,21 @@ the rule's *unfiltered* folded value, so rows the threshold excludes can still
 derive further rows. Those rows are correctly absent from the output *while
 having contributed to it*, which is exactly why the result looks plausible.
 
+A sanctioned `S` owns 60% of `A` and 11% of `B`; `B` owns all of `C`:
+
+```cypher
+CREATE (s:Entity {name: 'S', sanctioned: true}),
+       (a:Entity {name: 'A'}), (b:Entity {name: 'B'}), (c:Entity {name: 'C'}),
+       (s)-[:OWNS {pct: 60.0}]->(a), (s)-[:OWNS {pct: 11.0}]->(b),
+       (b)-[:OWNS {pct: 100.0}]->(c)
+```
+
 ```locy
+// Seed: a sanctioned entity is blocked outright.
+CREATE RULE blocked AS
+    MATCH (e:Entity) WHERE e.sanctioned = true
+    YIELD KEY e, 100.0 AS agg
+
 // WRONG if you meant "an owner only counts once it reaches 50%".
 CREATE RULE blocked AS
     MATCH (o:Entity)-[s:OWNS]->(e:Entity)
@@ -364,13 +378,14 @@ CREATE RULE blocked AS
     YIELD KEY e, agg
 ```
 
-An entity at 11% is filtered out of the result, yet still satisfies
-`o IS blocked` for the next hop, so everything it owns is derived anyway.
+This answers `{S, A, C}`: `B`, at 11%, is filtered out of the result, yet still
+satisfies `o IS blocked` for the next hop, so everything it owns is derived anyway.
 Splitting the aggregate into its own rule and filtering at the consumer does not
 help either — the filter still sits outside the recursion.
 
-The compiler emits a `HavingInRecursivePath` warning for this shape. Read
-`result.warnings()`.
+The compiler emits a `HavingInRecursivePath` warning for this shape. It is a
+compile warning: read `result.compile_warnings` (Rust: `result.compile_warnings()`),
+not `result.warnings`.
 
 **When post-FOLD `WHERE` is right:** when the filter is meant to select *what
 you see*. A child that the threshold removes from the answer must still have
@@ -386,6 +401,10 @@ self-reference reads, so it constrains what the recursion can derive.
 
 ```locy
 CREATE RULE blocked AS
+    MATCH (e:Entity) WHERE e.sanctioned = true
+    YIELD KEY e, 100.0 AS agg
+
+CREATE RULE blocked AS
     MATCH (o:Entity)-[s:OWNS]->(e:Entity)
     WHERE o IS blocked
     FOLD agg = MSUM(s.pct)
@@ -393,9 +412,9 @@ CREATE RULE blocked AS
     YIELD KEY e, agg
 ```
 
-On the graph above this answers `{N6}` — the owner at 11% is excluded, so
+On the graph above this answers `{S, A}` — `B`, at 11%, is excluded, so
 nothing downstream of it is derived. The same rule with `WHERE` answers
-`{N6, N1}`.
+`{S, A, C}`.
 
 Both may appear on one rule; `REQUIRE` is written first, and reads as
 "constrain the derivation, then filter what is shown".
@@ -403,9 +422,11 @@ Both may appear on one rule; `REQUIRE` is written first, and reads as
 **`REQUIRE` must be one-way.** It is rejected at compile time
 (`NonMonotonicFilterInRecursion`) unless the comparison can only ever turn from
 false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a
-non-decreasing fold (`MSUM` over non-negative values, `MMAX`, `MCOUNT`,
-`MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MMIN`,
-`MPROD`). Equality is never admissible. The reverse pairings would let a fact be
+non-decreasing fold (`MSUM` over non-negative values, `MAX`/`MMAX`,
+`COUNT`/`MCOUNT`, `MNOR`), or an **upper** bound (`<=`, `<`) over a
+non-increasing one (`MIN`/`MMIN`, `MPROD`). The direction is the one the
+aggregate declares in the plugin registry (`LocyAggregate::direction`), so a
+plugin aggregate is checked the same way. Equality is never admissible. The reverse pairings would let a fact be
 derived and then withdrawn, which the fixpoint reads as progress rather than
 oscillation, so it would run to the iteration limit instead of converging.
 
@@ -538,7 +559,7 @@ Fallback: when a fact's formula needs more than `max_bdd_variables` (default 100
 
 ### Top-K Proofs
 
-`semiring = TopKProofs(k)`: each MNOR fact is evaluated exactly over its `k` most probable rows (proofs), each row its own event AND the facts it references; with `k` at least a fact's row count it equals exact mode. A fact with at most `k` rows and no shared event keeps its default value.
+`semiring = SemiringKind::TopKProofs { k }` (Python: `with_config({"semiring": {"top_k_proofs": k}})`): each MNOR fact is evaluated exactly over its `k` most probable rows (proofs), each row its own event AND the facts it references; with `k` at least a fact's row count it equals exact mode. A fact with at most `k` rows and no shared event keeps its default value.
 
 `top_k_proofs` bounds the provenance annotations retained per derivation for EXPLAIN (0 = unlimited). `top_k_proofs_training` optionally overrides during training.
 
@@ -578,8 +599,10 @@ Rules can use DERIVE as an alternative terminal to YIELD:
 DERIVE (a)-[:INFERRED_FRIEND]->(b)                          -- Edge derivation
 DERIVE (a)-[:RISK_LINK {score: risk}]->(b)                   -- With properties
 DERIVE (NEW cat:Category {name: a.type})<-[:BELONGS_TO]-(a)  -- NEW node (Skolem)
-DERIVE MERGE a, b                                             -- Entity resolution
+DERIVE MERGE a, b                                             -- MERGED_WITH edge a->b
 ```
+
+`DERIVE MERGE a, b` creates a `MERGED_WITH` edge from `a` to `b`; it does not combine the two nodes. Properties on a `NEW` node are evaluated against the matched row and stored (with an internal `_skolem_id`), and one `NEW` node is created per matched row; edge properties are stored too.
 
 NEW node wardedness constraint: companion node must be bound by MATCH, not solely by IS references (error: `WardednessViolation`).
 
@@ -655,6 +678,10 @@ result = session.locy_with("QUERY r WHERE x = $val") \
     .with_config({"exact_probability": True}) \
     .run()
 
+# Session parameters are visible as $session.<key>, as in Cypher
+session.params().set("tenant", "acme")
+result = session.locy("CREATE RULE t AS MATCH (n:Doc) WHERE n.tenant = $session.tenant YIELD KEY n")
+
 # Compilation-only introspection
 explain = session.locy_with("CREATE RULE r AS ...").explain()
 # explain.plan_text, explain.strata_count, explain.has_recursive_strata
@@ -692,7 +719,7 @@ let result = session.locy_with("QUERY r WHERE x = $val")
     .timeout(Duration::from_secs(60))
     .max_iterations(500)
     .cancellation_token(token)
-    .with_config(LocyConfig { .. })
+    .with_config(LocyConfig::default())
     .run()
     .await?;
 
@@ -707,17 +734,17 @@ let result = tx.locy_with("QUERY r WHERE x = $val")
     .param("val", "Alice").run().await?;
 
 // Apply session-level derived facts
-let derived = session.locy("DERIVE infer_edges").await?.derived_fact_set.unwrap();
+let derived = session.locy("DERIVE infer_edges").await?.derived().unwrap().clone();
 tx.apply(derived).await?;
 tx.commit().await?;
 
 // Rule registry (same API at db / session / tx level)
-session.rules().register("CREATE RULE reach AS ...")?;
+session.rules().register("CREATE RULE reach AS ...").await?;
 session.rules().list();      // Vec<String>
 session.rules().get("reach"); // Option<RuleInfo>
-session.rules().remove("reach")?;
+session.rules().remove("reach").await?; // bool: whether it existed
 session.rules().count();
-session.rules().clear();
+session.rules().clear().await?;
 ```
 
 ### Cancellation
@@ -774,16 +801,22 @@ Convenience: `result.warnings()`, `result.has_warning(code)`.
 MODULE acme.compliance
 ```
 
-Declares namespace for all rules in this program. Optional, at most one per program. Must appear before USE declarations.
+Declares namespace for all rules in this program. Optional, at most one per program. Must appear before USE declarations. Inside the program, rules can be referenced by simple or fully qualified name (`QUERY acme.compliance.control ...`).
 
 ### USE Imports
 
 ```
-USE acme.common                       -- Glob import: all exported rules
-USE acme.common { control, reachable } -- Selective import: named rules only
+USE acme.common                       -- Glob import
+USE acme.common { control, reachable } -- Selective import
 ```
 
-Imported rules are available for IS references. Qualified names resolved during compilation.
+`USE` imports rules from a module registered with `rules().register` (a `MODULE a.b` program's rules are registered as `a.b.<rule>`): the glob form imports all of them under their short names, the selective form only the listed ones. An unregistered module fails with `ModuleNotFound`, a listed rule the module lacks with `ImportNotFound`. A program sees the database's registered modules plus its session's.
+
+```
+-- registered once: db.rules().register("MODULE acme.common CREATE RULE control AS MATCH (a)-[:OWNS]->(b) YIELD KEY a, KEY b")
+USE acme.common { control }
+QUERY control RETURN a, b
+```
 
 ### Qualified Names
 
@@ -917,6 +950,8 @@ CREATE RULE infer_categories AS
 
 DERIVE infer_categories
 ```
+
+This creates one `Category` node (with `name: 'Premium'`) and `BELONGS_TO` edge per matching product.
 
 ### What-If Analysis with ASSUME
 

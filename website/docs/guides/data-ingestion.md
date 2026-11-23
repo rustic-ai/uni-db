@@ -198,9 +198,7 @@ The `BulkWriter` API provides high-performance bulk loading with deferred index 
 ```rust
 use std::collections::HashMap;
 
-use serde_json::json;
-use uni_db::{Result, Uni};
-use uni_db::api::bulk::EdgeData;
+use uni_db::{EdgeData, Result, Uni, Value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -214,19 +212,19 @@ async fn main() -> Result<()> {
         .defer_scalar_indexes(true)   // Defer scalar index updates
         .batch_size(10_000)           // Flush every 10K records
         .on_progress(|progress| {
-            println!("{}: {} rows processed",
+            println!("{:?}: {} rows processed",
                 progress.phase, progress.rows_processed);
         })
         .build()?;
 
     // Bulk insert vertices
-    let vertices: Vec<HashMap<String, serde_json::Value>> = papers
+    let vertices: Vec<HashMap<String, Value>> = papers
         .iter()
         .map(|p| {
             let mut props = HashMap::new();
-            props.insert("title".to_string(), json!(p.title));
-            props.insert("year".to_string(), json!(p.year));
-            props.insert("embedding".to_string(), json!(p.embedding));
+            props.insert("title".to_string(), Value::from(p.title.clone()));
+            props.insert("year".to_string(), Value::from(p.year));
+            props.insert("embedding".to_string(), Value::from(p.embedding.clone())); // Vec<f32> → Value::Vector
             props
         })
         .collect();
@@ -332,9 +330,9 @@ the load is hidden from the database handle's readers, and it appears all at
 once when the last table is published: a label scan and a label-less scan
 agree, and no vertex appears without its edges or an edge in one direction
 only. The guarantee covers the handle the load ran on (its sessions,
-transactions and pinned snapshots). Another process, or a second handle
-opened on the same path, reads the tables directly and can still see a load
-part way through its publish.
+transactions and pinned snapshots). Another process, or a read-only handle
+opened on the same path, reads the table versions the latest manifest names,
+so it sees the load once the load's manifest is published, all at once.
 
 A fork created while a load is being published waits for the publish to
 finish (up to 30 seconds) and then includes all of the load. If the load stays
@@ -393,12 +391,9 @@ including another bulk load, are kept. Several loads interrupted at once are
 each completed. User indexes on the load's labels are marked `Stale` and rebuilt
 by the background index rebuild.
 
-A successful `commit()` publishes one table at a time (one Lance commit each).
-While it runs, a concurrent reader can see the load in some tables and not yet
-in others: measured, a label scan (`MATCH (n:Label)`) seeing the new vertices
-while a label-less scan (`MATCH (n)`) did not, and edges traversable from the
-source side before the destination side. Reads are consistent again once
-`commit()` returns.
+A successful `commit()` publishes one table at a time (one Lance commit each),
+but readers never see part of it (see "What `commit()` Returning Means"): the load appears
+in every table at once.
 
 ### Triggers, CDC and the Enclosing Transaction
 
@@ -503,16 +498,18 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 use std::collections::HashMap;
 use serde_json::json;
+use uni_db::Value;
 
-// Allocate VID (label_id is required but not encoded in VID)
-let label_id = schema_manager.schema().label_id_by_name("Paper").unwrap();
-let vid = writer.next_vid(label_id).await?;
+// Allocate VID (pure auto-increment; the label is not encoded in the VID)
+let vid = writer.next_vid().await?;
 
-let mut props: HashMap<String, serde_json::Value> = HashMap::new();
-props.insert("title".to_string(), json!("New Paper"));
-props.insert("year".to_string(), json!(2024));
+let mut props: HashMap<String, Value> = HashMap::new();
+props.insert("title".to_string(), json!("New Paper").into());
+props.insert("year".to_string(), json!(2024).into());
 
-writer.insert_vertex(vid, props).await?;
+writer
+    .insert_vertex_with_labels(vid, props, &["Paper".to_string()], None)
+    .await?;
 ```
 
 ### Insert Edges
@@ -520,30 +517,33 @@ writer.insert_vertex(vid, props).await?;
 ```rust
 use std::collections::HashMap;
 use serde_json::json;
+use uni_db::Value;
 
 let edge_type_id = schema_manager.schema().edge_type_id_by_name("CITES").unwrap();
 let eid = writer.next_eid(edge_type_id).await?;
 
-let mut props: HashMap<String, serde_json::Value> = HashMap::new();
-props.insert("weight".to_string(), json!(0.95));
+let mut props: HashMap<String, Value> = HashMap::new();
+props.insert("weight".to_string(), json!(0.95).into());
 
-writer.insert_edge(src_vid, dst_vid, edge_type_id, eid, props).await?;
+writer
+    .insert_edge(src_vid, dst_vid, edge_type_id, eid, props, Some("CITES".to_string()), None)
+    .await?;
 ```
 
 ### Batch Inserts (Vertices)
 
 ```rust
 use std::collections::HashMap;
+use uni_db::Value;
 
-let label_id = schema_manager.schema().label_id_by_name("Paper").unwrap();
-let vids = writer.allocate_vids(label_id, papers.len()).await?;
-let props_batch: Vec<HashMap<String, serde_json::Value>> = papers
+let vids = writer.allocate_vids(papers.len()).await?;
+let props_batch: Vec<HashMap<String, Value>> = papers
     .iter()
     .map(build_properties)
     .collect();
 
 writer
-    .insert_vertices_batch(vids, props_batch, vec!["Paper".to_string()])
+    .insert_vertices_batch(vids, props_batch, vec!["Paper".to_string()], None)
     .await?;
 ```
 
@@ -745,8 +745,8 @@ let bulk = tx.bulk_writer()
 
 ```bash
 # Parallel imports are safe only when writing to separate storage paths
-uni import shard1 --papers shard1.jsonl --citations shard1_edges.jsonl --output ./storage/shard1 &
-uni import shard2 --papers shard2.jsonl --citations shard2_edges.jsonl --output ./storage/shard2 &
+uni import semantic-scholar --papers shard1.jsonl --citations shard1_edges.jsonl --output ./storage/shard1 &
+uni import semantic-scholar --papers shard2.jsonl --citations shard2_edges.jsonl --output ./storage/shard2 &
 wait
 ```
 

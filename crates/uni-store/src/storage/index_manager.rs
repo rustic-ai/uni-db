@@ -315,6 +315,9 @@ pub struct IndexManager {
     /// `replace_table_atomic`); `None` callers (e.g. some rebuild paths) still build
     /// indexes over already-materialised columns.
     backend: Option<Arc<dyn StorageBackend>>,
+    /// The store's read cut, which index datasets this manager writes record
+    /// their versions in.
+    read_cut: Option<Arc<crate::storage::read_cut::ReadCut>>,
 }
 
 impl std::fmt::Debug for IndexManager {
@@ -370,7 +373,15 @@ impl IndexManager {
             base_uri: base_uri.to_string(),
             schema_manager,
             backend: None,
+            read_cut: None,
         }
+    }
+
+    /// Puts the index datasets this manager writes under the store's cut.
+    #[must_use]
+    pub fn with_read_cut(mut self, cut: Arc<crate::storage::read_cut::ReadCut>) -> Self {
+        self.read_cut = Some(cut);
+        self
     }
 
     /// Attach a storage backend, enabling MUVERA FDE backfill over already-flushed rows.
@@ -420,7 +431,9 @@ impl IndexManager {
         let postings_path = format!("{}/indexes/{}/{}_inverted", self.base_uri, label, property);
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = InvertedIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            InvertedIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
 
         // Backfill from the flushed vertex table via the storage backend. The
         // LanceDB-managed table is not at the raw `{base}/vertices_<label>`
@@ -486,6 +499,28 @@ impl IndexManager {
         mut config: VectorIndexConfig,
         force_backfill: bool,
     ) -> Result<()> {
+        // An ANN index is built over a fixed width; without one every build
+        // and every query would fail later, far from the declaration.
+        match index_build_dim(&self.schema_manager.schema(), &config) {
+            Some(dim) if dim > 0 => {}
+            Some(_) => {
+                return Err(anyhow!(
+                    "vector index '{}': {}.{} is declared VECTOR with no dimension; \
+                     declare it as VECTOR(N), for example VECTOR(384)",
+                    config.name,
+                    config.label,
+                    config.property
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "vector index '{}': {}.{} is not a declared VECTOR(N) property",
+                    config.name,
+                    config.label,
+                    config.property
+                ));
+            }
+        }
         let outcome = if let VectorIndexType::Muvera { inner, .. } = &config.index_type {
             // Register + backfill the derived FDE column (forced on a full rebuild).
             self.prepare_muvera_fde(&config, force_backfill).await?;
@@ -934,7 +969,8 @@ impl IndexManager {
                         "Resolving deferred JSON full-text index '{}' on '{}' at flush",
                         config.name, table
                     );
-                    self.create_json_fts_index(config).await?;
+                    // Inside a flush, whose rows already carry the text.
+                    self.create_json_fts_index_inner(config, false).await?;
                 }
                 _ => {}
             }
@@ -1023,41 +1059,73 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Creates a JSON Full-Text Search index on a column.
+    /// Creates a JSON full-text index on a column.
     ///
-    /// This creates a Lance inverted index on the specified column,
-    /// enabling BM25-based full-text search with optional phrase matching.
+    /// The index is a Lance inverted index on the column's derived text
+    /// column ([`JsonFtsIndexConfig::derived_column`]), which every write of
+    /// the label's table fills from the source value
+    /// (`VertexDataset::build_record_batch_with_timestamps`). Rows already
+    /// flushed are backfilled first, in storage before the catalog names the
+    /// column, so the catalog is never ahead of the table.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
-    pub async fn create_json_fts_index(&self, mut config: JsonFtsIndexConfig) -> Result<()> {
+    pub async fn create_json_fts_index(&self, config: JsonFtsIndexConfig) -> Result<()> {
+        // Always re-derived: rows written while no such index was declared
+        // (before it, or after a drop) carry no text.
+        self.create_json_fts_index_inner(config, true).await
+    }
+
+    #[cfg(feature = "lance-backend")]
+    async fn create_json_fts_index_inner(
+        &self,
+        mut config: JsonFtsIndexConfig,
+        force_backfill: bool,
+    ) -> Result<()> {
         let label = config.label.clone();
-        let column = config.column.clone();
-        let (label, column) = (&label, &column);
+        let derived = config.derived_column();
+        let (label, derived) = (&label, &derived);
         info!(
-            "Creating JSON FTS index '{}' on {}.{}",
-            config.name, label, column
+            "Creating JSON FTS index '{}' on {}.{} (text column {})",
+            config.name, label, config.column, derived
         );
 
         let schema = self.schema_manager.schema();
         if !schema.labels.contains_key(label) {
             return Err(anyhow!("Label '{}' not found", label));
         }
+        let registered = schema
+            .properties
+            .get(label)
+            .is_some_and(|p| p.contains_key(derived.as_str()));
 
         let table = table_names::vertex_table_name(label);
+        let table_exists = match self.backend.as_ref() {
+            Some(backend) => backend.table_exists(&table).await?,
+            None => false,
+        };
+        if table_exists && (!registered || force_backfill) {
+            self.backfill_json_fts_column(&config).await?;
+        }
+        if !registered {
+            self.schema_manager.add_internal_property(
+                label,
+                derived,
+                uni_common::DataType::String,
+                true,
+            )?;
+        }
 
         let outcome = if let Some(backend) = self.backend.as_ref() {
-            if backend.table_exists(&table).await? {
+            if table_exists {
                 info!(
-                    "Building physical JSON FTS index '{}' on '{}'",
-                    config.name, table
+                    "Building physical JSON FTS index '{}' on '{}.{}'",
+                    config.name, table, derived
                 );
                 if let Err(e) = backend
                     .create_fts_index(
                         &table,
-                        &[column.as_str()],
+                        &[derived.as_str()],
                         Some(&config.name),
-                        // JSON FTS uses the default (standard) analyzer; the
-                        // JSON-specific tokenizer wiring is out of scope here.
                         &uni_common::core::schema::TokenizerConfig::Standard,
                         config.with_positions,
                     )
@@ -1096,6 +1164,99 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Rewrites the label's flushed rows with the JSON full-text index's
+    /// derived text column filled from each row's source value.
+    ///
+    /// Reads the newest versions (`self.backend` is the head backend) and
+    /// holds the table's write lock across the scan and the rewrite, so a
+    /// flush cannot append between them (issue #96's rule for the MUVERA
+    /// backfill). The target schema is the live one plus the derived column,
+    /// which the caller adds to the catalog only after this succeeds.
+    #[cfg(feature = "lance-backend")]
+    async fn backfill_json_fts_column(&self, config: &JsonFtsIndexConfig) -> Result<()> {
+        use arrow_array::{Array, ArrayRef, StringArray};
+
+        let Some(backend) = self.backend.as_ref() else {
+            return Ok(());
+        };
+        let label = &config.label;
+        let derived = config.derived_column();
+        let table = table_names::vertex_table_name(label);
+
+        let mut widened = (*self.schema_manager.schema()).clone();
+        widened
+            .properties
+            .entry(label.clone())
+            .or_default()
+            .entry(derived.clone())
+            .or_insert_with(|| uni_common::core::schema::PropertyMeta {
+                r#type: uni_common::DataType::String,
+                nullable: true,
+                added_in: widened.schema_version,
+                state: uni_common::core::schema::SchemaElementState::Active,
+                generation_expression: None,
+                description: None,
+                default: None,
+            });
+        let label_id = widened
+            .label_id_by_name(label)
+            .ok_or_else(|| anyhow!("JSON FTS: label '{label}' not found"))?;
+        let target_schema =
+            VertexDataset::new(&self.base_uri, label, label_id).get_arrow_schema(&widened)?;
+        let source_dt = widened
+            .properties
+            .get(label)
+            .and_then(|p| p.get(&config.column))
+            .map(|m| m.r#type.clone());
+
+        let _table_guard = backend.lock_table_for_write(&table).await;
+        let batches = backend.scan(ScanRequest::all(&table)).await?;
+        let mut rewritten = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            let texts: Vec<Option<String>> = match batch.column_by_name(&config.column) {
+                Some(src) => (0..batch.num_rows())
+                    .map(|row| {
+                        if src.is_null(row) {
+                            return Ok(None);
+                        }
+                        let value = crate::storage::arrow_convert::arrow_to_value(
+                            src.as_ref(),
+                            row,
+                            source_dt.as_ref(),
+                        )?;
+                        Ok(uni_common::core::schema::json_fts_text(
+                            &value,
+                            &config.paths,
+                        ))
+                    })
+                    .collect::<Result<_>>()?,
+                None => vec![None; batch.num_rows()],
+            };
+            let text_column: ArrayRef = Arc::new(StringArray::from(texts));
+            let mut columns: Vec<ArrayRef> = Vec::with_capacity(target_schema.fields().len());
+            for field in target_schema.fields() {
+                if field.name() == &derived {
+                    columns.push(text_column.clone());
+                } else if let Some(col) = batch.column_by_name(field.name()) {
+                    columns.push(col.clone());
+                } else {
+                    columns.push(arrow_array::new_null_array(
+                        field.data_type(),
+                        batch.num_rows(),
+                    ));
+                }
+            }
+            rewritten.push(arrow_array::RecordBatch::try_new(
+                target_schema.clone(),
+                columns,
+            )?);
+        }
+        backend
+            .replace_table_atomic(&table, rewritten, target_schema)
+            .await?;
+        Ok(())
+    }
+
     /// Remove an index both physically from the Lance dataset and from the schema.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
@@ -1124,6 +1285,22 @@ impl IndexManager {
         }
 
         self.schema_manager.remove_index(name)?;
+        // A JSON full-text index's derived text column goes with the last
+        // index on its column: left registered, it was carried, unfilled, on
+        // every later row. The Lance column stays, invisible to a catalog
+        // that does not name it; re-creating the index backfills it.
+        if let IndexDefinition::JsonFullText(cfg) = &idx_def {
+            let still_indexed = self.schema_manager.schema().indexes.iter().any(|idx| {
+                matches!(idx, IndexDefinition::JsonFullText(other)
+                    if other.label == cfg.label && other.column == cfg.column)
+            });
+            if !still_indexed {
+                let derived = cfg.derived_column();
+                if let Err(e) = self.schema_manager.drop_property(&cfg.label, &derived) {
+                    debug!("derived column '{derived}' of '{name}' was not registered: {e}");
+                }
+            }
+        }
         self.schema_manager.save().await?;
         Ok(())
     }
@@ -1152,7 +1329,11 @@ impl IndexManager {
                 IndexDefinition::Scalar(cfg) => self.create_scalar_index(cfg).await?,
                 IndexDefinition::FullText(cfg) => self.create_fts_index(cfg).await?,
                 IndexDefinition::Inverted(cfg) => self.create_inverted_index(cfg).await?,
-                IndexDefinition::JsonFullText(cfg) => self.create_json_fts_index(cfg).await?,
+                // A rebuild re-derives the text column: bulk-loaded rows may
+                // predate it.
+                IndexDefinition::JsonFullText(cfg) => {
+                    self.create_json_fts_index_inner(cfg, true).await?
+                }
                 IndexDefinition::Sparse(cfg) => self.create_sparse_vector_index(cfg).await?,
                 _ => warn!("Unknown index type encountered during rebuild, skipping"),
             }
@@ -1256,7 +1437,9 @@ impl IndexManager {
         );
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = InvertedIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            InvertedIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
         index.apply_incremental_updates(added, removed).await
     }
 
@@ -1283,7 +1466,9 @@ impl IndexManager {
         let postings_path = format!("{}/indexes/{}/{}_sparse", self.base_uri, label, property);
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = SparseVectorIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            SparseVectorIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
 
         // Backfill from the flushed vertex table via the storage backend (the
         // LanceDB-managed table is not at the raw `{base}/vertices_<label>`
@@ -1343,7 +1528,9 @@ impl IndexManager {
         );
         let _postings_guard = self.postings_write_guard(&postings_path).await;
 
-        let mut index = SparseVectorIndex::new(&self.base_uri, config.clone()).await?;
+        let mut index =
+            SparseVectorIndex::open(&self.base_uri, config.clone(), self.read_cut.clone(), false)
+                .await?;
         index.apply_incremental_updates(added, removed).await
     }
 
@@ -1366,7 +1553,7 @@ impl IndexManager {
                 _ => None,
             })
             .ok_or_else(|| anyhow!("No sparse vector index found for {}.{}", label, property))?;
-        SparseVectorIndex::new(&self.base_uri, config).await
+        SparseVectorIndex::open(&self.base_uri, config, self.read_cut.clone(), true).await
     }
 }
 

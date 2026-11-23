@@ -7,7 +7,7 @@ You have a chain of services exposed to the internet, some with known vulnerabil
 ## Prerequisites
 
 - [Uni installed](installation.md) (CLI and Python package)
-- Python 3.9+
+- Python 3.10+
 - Terminal access
 
 ---
@@ -297,7 +297,7 @@ This isn't a log or a confidence score — it's a formal proof trace. Every step
 
     out = session.locy(program)
     explain_cmd = next(c for c in out.command_results if c.command_type == "explain")
-    print(json.dumps(explain_cmd.tree, indent=2))
+    print(json.dumps(explain_cmd.tree, indent=2, default=str))  # nodes print as text
     ```
 
 ---

@@ -14,13 +14,18 @@ MATCH ...
 YIELD KEY a, KEY b, value AS alias, prob_expr AS PROB
 // KEY marks ONE item: a composite key is `KEY a, KEY b`, not `KEY a, b`.
 // With FOLD, every non-KEY item must be a FOLD output (or an expression over one).
-// OR, for graph mutation rules (edge/node props are inline maps, no SET):
+// OR, for graph mutation rules (edge props are inline maps, no SET):
 DERIVE (src)-[:TYPE {prop: expr}]->(dst)
+DERIVE (src)-[:TYPE]->(NEW n:Label)   // creates one node per matched row
 ```
+
+A `NEW` node's properties (`NEW n:Label {k: v}`) are evaluated against the
+matched row and stored with it, alongside an internal `_skolem_id`. One `NEW`
+node is created per matched row.
 
 The second `WHERE` (after `FOLD`) filters on aggregated values — equivalent to SQL's `HAVING`. It can reference FOLD output columns and KEY columns.
 
-`REQUIRE` takes the same kind of condition but belongs to the rule's *definition*: in a recursive rule it is applied to every iteration, so it constrains what the rule derives, where the post-FOLD `WHERE` only filters the converged answer. It must be one-way — a lower bound over a non-decreasing fold (`MSUM`, `MMAX`, `MCOUNT`, `MNOR`) or an upper bound over a non-increasing one (`MMIN`, `MPROD`) — or the compiler rejects it.
+`REQUIRE` takes the same kind of condition but belongs to the rule's *definition*: in a recursive rule it is applied to every iteration, so it constrains what the rule derives, where the post-FOLD `WHERE` only filters the converged answer. It must be one-way — a lower bound over a non-decreasing fold (`MSUM`, `MAX`/`MMAX`, `COUNT`/`MCOUNT`, `MNOR`) or an upper bound over a non-increasing one (`MIN`/`MMIN`, `MPROD`) — or the compiler rejects it. The direction comes from the aggregate registry, so a plugin aggregate that declares one can carry a `REQUIRE` too.
 
 ### FOLD Aggregators
 
@@ -35,7 +40,8 @@ The second `WHERE` (after `FOLD`) filters on aggregated values — equivalent to
 | `MSUM(expr)` | Monotonic sum of non-negative numbers; integers sum to an exact integer | Safe (unbounded) |
 | `MMAX(expr)` | Monotonic maximum | Safe in recursion |
 | `MMIN(expr)` | Monotonic minimum | Safe in recursion |
-| `MCOUNT(expr)` | Monotonic count | Safe (unbounded) |
+| `MCOUNT(expr)` | Monotonic count of non-null values | Safe (unbounded) |
+| `MCOUNT(*)` / `MCOUNT()` | Monotonic row count | Safe (unbounded) |
 | `MNOR(expr)` | Noisy-OR probability: `1 − ∏(1 − pᵢ)` | Safe in recursion |
 | `MPROD(expr)` | Product probability: `∏ pᵢ` | Safe in recursion |
 
@@ -98,16 +104,17 @@ CREATE MODEL name AS
   [CALIBRATION (platt_scaling | isotonic_regression | temperature_scaling | beta_calibration | dirichlet | conformal | conformal(alpha) | none)]
   [VERSION 'string']
 
-CALIBRATE model_name ON MATCH pattern [WHERE expr] TARGET expr METHOD calibration_method [HOLDOUT n]
-VALIDATE  model_name ON MATCH pattern [WHERE expr] TARGET expr METRICS metric (, metric)*
+CALIBRATE model_name ON MATCH pattern [WHERE expr] TARGET expr METHOD calibration_method [HOLDOUT fraction]
+VALIDATE  rule_name  ON MATCH pattern [WHERE expr] TARGET expr METRICS metric (, metric)*
 ```
 
-`metric` ∈ `brier_score | ece | debiased_ece | accuracy | log_loss | auc`. The classifier-registry key is the `CREATE MODEL <name>`, not the `USING xervo('alias')` provider hint. The feature dict the callable receives is keyed by the `INPUT` binding name; values are the evaluated argument expressions at the call site. See [Neural Predicates](../advanced/neural-predicates.md).
+`metric` ∈ `brier_score | ece | debiased_ece | accuracy | log_loss | auc`. The classifier-registry key is the `CREATE MODEL <name>`, not the `USING xervo('alias')` provider hint. The feature dict the callable receives is keyed by the `INPUT` binding name; values are the evaluated argument expressions at the call site (under `CALIBRATE`, the model's `FEATURES` expressions by position, or the `INPUT` variables themselves when it declares none; a node arrives as its vid in both places). `HOLDOUT` is a fraction strictly between 0 and 1 (default `0.2`). See [Neural Predicates](../advanced/neural-predicates.md).
 
 ## Modules
 
 <!-- doctest: skip -->
 ```cypher
-MODULE my.module
-USE shared.rules
+MODULE my.module                    // qualifies this program's rules: my.module.<rule>
+QUERY my.module.rule_name ...       // short or fully qualified name
+USE shared.rules [{ a, b }]         // import a registered module's rules (all, or the listed ones)
 ```

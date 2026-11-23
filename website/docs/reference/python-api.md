@@ -1,6 +1,6 @@
 # Python API Reference
 
-Complete reference for the `uni_db` Python bindings (v5.3.0). All operations go through the **Session** (reads, Locy) or **Transaction** (writes, bulk loading) obtained from a `Uni` instance.
+Complete reference for the `uni_db` Python bindings (v6.0.0). All operations go through the **Session** (reads, Locy) or **Transaction** (writes, bulk loading) obtained from a `Uni` instance.
 
 ## Installation
 
@@ -62,7 +62,8 @@ import uni_db
 import asyncio
 
 async def main():
-    async with uni_db.AsyncUni.open("/path/to/db") as db:
+    db = await uni_db.AsyncUni.open("/path/to/db")
+    async with db:
         session = db.session()
 
         # Reads work on the session
@@ -93,7 +94,7 @@ The main synchronous entry point. Exposed as `uni_db.Uni` in Python.
 | `Uni.open(path)` | Open or create a database at the given path |
 | `Uni.create(path)` | Create a new database (fails if it already exists) |
 | `Uni.open_existing(path)` | Open an existing database (fails if it does not exist) |
-| `Uni.temporary()` | Create an ephemeral in-memory database |
+| `Uni.temporary()` | Create an ephemeral database in a scratch directory that is removed on shutdown |
 | `Uni.in_memory()` | Alias for `temporary()` |
 | `Uni.builder()` | Return a `UniBuilder` for advanced configuration |
 
@@ -104,7 +105,7 @@ db = uni_db.Uni.open("./my_graph")
 # In-memory for tests
 db = uni_db.Uni.temporary()
 
-# Context manager (flushes on exit)
+# Context manager (shuts the database down on exit)
 with uni_db.Uni.open("./my_graph") as db:
     session = db.session()
     # ...
@@ -124,7 +125,7 @@ with uni_db.Uni.open("./my_graph") as db:
 | `db.metrics()` | `DatabaseMetrics` | Database-wide metrics snapshot |
 | `db.config()` | `dict` | Current database configuration |
 | `db.flush()` | `None` | Flush uncommitted changes to persistent storage |
-| `db.shutdown()` | `None` | Flush and prepare for shutdown |
+| `db.shutdown()` | `None` | Flush, stop background tasks and release the writer lock or lease |
 | `db.label_exists(name)` | `bool` | Check if a label exists |
 | `db.edge_type_exists(name)` | `bool` | Check if an edge type exists |
 | `db.list_labels()` | `list[str]` | List all label names |
@@ -137,7 +138,10 @@ with uni_db.Uni.open("./my_graph") as db:
 | `db.list_snapshots()` | `list[SnapshotInfo]` | List all snapshots |
 | `db.restore_snapshot(snapshot_id)` | `None` | Restore database to a snapshot |
 | `db.delete_snapshot(snapshot_id)` | `None` | Delete a snapshot and release the storage versions it pins |
-| `db.write_lease()` | `WriteLease \| None` | Current write lease configuration |
+| `db.write_lease()` | `WriteLease \| None` | Write lease set with `UniBuilder.write_lease()`, or `None` if none was set |
+| `db.uri` | `str` | Path or URI backing the database (property) |
+| `db.bulk_load_applied(load_id)` | `bool` | Whether the bulk load `load_id` reached its commit point |
+| `db.background_task_count()` | `int` | Number of background tasks attached to the database |
 
 The `count` returned by `db.get_label_info()` / `db.get_edge_type_info()` is
 obtained with a Cypher `count(...)`, so it includes rows still buffered in L0
@@ -161,7 +165,7 @@ Fluent builder for advanced database configuration. Exposed as `uni_db.UniBuilde
 | `UniBuilder.open(path)` | Open or create |
 | `UniBuilder.create(path)` | Create new (fail if exists) |
 | `UniBuilder.open_existing(path)` | Open existing (fail if missing) |
-| `UniBuilder.temporary()` | Ephemeral in-memory |
+| `UniBuilder.temporary()` | Ephemeral, in a scratch directory removed on shutdown |
 | `UniBuilder.in_memory()` | Alias for `temporary()` |
 
 #### Configuration Methods (chainable)
@@ -174,14 +178,21 @@ Fluent builder for advanced database configuration. Exposed as `uni_db.UniBuilde
 | `.xervo_catalog_from_file(path)` | Configure Xervo models from a JSON file |
 | `.xervo_catalog_from_str(json)` | Configure Xervo models from a JSON string |
 | `.xervo_runtime(runtime)` | Reuse an existing `ModelRuntime` instead of building one ([sharing models](#sharing-models-across-databases)) |
-| `.cloud_config(config_dict)` | Cloud storage credentials (`s3`, `gcs`, `azure`) |
+| `.cloud_config(config_dict)` | Cloud storage credentials (`s3`, `gcs`, `azure`). Applies to remote-only and hybrid stores; unset fields fall back to the environment |
+| `.storage_options(dict)` | Raw `object_store` options (`aws_endpoint`, `azure_storage_use_emulator`, …) for both storage clients; override `cloud_config` and the environment |
 | `.config(config_dict)` | Database options (`query_timeout`, `max_query_memory`, `lance_metadata_cache_bytes`, `lance_index_cache_bytes`, etc.) |
 | `.batch_size(n)` | Rows per page a query cursor hands back (default 1024) |
 | `.wal_enabled(bool)` | Enable/disable write-ahead log (default `True`) |
 | `.strict_schema(bool)` | Reject writes with undeclared labels/edge types (default `False`) |
 | `.read_only()` | Open in read-only mode |
-| `.write_lease(lease)` | Multi-agent write coordination |
-| `.hybrid(local_path, remote_url)` | Hybrid storage (local metadata + remote data) |
+| `.skip_invalid_locy_rules(bool)` | Skip persisted Locy rules that no longer compile instead of failing the open |
+| `.max_forks(n)` | Cap on the number of forks (Active, Pending and Tombstoned); `None` is unbounded |
+| `.fork_default_ttl(timedelta)` | TTL for forks created without `.ttl(...)`; `None` for no TTL |
+| `.fork_sweeper_interval(timedelta)` | How often the TTL sweeper checks for expired forks |
+| `.disable_fork_sweeper(bool)` | Do not start the TTL sweeper |
+| `.set_aside_stale_wal()` | Hybrid mode: when the local WAL belongs to an earlier writer of the store (`UniStaleWalError`, attributes `store`, `wal`, `segments`), move it to `wal_set_aside/` and open |
+| `.write_lease(lease)` | Single-writer enforcement: `WriteLease.LOCAL()` (default lock or lease), `WriteLease.UNENFORCED()` (none, one writer by convention), `WriteLease.DYNAMODB(table)` (not implemented: the open fails); a second writable open raises `UniStoreLockedError`, a fenced handle `UniWriterFencedError` |
+| `.hybrid(local_path, remote_url)` | Hybrid storage: WAL and ID allocator in `local_path` (must be the opened path), everything else at `remote_url` |
 | `.build()` | Build and return the `Uni` instance |
 
 ```python
@@ -247,6 +258,7 @@ fields as Rust (including `None`) and reject unknown provider-specific keys.
 | `flush_stream_timeout` | seconds or `timedelta` |
 | `drop_fork_drain_timeout` | seconds or `timedelta` |
 | `flush_drain_timeout` | seconds or `timedelta` |
+| `read_cut_refresh` | seconds, `timedelta`, or `None`: how often a read-only handle picks up newer flushes |
 | `max_forks` | `int` or `None` |
 | `fork_default_ttl` | seconds, `timedelta`, or `None` |
 | `fork_sweeper_interval` | seconds or `timedelta` |
@@ -267,6 +279,7 @@ Nested dictionaries accept only the following fields, merging fields individuall
 | `file_sandbox` | `enabled`, `allowed_paths` |
 | `object_store` | `connect_timeout`, `read_timeout`, `write_timeout`, `max_retries`, `retry_backoff_base`, `retry_backoff_max` |
 | `index_rebuild` | `max_retries`, `retry_delay`, `worker_check_interval`, `growth_trigger_ratio`, `max_index_age`, `auto_rebuild_enabled` |
+| `writer_lease` | `ttl`, `renew_interval`, `acquire_grace`, `clock_skew` (seconds; `renew_interval` must be below `ttl`, and for an object store `clock_skew + renew_interval` too) |
 
 Disabling `ssi_enabled` is suitable only for single-writer workloads or callers
 that coordinate concurrent read-modify-write operations themselves, matching the
@@ -329,6 +342,7 @@ session = db.session()
 |--------|---------|-------------|
 | `session.query(cypher, params=None)` | `QueryResult` | Execute a read-only query. Rejects mutations with an error. |
 | `session.query_with(cypher)` | `SessionQueryBuilder` | Fluent read query builder |
+| `session.run(cypher)` | `QueryResult` | Run one statement: a read runs as `query()`, a write in its own auto-committed transaction |
 
 ```python
 # Simple query
@@ -364,6 +378,7 @@ result = (
 |--------|---------|-------------|
 | `session.tx()` | `Transaction` | Create a new transaction |
 | `session.tx_with()` | `TransactionBuilder` | Transaction with options (timeout, isolation) |
+| `session.scratch()` | `Transaction` | Like `tx()`, but `commit()` is refused, so its writes are always discarded |
 
 ```python
 # Default transaction
@@ -386,6 +401,14 @@ tx = session.tx_with().timeout(30.0).isolation("serialized").start()
 |--------|---------|-------------|
 | `session.rules()` | `RuleRegistry` | Session-scoped rule registry |
 | `session.params()` | `Params` | Session-scoped parameter store |
+
+Cypher and Locy read a session parameter as `$session.<key>`:
+
+```python
+session.params().set("tenant", "acme")
+session.query("MATCH (n:Person) WHERE n.tenant = $session.tenant RETURN n")
+session.locy("CREATE RULE t AS MATCH (n:Person) WHERE n.tenant = $session.tenant YIELD KEY n")
+```
 
 #### Version Pinning
 
@@ -442,7 +465,7 @@ session.add_hook("audit", AuditHook())
 |--------|---------|-------------|
 | `session.metrics()` | `SessionMetrics` | Session lifetime metrics |
 | `session.capabilities()` | `SessionCapabilities` | Session capabilities snapshot |
-| `session.id` | `str` | Session identifier |
+| `session.id()` | `str` | Session identifier |
 | `session.cancellation_token()` | `CancellationToken` | Cooperative cancellation token |
 | `session.cancel()` | `None` | Cancel in-progress operations |
 
@@ -552,10 +575,12 @@ Returned by `session.locy_with(program)`. Supports chaining.
 | `.params(dict)` | self | Bind multiple parameters |
 | `.timeout(seconds)` | self | Set evaluation timeout |
 | `.max_iterations(n)` | self | Set fixpoint iteration limit |
+| `.max_memory(bytes)` | self | Set memory limit |
 | `.with_config(config)` | self | Apply a `LocyConfig` or config dict |
 | `.cancellation_token(token)` | self | Attach cancellation token |
 | `.run()` | `LocyResult` | Execute the evaluation |
 | `.explain()` | `LocyExplainOutput` | Explain without executing |
+| `.profile()` | `(LocyResult, LocyProfileOutput)` | Execute with profiling |
 
 Cancellation is enforced against the whole evaluation, not just the Cypher
 statements the program dispatches, so a long-running fixpoint is interruptible.
@@ -580,10 +605,13 @@ Returned by `tx.query_with(cypher)`.
 |--------|---------|-------------|
 | `.param(name, value)` | self | Bind a parameter |
 | `.timeout(seconds)` | self | Set query timeout |
+| `.max_memory(bytes)` | self | Set memory limit |
+| `.cancellation_token(token)` | self | Attach cancellation token |
 | `.fetch_all()` | `QueryResult` | Execute and return all rows |
 | `.fetch_one()` | `dict \| None` | Execute and return first row |
 | `.execute()` | `ExecuteResult` | Execute as a mutation |
 | `.cursor()` | `QueryCursor` | Open a streaming cursor |
+| `.profile()` | `(QueryResult, ProfileOutput)` | Execute with profiling |
 
 #### TxExecuteBuilder
 
@@ -592,6 +620,7 @@ Returned by `tx.execute_with(cypher)`.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.param(name, value)` | self | Bind a parameter |
+| `.params(dict)` | self | Bind multiple parameters |
 | `.timeout(seconds)` | self | Set execution timeout (replaces the database `query_timeout`, up or down) |
 | `.max_memory(bytes)` | self | Cap the memory the mutation may reserve |
 | `.cancellation_token(token)` | self | Attach a cancellation token |
@@ -619,11 +648,14 @@ Returned by `tx.locy_with(program)`.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.param(name, value)` | self | Bind a parameter |
+| `.params(dict)` | self | Bind multiple parameters |
 | `.timeout(seconds)` | self | Set evaluation timeout |
 | `.max_iterations(n)` | self | Set fixpoint iteration limit |
+| `.max_memory(bytes)` | self | Set memory limit |
 | `.with_config(config)` | self | Apply a `LocyConfig` or config dict |
 | `.cancellation_token(token)` | self | Attach cancellation token |
 | `.run()` | `LocyResult` | Execute the evaluation |
+| `.profile()` | `(LocyResult, LocyProfileOutput)` | Execute with profiling |
 
 As with `SessionLocyBuilder`, cancellation races the whole evaluation and raises
 `UniCancelledError`. `tx.cancel()` applies in addition to any token passed to
@@ -635,7 +667,8 @@ Returned by `tx.apply_with(derived_fact_set)`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `.require_fresh(bool)` | self | Fail if version gap is non-zero |
+| `.require_fresh(bool)` | self | Fail if version gap is non-zero (the default is `True`) |
+| `.allow_stale()` | self | Accept any version gap |
 | `.max_version_gap(n)` | self | Maximum allowed version gap |
 | `.run()` | `ApplyResult` | Execute the apply |
 
@@ -681,7 +714,7 @@ Returned by `schema.label(name)`.
 |--------|---------|-------------|
 | `.property(name, data_type)` | self | Add a required property |
 | `.property_nullable(name, data_type)` | self | Add a nullable property |
-| `.vector(name, dimensions)` | self | Add a vector property |
+| `.vector(name, dimensions)` | self | Add a required (NOT NULL) vector property; use `.property_nullable(name, "vector:N")` for an optional one |
 | `.index(property, index_type)` | self | Add an index on a property |
 | `.done()` | `SchemaBuilder` | Return to parent builder |
 | `.apply()` | `None` | Apply schema changes immediately |
@@ -788,6 +821,7 @@ Returned by `tx.bulk_writer()`. All methods are chainable.
 | `.validate_constraints(bool)` | Enable/disable constraint validation |
 | `.max_buffer_size_bytes(n)` | Maximum in-memory buffer size |
 | `.on_progress(callback)` | Register a progress callback (receives `BulkProgress`) |
+| `.skip_before_triggers(bool)` | Load even though a synchronous before-trigger subscribes to what it writes, without running that trigger (by default such a load is refused) |
 | `.build()` | Build the `BulkWriter` |
 
 #### BulkWriter Methods
@@ -841,7 +875,10 @@ with session.tx() as tx:
 | Method | Description |
 |--------|-------------|
 | `.append(properties)` | Append a single row |
+| `.write_batch(batch)` | Append a PyArrow `RecordBatch` of rows |
+| `.buffered_count()` | Number of rows currently buffered |
 | `.finish()` | Flush remaining rows (returns `BulkStats`) |
+| `.abort()` | Discard the appended rows without committing |
 
 #### TxAppenderBuilder
 
@@ -852,6 +889,7 @@ Returned by `tx.appender_builder(label)`. Configurable variant of `tx.appender()
 | `.batch_size(n)` | Set batch size |
 | `.defer_vector_indexes(bool)` | Defer vector index rebuilds |
 | `.max_buffer_size_bytes(n)` | Maximum buffer size |
+| `.skip_before_triggers(bool)` | As on `TxBulkWriterBuilder` |
 | `.build()` | Build the `StreamingAppender` |
 
 ---
@@ -929,25 +967,32 @@ session.is_forked()      # False on the primary session
 |---|---|---|
 | `list_forks()` | `list[ForkInfo]` | Every known fork |
 | `fork_info(name)` | `ForkInfo \| None` | One fork's metadata |
-| `drop_fork(name)` | `None` | Drop a leaf fork. **Refuses a fork with children** |
-| `drop_fork_cascade(name)` | `None` | Drop a fork and its whole subtree |
+| `drop_fork(name)` | `None` | Drop a leaf fork. **Refuses a fork with children or tags** |
+| `drop_fork_cascade(name)` | `None` | Drop a fork and its whole subtree; refuses if any fork in it has tags |
 
 ### Tags
 
-Tags pin the fork branch's *current* version and survive the drop, which is what
-makes tag-then-drop safe for audit retention.
+Tags pin the fork branch's version. `tag_fork` flushes the fork first, so its
+unflushed writes are in the tagged version, and raises `UniForkLifecycleError`
+(stage `tag`) for a fork that has branched nothing yet. A tagged fork cannot be
+dropped: `drop_fork` raises `UniForkTaggedError` (with `name` and `tags`) and
+leaves the fork as it was, so `untag_fork` each tag first. Tags belong to their
+fork: two forks can use the same tag name, and each lists and removes only its own.
 
 | Method | Returns | Description |
 |---|---|---|
-| `tag_fork(fork_name, tag)` | `None` | Pin the fork's current version |
-| `untag_fork(fork_name, tag)` | `None` | Remove a tag |
-| `list_fork_tags(fork_name)` | `list[str]` | Tags for a fork |
+| `tag_fork(fork_name, tag)` | `None` | Flush the fork and pin its current version |
+| `untag_fork(fork_name, tag)` | `None` | Remove this fork's tag |
+| `list_fork_tags(fork_name)` | `list[str]` | This fork's tags |
 
 ```python
 db.tag_fork("scenario_1", "audit-2026-q1")
+db.list_fork_tags("scenario_1")   # tags of the live fork
+
+# Later: untag, then drop
+db.untag_fork("scenario_1", "audit-2026-q1")
 del fork
 db.drop_fork("scenario_1")
-db.list_fork_tags("scenario_1")   # the tag is still resolvable
 ```
 
 ### Diff and promote
@@ -960,7 +1005,19 @@ db.list_fork_tags("scenario_1")   # the tag is still resolvable
 | `promote_from_fork_with_options(fork_name, patterns, ...)` | `PromoteReport` | As above, with options |
 
 Diff identity is a **content-addressed UID**, not a VID, so sibling forks and
-entirely unrelated forks compare correctly even when their VIDs collide.
+entirely unrelated forks compare correctly even when their VIDs collide. An
+edited row pairs back into `changed` (a `VertexPropertyChange` /
+`EdgePropertyChange` with one `PropertyChange(key, before, after)` per
+property): vertices by `(label, ext_id)` always, and, when one side is the
+other's ancestor (primary against a fork, or a fork against its descendant),
+vertices by inherited `vid` and edges by inherited `eid` too. Ids never pair
+between unrelated forks.
+
+```python
+diff = db.diff_fork_primary("scenario_1")
+for c in diff.vertices.changed:
+    print(c.label, c.ext_id, c.vid, [(p.key, p.before, p.after) for p in c.changes])
+```
 
 Promote runs inside **one** primary transaction across every pattern, so a
 failure on pattern *N* rolls back patterns 1..*N*-1. Mix vertex and edge patterns
@@ -974,8 +1031,11 @@ report = db.promote_from_fork("scenario_1", [
 ])
 ```
 
-A fork-only label or edge type must exist on primary first; promote checks for
-it before opening the transaction and raises rather than half-committing.
+A label or edge type the fork *declared* (through `fork_schema()`) must be
+declared on primary first; promote checks for it before opening the transaction
+and raises `UniLabelNotFoundError` / `UniEdgeTypeNotFoundError` rather than
+half-committing. A schemaless label or edge type (undeclared on both sides) is
+promoted as is.
 
 ---
 
@@ -1064,8 +1124,8 @@ with session.tx() as tx:
 | `.stats` | `LocyStats` | Evaluation statistics |
 | `.command_results` | `list` | One result per command; an ASSUME's `AssumeCommandResult` has `.results` (one per body command), `.derived` and `.rows` |
 | `.warnings` | `list` | Runtime warnings |
-| `.approximate_groups` | `list` | Groups with approximate probabilities |
-| `.derived_fact_set` | `DerivedFactSet` | Opaque fact set for `tx.apply()` |
+| `.approximate_groups` | `dict` | Groups with approximate probabilities: `rule_name -> list[str]` |
+| `.derived_fact_set` | `DerivedFactSet \| None` | Opaque fact set for `tx.apply()`; `None` when there is nothing to apply, and always from `tx.locy(...)`, which writes into its transaction directly |
 | `.rows()` | `list \| None` | Rows from the first QUERY or Cypher command, searching an ASSUME's body results depth first |
 | `.columns()` | `list[str] \| None` | Column names of those rows |
 | `.derived_facts(rule)` | `list \| None` | Facts for a specific rule |
@@ -1180,7 +1240,7 @@ for s in xervo.analyze_sentences("I love it! Did Babbage build the engine?"):
 
 ### Prefetch (Best Practice)
 
-Pre-load models at startup to avoid cold-start latency on first inference. Without prefetch, the first call to `embed()`, `generate()`, or `rerank()` pays the full model load cost (download, session init, warmup).
+Pre-load models at startup to avoid cold-start latency on first inference. Without prefetch, the first call to `embed()`, `generate()`, or a query that reranks pays the full model load cost (download, session init, warmup).
 
 ```python
 xervo = db.xervo()
@@ -1499,7 +1559,7 @@ if result:
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `.rows` | `list[dict]` | Row dictionaries |
+| `.rows` | `list[Row]` | Result rows (`row["col"]`, `row[0]`, `row.to_dict()`) |
 | `.columns` | `list[str]` | Column names |
 | `.metrics` | `QueryMetrics` | Performance metrics |
 | `.warnings` | `list[QueryWarning]` | Execution warnings |
@@ -1783,7 +1843,10 @@ except uni_db.UniError as e:
 | Exception | Description |
 |-----------|-------------|
 | `UniNotFoundError` | Database path does not exist |
-| `UniDatabaseLockedError` | Database is locked by another process |
+| `UniStoreLockedError` | Another handle holds the store open for writing; `holder` names it |
+| `UniWriterFencedError` | This handle lost the store (lease taken over or lapsed, closed, read-only) |
+| `UniStaleWalError` | A hybrid store's local WAL belongs to an earlier writer; `store`, `wal`, `segments` |
+| `UniDatabaseLockedError` | Kept for compatibility; nothing raises it (see `UniStoreLockedError`) |
 
 **Schema:**
 
@@ -1797,6 +1860,8 @@ except uni_db.UniError as e:
 | `UniLabelAlreadyExistsError` | Label already exists |
 | `UniEdgeTypeAlreadyExistsError` | Edge type already exists |
 | `UniConstraintError` | Constraint violation |
+| `UniEdgeEndpointError` | Subclass of `UniConstraintError`: an edge's endpoint lacks every label its edge type allows; `edge_type`, `endpoint`, `labels`, `allowed` |
+| `UniEdgeIdentityError` | Subclass of `UniConstraintError`: a `SET` / `REMOVE` on a relationship named other endpoints or another type; `eid`, `stored`, `requested` |
 | `UniInvalidIdentifierError` | Invalid identifier name |
 
 **Query & Parse:**
@@ -1805,6 +1870,7 @@ except uni_db.UniError as e:
 |-----------|-------------|
 | `UniParseError` | Cypher or Locy parse error |
 | `UniQueryError` | Query execution error |
+| `UniParameterMissingError` | Subclass of `UniQueryError`: the query refers to a `$parameter` the call did not supply; `names` |
 | `UniTypeError` | Type mismatch error |
 
 **Transaction:**
@@ -1812,10 +1878,13 @@ except uni_db.UniError as e:
 | Exception | Description |
 |-----------|-------------|
 | `UniTransactionError` | General transaction error |
+| `UniUncommittedWritesError` | Subclass of `UniTransactionError`: the operation cannot run in a transaction holding uncommitted writes; `operation`, `reason` |
 | `UniTransactionConflictError` | Transaction serialization conflict |
 | `UniTransactionAlreadyCompletedError` | Transaction already committed or rolled back |
 | `UniTransactionExpiredError` | Transaction exceeded its deadline |
 | `UniCommitTimeoutError` | Commit timed out waiting for writer lock |
+| `UniConstraintConflictError` | Commit-time uniqueness race (e.g. concurrent `MERGE` on the same key); retriable |
+| `UniLockTimeoutError` | Timed out waiting for a `FOR UPDATE` row lock; retriable |
 
 **Resource Limits:**
 
@@ -1823,6 +1892,7 @@ except uni_db.UniError as e:
 |-----------|-------------|
 | `UniMemoryLimitExceededError` | Query exceeded memory limit |
 | `UniTimeoutError` | Operation timed out |
+| `UniWriteStalledError` | Writes stopped at the write throttle's hard limit with compaction disabled; `l1_runs`, `hard_limit` |
 | `UniRegexBacktrackLimitError` | A `=~` match exceeded `regex_backtrack_limit`; carries `pattern` and `limit` |
 
 **Access Control:**
@@ -1868,6 +1938,30 @@ except uni_db.UniError as e:
 | `UniHookRejectedError` | A session hook rejected the operation |
 | `UniLocyCompileError` | Locy program compilation error |
 | `UniLocyRuntimeError` | Locy program runtime error |
+| `UniLocyIncompleteError` | Evaluation stopped early (timeout or iteration/depth limit); `reason`, `elapsed_ms`, `limit_ms`, `max_iterations`, `completed_strata`, `total_strata`, `incomplete_rules`, `skipped_rules`, `complement_rules_affected` |
+
+**Bulk Loading:**
+
+| Exception | Description |
+|-----------|-------------|
+| `UniBulkCommitIncompleteError` | The load is committed but its publish was not finished; it completes in the background or on the next open. Do not retry. `load_id`, `reason` |
+| `UniBulkCommitOutcomeUnknownError` | Whether the load committed is unknown; reopen and check `bulk_load_applied(load_id)` before retrying. `load_id`, `reason` |
+
+**Forks:**
+
+| Exception | Description |
+|-----------|-------------|
+| `UniForkNotFoundError` | No fork with that name; `name` |
+| `UniForkAlreadyExistsError` | A fork with that name already exists; `name` |
+| `UniForkInUseError` | Drop refused while forked sessions are alive; `name`, `holder_count` |
+| `UniForkInflightTxError` | Drop refused while a transaction on the fork has uncommitted mutations; `name` |
+| `UniForkHasChildrenError` | `drop_fork` refused because the fork has nested children; `name`, `children` |
+| `UniForkSubtreeInUseError` | `drop_fork_cascade` refused because the subtree has live sessions or open transactions; `blockers` |
+| `UniForkTaggedError` | `drop_fork` / `drop_fork_cascade` refused because a fork has tags; nothing is dropped. `name`, `tags` |
+| `UniForkBudgetExceededError` | Fork creation refused at the `max_forks` cap; `current`, `max` |
+| `UniForkCorruptRegistryError` | The fork registry on disk is malformed |
+| `UniForkLifecycleError` | A step of a fork create, open or drop failed; `name`, `stage` |
+| `UniRestoreBlockedByForksError` | `restore_snapshot` refused because the database has forks; `forks` lists them |
 
 ---
 
@@ -1883,7 +1977,8 @@ The async API mirrors the sync API. All classes are prefixed with `Async` and me
 | `Transaction` | `AsyncTransaction` |
 
 ```python
-async with uni_db.AsyncUni.open("./graph") as db:
+db = await uni_db.AsyncUni.open("./graph")
+async with db:
     session = db.session()
 
     # Reads

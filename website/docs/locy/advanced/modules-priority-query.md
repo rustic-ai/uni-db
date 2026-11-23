@@ -2,28 +2,61 @@
 
 ## Modules
 
-Modules package reusable rule libraries.
+`MODULE` gives a program's rules a namespace. Each rule is stored under its
+qualified name (`acme.compliance.control` in `.derived`), and inside the
+program it can be referenced by its short or its fully qualified name:
 
-<!-- doctest: skip -->
-```cypher
+```locy
 MODULE acme.compliance
-USE acme.common
+CREATE RULE control AS MATCH (a)-[:OWNS]->(b) YIELD KEY a, KEY b
+QUERY acme.compliance.control RETURN b
 ```
+
+`USE` imports rules from a module registered with `rules().register`:
+`USE acme.compliance` imports all of its rules under their short names, and
+`USE acme.compliance { control }` only the listed ones.
+
+```python
+db.rules().register("""
+MODULE acme.compliance
+CREATE RULE control AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY a, KEY b
+""")
+
+result = db.session().locy("""
+USE acme.compliance { control }
+CREATE RULE controller AS
+  MATCH (a:Company)-[:OWNS]->(b:Company) WHERE (a, b) IS control YIELD KEY a
+QUERY controller RETURN a.name AS name
+""")
+```
+
+An unregistered module fails to compile with `ModuleNotFound`, and a listed rule
+the module does not define with `ImportNotFound`. A program sees the modules of
+the registry it runs against: those registered on the database, plus, for a
+session, those registered on it. A registered program may itself `USE` a module
+registered before it, and the module map is rebuilt from the registered sources
+when the database reopens.
 
 Benefits:
 
-- Reuse and composition.
 - Namespace separation.
 - Cleaner policy/rule governance.
 
 ## PRIORITY
 
-Priority resolves competing clauses for the same rule relation.
+Priority resolves competing clauses for the same rule relation. For each KEY
+group, only the rows from the clauses with the **highest** priority number that
+produced a row for that key are kept; clauses of equal priority both contribute.
+If one clause of a rule has a `PRIORITY`, every clause must (`MixedPriority`
+otherwise).
 
 ```locy
-CREATE RULE classify PRIORITY 1 AS MATCH (n) WHERE n.risk > 0.8 YIELD KEY n, 'high' AS level
-CREATE RULE classify PRIORITY 2 AS MATCH (n) YIELD KEY n, 'normal' AS level
+CREATE RULE classify PRIORITY 2 AS MATCH (n) WHERE n.risk > 0.8 YIELD KEY n, 'high' AS level
+CREATE RULE classify PRIORITY 1 AS MATCH (n) YIELD KEY n, 'normal' AS level
 ```
+
+A node with `risk > 0.8` is matched by both clauses and keeps `'high'`; every
+other node keeps `'normal'`.
 
 ## QUERY
 

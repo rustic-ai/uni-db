@@ -24,6 +24,7 @@ pub mod publish_sequencer;
 pub(crate) mod sync;
 pub mod vid_remapper;
 pub mod wal;
+pub mod wal_lineage;
 pub mod working_graph;
 pub mod writer;
 

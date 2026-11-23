@@ -1292,10 +1292,11 @@ impl Database {
         }
     }
 
-    /// Flush data and prepare for shutdown.
+    /// Shut the database down: flush, stop background tasks, release the store.
     ///
-    /// Calls `flush()` for data safety. The actual shutdown occurs when the
-    /// last reference is dropped (Python GC triggers Rust `Drop`).
+    /// Waits for every background task to stop, then gives up the writer lock
+    /// or lease, so another handle can open the store for writing at once. A
+    /// flush failure is logged, not raised.
     fn shutdown(&self, py: Python<'_>) -> PyResult<()> {
         // Really shut down, rather than flushing and calling it one. Flushing
         // left the background tasks running and the teardown to `Drop` at GC

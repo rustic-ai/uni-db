@@ -71,6 +71,7 @@ _EXC_INSTANCE_ATTRS: dict[str, set[str]] = {
     "UniForkInUseError": {"name", "holder_count"},
     "UniForkInflightTxError": {"name"},
     "UniForkHasChildrenError": {"name", "children"},
+    "UniForkTaggedError": {"name", "tags"},
     "UniForkSubtreeInUseError": {"blockers"},
     "UniRestoreBlockedByForksError": {"forks"},
     "UniSnapshotNotFoundError": {"snapshot_id"},
@@ -82,6 +83,9 @@ _EXC_INSTANCE_ATTRS: dict[str, set[str]] = {
     "UniParameterMissingError": {"names"},
     "UniUncommittedWritesError": {"operation", "reason"},
     "UniForkLifecycleError": {"name", "stage"},
+    "UniStoreLockedError": {"store", "holder"},
+    "UniStaleWalError": {"store", "wal", "segments"},
+    "UniWriterFencedError": {"reason"},
     "UniBulkCommitIncompleteError": {"load_id", "reason"},
     "UniBulkCommitOutcomeUnknownError": {"load_id", "reason"},
     "UniLocyIncompleteError": {

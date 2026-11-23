@@ -476,7 +476,8 @@ def python_to_db_value(value: Any, type_hint: Any) -> Any:
 
     Passes datetime/date/time/timedelta through to the Rust layer which
     converts them to proper Value::Temporal types. Converts Vector to
-    list[float] and passes through everything else.
+    list[float], SparseVector to ``uni_db.SparseVector``, and passes through
+    everything else.
     """
     if value is None:
         return None
@@ -488,6 +489,16 @@ def python_to_db_value(value: Any, type_hint: Any) -> Any:
     # Vector → list[float]
     if isinstance(value, Vector):
         return value.values
+
+    # SparseVector → the Rust uni_db.SparseVector (Value::SparseVector)
+    if isinstance(value, SparseVector):
+        if _PySparseVector is None:
+            raise TypeMappingError(
+                type(value),
+                "saving a SparseVector field needs uni_db.SparseVector, "
+                "which this uni_db build does not provide",
+            )
+        return _PySparseVector(value.indices, value.values)
 
     # Btic → unwrap to the Rust PyBtic for py_object_to_value
     if isinstance(value, Btic):

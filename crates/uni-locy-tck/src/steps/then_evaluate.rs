@@ -1932,3 +1932,59 @@ async fn command_result_explain_all_children_have_proof_probability(
         ),
     }
 }
+
+/// Every input a recording mock received carried `feature` as one of the
+/// listed Float values, and each listed value was received at least once.
+#[then(
+    regex = r#"^classifier ['"](.+)['"] should have received Float feature ['"](.+)['"] values (.+)$"#
+)]
+async fn classifier_received_float_values(
+    world: &mut LocyWorld,
+    name: String,
+    feature: String,
+    values: String,
+) {
+    let expected: Vec<f64> = values
+        .split(',')
+        .map(|v| v.trim().parse().expect("a Float value"))
+        .collect();
+    let seen = world
+        .classifier_inputs
+        .get(&name)
+        .unwrap_or_else(|| panic!("no recording classifier registered as '{name}'"))
+        .lock()
+        .expect("recording lock")
+        .clone();
+    assert!(!seen.is_empty(), "classifier '{name}' received no inputs");
+    let received: Vec<f64> = seen
+        .iter()
+        .map(|input| match input.features.get(&feature) {
+            Some(uni_locy::FeatureValue::Float(v)) => *v,
+            other => panic!("classifier '{name}' received {feature} = {other:?}, expected a Float"),
+        })
+        .collect();
+    for v in &received {
+        assert!(
+            expected.iter().any(|e| (e - v).abs() < 1e-9),
+            "classifier '{name}' received {feature} = {v}, expected one of {expected:?}"
+        );
+    }
+    for e in &expected {
+        assert!(
+            received.iter().any(|v| (e - v).abs() < 1e-9),
+            "classifier '{name}' never received {feature} = {e}; got {received:?}"
+        );
+    }
+}
+
+#[then(
+    regex = r#"^the calibration result for ['"](.+)['"] should have raw_brier less than ([0-9]*\.?[0-9]+)$"#
+)]
+async fn calibration_raw_brier_below(world: &mut LocyWorld, model_name: String, bound: f64) {
+    let result = find_calibration(world, &model_name);
+    assert!(
+        result.raw_brier < bound,
+        "expected raw_brier < {bound}, got {}",
+        result.raw_brier
+    );
+}

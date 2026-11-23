@@ -34,6 +34,9 @@ fn create_test_manifest(id: &str) -> SnapshotManifest {
         edges: HashMap::new(),
         writer_features: Vec::new(),
         unpublished_bulk_versions: Vec::new(),
+        next_vid: None,
+        next_eid: None,
+        tables: Default::default(),
     }
 }
 

@@ -9,8 +9,9 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::similar_to::{
-    F32Rows, FusionMethod, SimilarToOptions, fuse_scores, normalize_bm25, parse_options,
-    score_vectors, validate_options, value_to_f32_vec,
+    F32Rows, FusionMethod, SimilarToOptions, as_multivector, eval_sparse_similar_to_pure,
+    fuse_scores, maxsim, normalize_bm25, parse_options, score_vectors, validate_options,
+    value_to_f32_vec,
 };
 use crate::types::QueryWarning;
 use arrow_array::builder::Float64Builder;
@@ -271,6 +272,11 @@ enum ScoringMode {
     AutoEmbed(DistanceMetric),
     /// Both are strings → FTS search once, VID lookup per-row.
     Fts,
+    /// Both are sparse vectors → dot product per-row.
+    Sparse,
+    /// Both are multi-vectors (lists of vectors) → MaxSim per-row: each query
+    /// token's best match in the document, summed.
+    MultiVector(DistanceMetric),
     /// Source or query is NULL → the row's result is NULL (no scoring/fusion).
     Null,
 }
@@ -459,7 +465,10 @@ impl PhysicalExpr for SimilarToExecExpr {
                         }
                         // No pre-computation needed for direct vector scoring
                         // or NULL-propagating sources.
-                        ScoringMode::Vector(_) | ScoringMode::Null => {}
+                        ScoringMode::Vector(_)
+                        | ScoringMode::Sparse
+                        | ScoringMode::MultiVector(_)
+                        | ScoringMode::Null => {}
                     }
                 }
 
@@ -515,6 +524,21 @@ impl PhysicalExpr for SimilarToExecExpr {
                                 e
                             ))
                         })?
+                    }
+                    ScoringMode::Sparse => score_sparse_from_values(&row_source, &row_query)
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "similar_to sparse: {e}"
+                            ))
+                        })?,
+                    ScoringMode::MultiVector(metric) => {
+                        score_multivector_from_values(&row_source, &row_query, metric).map_err(
+                            |e| {
+                                datafusion::error::DataFusionError::Execution(format!(
+                                    "similar_to multi-vector: {e}"
+                                ))
+                            },
+                        )?
                     }
                     ScoringMode::AutoEmbed(metric) => {
                         let sv = row_source;
@@ -629,6 +653,12 @@ fn determine_scoring_mode(
         return Ok(ScoringMode::Null);
     }
     let m = metric.cloned().unwrap_or(DistanceMetric::Cosine);
+    if is_sparse_operand(source) && is_sparse_operand(query) {
+        return Ok(ScoringMode::Sparse);
+    }
+    if as_multivector(source).is_some() && as_multivector(query).is_some() {
+        return Ok(ScoringMode::MultiVector(m));
+    }
     match (source, query) {
         (Value::Vector(_) | Value::List(_), Value::Vector(_) | Value::List(_)) => {
             Ok(ScoringMode::Vector(m))
@@ -644,6 +674,37 @@ fn determine_scoring_mode(
             std::mem::discriminant(query)
         )),
     }
+}
+
+/// A sparse vector, or the `{indices, values}` map a sparse parameter or
+/// literal arrives as.
+fn is_sparse_operand(v: &Value) -> bool {
+    match v {
+        Value::SparseVector { .. } => true,
+        Value::Map(m) => m.len() == 2 && m.contains_key("indices") && m.contains_key("values"),
+        _ => false,
+    }
+}
+
+/// The sparse dot product of one row, as `similar_to` scores a sparse pair.
+fn score_sparse_from_values(source: &Value, query: &Value) -> Result<f32, String> {
+    match eval_sparse_similar_to_pure(source, query).map_err(|e| e.to_string())? {
+        Value::Float(f) => Ok(f as f32),
+        other => Err(format!("unexpected sparse score {other:?}")),
+    }
+}
+
+/// MaxSim of one row: `query` and `source` are lists of vectors.
+fn score_multivector_from_values(
+    source: &Value,
+    query: &Value,
+    metric: &DistanceMetric,
+) -> Result<f32, String> {
+    let read = |v: &Value| match as_multivector(v) {
+        Some(tokens) => tokens.map_err(|e| e.to_string()),
+        None => Err("expected a list of vectors on both sides".to_string()),
+    };
+    maxsim(&read(query)?, &read(source)?, metric).map_err(|e| e.to_string())
 }
 
 /// Scores `source` against `query` row by row without leaving Arrow.

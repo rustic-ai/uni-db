@@ -395,12 +395,15 @@ pub enum LocyCommand {
     /// Pass-through Cypher statement.
     Cypher { query: Query },
     /// Phase C C2: `CALIBRATE` statement. Carries a snapshot of the
-    /// referenced model's input bindings so the runtime can build
-    /// `ClassifyInput`s without needing access to the full
+    /// referenced model's input bindings and FEATURES expressions so the
+    /// runtime can build `ClassifyInput`s without needing access to the full
     /// `CompiledProgram.model_catalog`.
     Calibrate {
         calibrate: uni_locy::CompiledCalibrate,
         model_inputs: Vec<uni_locy::CompiledInputBinding>,
+        /// The model's FEATURES, one per INPUT binding by position; empty
+        /// when the model declares none.
+        model_features: Vec<uni_cypher::ast::Expr>,
     },
     /// Phase C C3: `VALIDATE` statement. The compiled form already
     /// carries the rule's PROB column name; no auxiliary snapshot is

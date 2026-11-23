@@ -34,7 +34,7 @@ impl GraphAlgoAdapter for DijkstraAdapter {
         // single row is emitted carrying the path; otherwise one row per
         // reachable node with an empty `path` is emitted (SSSP mode).
         vec![
-            ("nodeId", ValueType::Node),
+            ("nodeId", ValueType::Int),
             ("distance", ValueType::Float),
             ("path", ValueType::List),
         ]

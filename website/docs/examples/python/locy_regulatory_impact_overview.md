@@ -12,7 +12,7 @@ Compliance teams maintain the regulation-to-obligation-to-control-to-process-to-
 
 ## With Uni
 
-The notebook evaluates the full 6-hop dependency chain declaratively: regulation creates obligation, obligation requires control, control protects process, process runs on system, system depends on vendor. Risk accumulates through noisy-OR aggregation — each regulation that creates risk for a system independently increases that system's exposure score. Semantic matching identifies controls that partially cover obligations even without explicit mappings, surfacing coverage gaps and near-misses. What-if scenarios remediate a control and recompute system exposure instantly. Minimal-change search finds the cheapest set of dependency-chain changes that bring a flagged system below its risk threshold.
+The notebook evaluates the full 6-hop dependency chain declaratively: regulation creates obligation, obligation requires control, control protects process, process runs on system, system depends on vendor. Risk accumulates through noisy-OR aggregation — each regulation that creates risk for a system independently increases that system's exposure score. Semantic matching identifies controls that partially cover obligations even without explicit mappings, surfacing coverage gaps and near-misses. What-if scenarios remediate a control and recompute system exposure instantly. `ABDUCE` proposes single dependency-chain edits, each validated and ranked by cost, that would bring a flagged system below its risk threshold.
 
 ## What You'll See
 

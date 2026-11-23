@@ -202,6 +202,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Check if a table exists.
     async fn table_exists(&self, name: &str) -> Result<bool>;
 
+    /// Fails once the handle's write fence has tripped (a lost lease, a
+    /// closed or read-only handle). A backend whose commits do not pass
+    /// through one that checks it (a fork's branches) checks it here before
+    /// each write.
+    fn check_write_fence(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Create a new table with initial data batches.
     async fn create_table(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()>;
 
@@ -350,6 +358,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// undo a visible write.
     fn stages_invisibly(&self) -> bool {
         false
+    }
+
+    /// Attaches the store's read cut: every commit this backend makes from
+    /// now on records the version it produced there, and fails (tripping the
+    /// write fence) on meeting a version this handle did not write. A no-op
+    /// for a backend without table versions.
+    fn attach_read_cut(&self, cut: Arc<crate::storage::read_cut::ReadCut>) {
+        let _ = cut;
     }
 
     /// Write `batches` into `table_name`'s storage without publishing them.
@@ -669,7 +685,9 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// once they are flushed made the ranking, and which rows made the top
     /// `k`, change at the flush. `filter` applies to stored rows; the caller
     /// filters the unstored documents. A document that does not match is
-    /// absent. `table` need not exist yet.
+    /// absent. `table` need not exist yet. `analyzer` is the declared
+    /// full-text index's tokenizer, used for documents no built index covers
+    /// yet, so that they are tokenized as the index will tokenize them.
     ///
     /// The default runs [`Self::full_text_search`] and scores an unstored
     /// document by the fraction of query words it contains (lowercased,
@@ -687,8 +705,10 @@ pub trait StorageBackend: Send + Sync + 'static {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
         counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<TextSearch> {
+        let _ = analyzer;
         let stored = if self.table_exists(table).await? {
             self.full_text_search(table, column, query, k, filter, counters)
                 .await?

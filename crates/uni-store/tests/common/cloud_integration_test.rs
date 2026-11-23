@@ -77,7 +77,7 @@ fn test_cloud_storage_config_azure() {
     };
 
     assert_eq!(config.bucket_name(), "mycontainer");
-    assert_eq!(config.to_url(), "az://myaccount/mycontainer");
+    assert_eq!(config.to_url(), "az://mycontainer");
 }
 
 #[tokio::test]
@@ -85,7 +85,7 @@ async fn test_build_store_from_local_path() -> Result<()> {
     let temp_dir = tempdir()?;
     let path = temp_dir.path().to_str().unwrap();
 
-    let (store, prefix) = build_store_from_url(path)?;
+    let (store, prefix) = build_store_from_url(path).await?;
     assert!(prefix.as_ref().is_empty());
 
     // Test basic put/get operations
@@ -106,7 +106,7 @@ async fn test_build_store_from_file_url() -> Result<()> {
     let path = temp_dir.path().to_str().unwrap();
     let file_url = format!("file://{}", path);
 
-    let (store, prefix) = build_store_from_url(&file_url)?;
+    let (store, prefix) = build_store_from_url(&file_url).await?;
     assert!(prefix.as_ref().is_empty());
 
     // Verify the store works
@@ -590,7 +590,7 @@ async fn test_s3_url_parsing() -> Result<()> {
         std::env::set_var("AWS_ENDPOINT_URL", "http://localhost:4566");
     }
 
-    let (store, prefix) = build_store_from_url("s3://url-test-bucket/data")?;
+    let (store, prefix) = build_store_from_url("s3://url-test-bucket/data").await?;
 
     assert_eq!(prefix.as_ref(), "data");
 

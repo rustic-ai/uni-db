@@ -25,13 +25,30 @@ pub mod repl;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+    /// Object-store option for a store opened at an `s3://`, `gs://` or
+    /// `az://` path, as KEY=VALUE (for example `aws_endpoint=http://localhost:9000`).
+    /// Repeatable. Overrides the environment (`AWS_*`, `GOOGLE_*`, `AZURE_*`).
+    #[arg(long = "storage-option", global = true, value_name = "KEY=VALUE", value_parser = parse_storage_option)]
+    storage_options: Vec<(String, String)>,
 }
+
+/// Parses one `--storage-option KEY=VALUE`.
+fn parse_storage_option(raw: &str) -> std::result::Result<(String, String), String> {
+    match raw.split_once('=') {
+        Some((k, v)) if !k.trim().is_empty() => Ok((k.trim().to_string(), v.to_string())),
+        // The value may be a secret: never echo it.
+        _ => Err("expected KEY=VALUE".to_string()),
+    }
+}
+
+/// The datasets `uni import <name>` can load.
+const IMPORTERS: &[&str] = &["semantic-scholar"];
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Import data from JSONL
+    /// Import a dataset from JSONL with a built-in importer
     Import {
-        /// Dataset name (e.g. semantic-scholar)
+        /// Importer to run (available: semantic-scholar)
         name: String,
         /// Path to papers JSONL
         #[arg(long)]
@@ -46,31 +63,31 @@ enum Commands {
     /// Run a query
     Query {
         statement: String,
-        /// Path to DB storage
+        /// Path or object-store URI (s3://, gs://, az://, file://) of the DB
         #[arg(long, default_value = "./storage")]
-        path: PathBuf,
+        path: String,
     },
     /// Start the interactive REPL
     Repl {
-        /// Path to DB storage
+        /// Path or object-store URI (s3://, gs://, az://, file://) of the DB
         #[arg(long, default_value = "./storage")]
-        path: PathBuf,
+        path: String,
     },
     /// Manage snapshots
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCmd,
-        /// Path to DB storage
+        /// Path or object-store URI (s3://, gs://, az://, file://) of the DB
         #[arg(long, default_value = "./storage")]
-        path: PathBuf,
+        path: String,
     },
     /// Manage runtime-loaded plugins
     Plugin {
         #[command(subcommand)]
         command: PluginCmd,
-        /// Path to DB storage
+        /// Path or object-store URI (s3://, gs://, az://, file://) of the DB
         #[arg(long, default_value = "./storage")]
-        path: PathBuf,
+        path: String,
     },
 }
 
@@ -119,8 +136,9 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
+    let storage_options = cli.storage_options;
     let command = cli.command.unwrap_or(Commands::Repl {
-        path: PathBuf::from("./storage"),
+        path: "./storage".to_string(),
     });
 
     match command {
@@ -129,13 +147,21 @@ async fn main() -> Result<()> {
             papers,
             citations,
             output,
-        } => {
-            println!("Importing dataset '{name}'...");
-            crate::demo::semantic_scholar::import_semantic_scholar(&papers, &citations, &output)
+        } => match name.as_str() {
+            "semantic-scholar" => {
+                println!("Importing dataset '{name}'...");
+                crate::demo::semantic_scholar::import_semantic_scholar(
+                    &papers, &citations, &output,
+                )
                 .await?;
-        }
+            }
+            _ => anyhow::bail!(
+                "unknown importer '{name}'; available importers: {}",
+                IMPORTERS.join(", ")
+            ),
+        },
         Commands::Query { statement, path } => {
-            let db = open_db(&path).await?;
+            let db = open_db(&path, &storage_options).await?;
             let succeeded = repl::execute_query(&db, &statement).await;
             // Close before exiting: `std::process::exit` runs no destructors, and
             // the durability flush lives in shutdown rather than in `Drop`.
@@ -147,13 +173,13 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Repl { path } => {
-            let db = open_db(&path).await?;
+            let db = open_db(&path, &storage_options).await?;
             let outcome = repl::run_repl(&db).await;
             close_db(db).await?;
             outcome?;
         }
         Commands::Plugin { command, path } => {
-            let db = open_db(&path).await?;
+            let db = open_db(&path, &storage_options).await?;
             let outcome = match command {
                 PluginCmd::Install { source, grants } => {
                     install_plugin(&db, &source, grants.as_deref()).await
@@ -163,7 +189,7 @@ async fn main() -> Result<()> {
             outcome?;
         }
         Commands::Snapshot { command, path } => {
-            let db = open_db(&path).await?;
+            let db = open_db(&path, &storage_options).await?;
             let outcome = run_snapshot_command(&db, command).await;
             close_db(db).await?;
             outcome?;
@@ -245,11 +271,17 @@ async fn close_db(db: uni_db::Uni) -> Result<()> {
 
 /// Open the database at `path` with the CLI's standard settings.
 ///
+/// `path` is a local directory or an object-store URI; `storage_options`
+/// configure the object-store client (see `--storage-option`).
+///
 /// # Errors
 ///
 /// Returns an error if the storage at `path` cannot be opened or built.
-async fn open_db(path: &std::path::Path) -> Result<uni_db::Uni> {
-    Ok(uni_db::Uni::open(path.to_string_lossy()).build().await?)
+async fn open_db(path: &str, storage_options: &[(String, String)]) -> Result<uni_db::Uni> {
+    Ok(uni_db::Uni::open(path)
+        .storage_options(storage_options.iter().cloned())
+        .build()
+        .await?)
 }
 
 /// Dispatch `uni plugin install <source>` by extension / scheme.
@@ -362,4 +394,57 @@ fn parse_grants(grants: Option<&str>) -> CapabilitySet {
         }
     }
     set
+}
+
+#[cfg(test)]
+mod storage_option_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn storage_options_parse_and_repeat() {
+        let cli = Cli::try_parse_from([
+            "uni",
+            "query",
+            "RETURN 1",
+            "--path",
+            "s3://bucket/graph",
+            "--storage-option",
+            "aws_endpoint=http://localhost:9000",
+            "--storage-option",
+            "aws_region=us-east-1",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.storage_options,
+            vec![
+                (
+                    "aws_endpoint".to_string(),
+                    "http://localhost:9000".to_string()
+                ),
+                ("aws_region".to_string(), "us-east-1".to_string()),
+            ]
+        );
+        match cli.command {
+            Some(Commands::Query { path, .. }) => assert_eq!(path, "s3://bucket/graph"),
+            _ => panic!("expected a query command"),
+        }
+    }
+
+    #[test]
+    fn a_value_may_contain_equals_signs() {
+        assert_eq!(
+            parse_storage_option("azure_storage_sas_key=sv=1&sig=a=b").unwrap(),
+            (
+                "azure_storage_sas_key".to_string(),
+                "sv=1&sig=a=b".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_malformed_option_is_rejected() {
+        assert!(parse_storage_option("no-equals").is_err());
+        assert!(parse_storage_option("=value").is_err());
+    }
 }

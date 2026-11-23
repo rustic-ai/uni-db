@@ -577,6 +577,23 @@ class TestTransaction:
         found = session.get(Person, email="alice@test.com")
         assert found is None
 
+    def test_rollback_after_commit_keeps_committed_nodes(self, session):
+        """An error after an explicit commit does not detach committed nodes."""
+        session.register(Person)
+        session.sync_schema()
+
+        with pytest.raises(ValueError, match="after commit"):
+            with session.transaction() as tx:
+                alice = Person(name="Alice", email="alice@test.com")
+                tx.add(alice)
+                tx.commit()
+                raise ValueError("after commit")
+
+        assert alice.is_persisted
+        assert alice.vid is not None
+        found = session.get(Person, email="alice@test.com")
+        assert found is alice
+
 
 class TestLifecycleHooks:
     """Tests for lifecycle hooks."""
@@ -972,3 +989,128 @@ def test_repr_treats_id_zero_as_saved():
         {"since": date(2020, 1, 1)}, eid=0, src_vid=0, dst_vid=1
     )
     assert "eid=0" in repr(edge)
+
+
+class TestOptionalVectorField:
+    """`Vector[N] | None` is a nullable vector column."""
+
+    def test_optional_vector_saves_null_and_value(self, session):
+        class Note(UniNode):
+            __label__ = "Note"
+            title: str
+            emb: Vector[2] | None = Field(default=None, metric="cosine")
+
+        session.register(Note)
+        session.sync_schema()
+
+        bare = Note(title="bare")
+        full = Note(title="full", emb=Vector[2]([1.0, 0.0]))
+        session.add_all([bare, full])
+        session.commit()
+        session._db.flush()
+
+        assert session.get(Note, vid=bare.vid).emb is None
+        assert session.get(Note, vid=full.vid).emb == Vector[2]([1.0, 0.0])
+
+        # The vector index still serves queries when some rows are null.
+        hits = session.query(Note).vector_search("emb", [1.0, 0.0], k=2).all()
+        assert [h.title for h in hits] == ["full"]
+
+
+class TestSparseVectorField:
+    """`SparseVector[N]` fields persist and round-trip."""
+
+    def test_sparse_vector_roundtrip(self, session):
+        from uni_pydantic import SparseVector
+
+        class Doc(UniNode):
+            __label__ = "SparseDoc"
+            title: str
+            terms: SparseVector[100]
+
+        session.register(Doc)
+        session.sync_schema()
+
+        doc = Doc(title="a", terms={3: 1.5, 7: 0.5})
+        session.add(doc)
+        session.commit()
+        session._db.flush()
+
+        found = session.get(Doc, vid=doc.vid)
+        assert found is not None
+        assert found.terms == SparseVector[100]([3, 7], [1.5, 0.5])
+
+        hits = session.query(Doc).sparse_search("terms", {3: 1.0}, k=1).all()
+        assert [h.title for h in hits] == ["a"]
+
+    def test_sparse_vector_without_binding_raises(self, monkeypatch):
+        from uni_pydantic import SparseVector, types
+        from uni_pydantic.exceptions import TypeMappingError
+
+        monkeypatch.setattr(types, "_PySparseVector", None)
+        with pytest.raises(TypeMappingError, match="SparseVector"):
+            types.python_to_db_value(SparseVector[10]([1], [1.0]), SparseVector[10])
+
+
+class TestTransactionEdges:
+    """Edges between nodes added in the same transaction."""
+
+    def test_create_edge_on_pending_nodes(self, session):
+        session.register(Person)
+        session.sync_schema()
+
+        with session.transaction() as tx:
+            alice = Person(name="Alice", email="alice@test.com")
+            bob = Person(name="Bob", email="bob@test.com")
+            tx.add(alice)
+            tx.add(bob)
+            tx.create_edge(alice, "FRIEND_OF", bob)
+
+        assert alice.is_persisted and bob.is_persisted
+        session._db.flush()
+        rows = session.cypher(
+            "MATCH (a:Person)-[:FRIEND_OF]->(b:Person) RETURN a.name AS a, b.name AS b"
+        )
+        assert [(r["a"], r["b"]) for r in rows] == [("Alice", "Bob")]
+
+    def test_create_edge_rejects_node_outside_transaction(self, session):
+        from uni_pydantic import NotPersisted
+
+        session.register(Person)
+        session.sync_schema()
+
+        with session.transaction() as tx:
+            alice = Person(name="Alice", email="alice@test.com")
+            tx.add(alice)
+            stranger = Person(name="Stranger", email="s@test.com")
+            with pytest.raises(NotPersisted):
+                tx.create_edge(alice, "FRIEND_OF", stranger)
+
+    def test_failed_commit_detaches_created_nodes(self, session):
+        from uni_pydantic import TransactionError
+
+        session.register(Person)
+
+        class Refused(UniNode):
+            __label__ = "Refused"
+            name: str
+
+            @before_create
+            def refuse(self):
+                raise RuntimeError("refused")
+
+        session.register(Refused)
+        session.sync_schema()
+
+        alice = Person(name="Alice", email="alice@test.com")
+        bob = Person(name="Bob", email="bob@test.com")
+        with pytest.raises(TransactionError):
+            with session.transaction() as tx:
+                tx.add(alice)
+                tx.add(bob)
+                tx.add(Refused(name="r"))
+
+        assert not alice.is_persisted
+        assert not bob.is_persisted
+        assert not any(v is alice or v is bob for v in session._identity_map.values())
+        assert session.get(Person, email="alice@test.com") is None

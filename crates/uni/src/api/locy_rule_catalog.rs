@@ -59,6 +59,8 @@ pub struct LocyRulePersister {
     store: Arc<dyn ObjectStore>,
     path: ObjectStorePath,
     save_gate: tokio::sync::Mutex<()>,
+    /// Whether the handle may still write.
+    fence: Option<Arc<uni_store::lease::WriteFence>>,
 }
 
 impl LocyRulePersister {
@@ -68,7 +70,14 @@ impl LocyRulePersister {
             store,
             path,
             save_gate: tokio::sync::Mutex::new(()),
+            fence: None,
         }
+    }
+
+    /// Gates saves on `fence`: a read-only or closed handle persists no rule.
+    pub(crate) fn with_fence(mut self, fence: Arc<uni_store::lease::WriteFence>) -> Self {
+        self.fence = Some(fence);
+        self
     }
 
     /// Persists the registry's current sources to `catalog/locy_rules.json`.
@@ -83,6 +92,12 @@ impl LocyRulePersister {
     /// Returns [`UniError::Internal`] if serialization or the object-store
     /// write fails.
     pub(crate) async fn save(&self, registry: &std::sync::RwLock<LocyRuleRegistry>) -> Result<()> {
+        if let Some(fence) = &self.fence {
+            fence.check().map_err(|e| match e.downcast::<UniError>() {
+                Ok(typed) => typed,
+                Err(other) => UniError::Internal(other),
+            })?;
+        }
         let _gate = self.save_gate.lock().await;
         let file = {
             let reg = registry

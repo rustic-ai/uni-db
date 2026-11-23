@@ -79,6 +79,7 @@ CONSTRAINT = @{ ^"constraint" ~ !ident_char }
 CONSTRAINTS = @{ ^"constraints" ~ !ident_char }
 VECTOR    = @{ ^"vector" ~ !ident_char }
 FULLTEXT  = @{ ^"fulltext" ~ !ident_char }
+INVERTED  = @{ ^"inverted" ~ !ident_char }
 PROPERTY  = @{ ^"property" ~ !ident_char }
 UNIQUE    = @{ ^"unique" ~ !ident_char }
 DESCRIPTION_KW = @{ ^"description" ~ !ident_char }
@@ -162,7 +163,7 @@ keyword_nonreserved = {
     ALL | ANY_KW | SINGLE | NONE | EXISTS | COUNT | COLLECT | REDUCE |
     LABEL | EDGE | INDEX | INDEXES | CONSTRAINT | CONSTRAINTS |
     PROPERTY | UNIQUE | ASSERT | KEY | TYPE | DEFAULT | ADD | RENAME |
-    VECTOR | FULLTEXT | JSON | OPTIONS | FOR | NODE | RELATIONSHIP |
+    VECTOR | FULLTEXT | INVERTED | JSON | OPTIONS | FOR | NODE | RELATIONSHIP |
     TRANSACTION | VACUUM | CHECKPOINT |
     DATABASE | CONFIG | STATISTICS | BACKUP | COPY |
     VERSION | TIMESTAMP_KW | OF | END |
@@ -810,6 +811,7 @@ reduce_expression = {
 schema_command = {
     create_vector_index
     | create_fulltext_index
+    | create_inverted_index
     | create_scalar_index
     | create_json_index
     | drop_index
@@ -844,6 +846,13 @@ create_fulltext_index = {
     CREATE ~ FULLTEXT ~ INDEX ~ identifier ~ if_not_exists?
     ~ FOR ~ "(" ~ identifier ~ (":" ~ identifier_or_keyword)? ~ ")"
     ~ ON ~ EACH? ~ "[" ~ property_expression_list ~ "]"
+    ~ (OPTIONS ~ map_literal)?
+}
+
+create_inverted_index = {
+    CREATE ~ INVERTED ~ INDEX ~ identifier ~ if_not_exists?
+    ~ FOR ~ "(" ~ identifier ~ (":" ~ identifier_or_keyword)? ~ ")"
+    ~ ON ~ ("(" ~ property_expr ~ ")" | property_expr)
     ~ (OPTIONS ~ map_literal)?
 }
 
@@ -928,7 +937,7 @@ show_config = { SHOW ~ CONFIG }
 show_statistics = { SHOW ~ STATISTICS }
 vacuum_command = { VACUUM }
 checkpoint_command = { CHECKPOINT }
-backup_command = { BACKUP ~ TO ~ string }
+backup_command = { BACKUP ~ TO ~ string ~ (WITH ~ map_literal)? }
 
 copy_to = { COPY ~ identifier_or_keyword ~ TO ~ string ~ (WITH ~ map_literal)? }
 copy_from = { COPY ~ identifier_or_keyword ~ FROM ~ string ~ (WITH ~ map_literal)? }

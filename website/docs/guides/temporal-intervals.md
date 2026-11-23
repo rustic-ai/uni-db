@@ -56,8 +56,11 @@ RETURN btic('1985-03')
 // Day precision: [1985-03-15, 1985-03-16)
 RETURN btic('1985-03-15')
 
-// Full timestamp: [that millisecond, +1ms)
+// Timestamp to the second: [14:30:00, 14:30:01)
 RETURN btic('1985-03-15T14:30:00Z')
+
+// With milliseconds: [that millisecond, +1ms)
+RETURN btic('1985-03-15T14:30:00.123Z')
 ```
 
 ### Ranges (solidus notation)
@@ -137,7 +140,7 @@ MATCH (e:Event {name: 'WW2'}) SET e.period = $interval
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `btic_lo(b)` | DateTime | Lower bound (inclusive); NULL if unbounded |
-| `btic_hi(b)` | DateTime | Upper bound (exclusive); NULL if unbounded |
+| `btic_hi(b)` | DateTime | Upper bound (exclusive); NULL if unbounded. A bound outside the datetime range (about years 1677 to 2262), such as `btic('500 BCE')`, is an error; read it with `btic_duration` or the BTIC predicates instead |
 | `btic_duration(b)` | Int64 | Duration in milliseconds; NULL if unbounded |
 | `btic_granularity(b)` | String | Lower bound granularity (`"year"`, `"month"`, `"day"`, ...) |
 | `btic_lo_granularity(b)` | String | Lower bound granularity |

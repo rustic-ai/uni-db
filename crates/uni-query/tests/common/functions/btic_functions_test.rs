@@ -883,3 +883,31 @@ fn btic_comparison_ordering() {
         Value::Bool(false)
     );
 }
+
+// -----------------------------------------------------------------------
+// Bounds outside the datetime range
+// -----------------------------------------------------------------------
+
+#[test]
+fn btic_lo_outside_datetime_range_is_an_error() {
+    // 500 BCE in milliseconds is finite, but in nanoseconds it overflows i64.
+    let err = eval_scalar_function("btic_lo", &[btic_500_bce_approx()], None).unwrap_err();
+    assert!(
+        err.to_string().contains("outside the datetime range"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn btic_hi_outside_datetime_range_is_an_error() {
+    let year_3000 = Value::Temporal(TemporalValue::Btic {
+        lo: 32_503_680_000_000, // 3000-01-01
+        hi: 32_535_216_000_000, // 3001-01-01
+        meta: 0x7700_0000_0000_0000,
+    });
+    let err = eval_scalar_function("btic_hi", &[year_3000], None).unwrap_err();
+    assert!(
+        err.to_string().contains("outside the datetime range"),
+        "unexpected error: {err}"
+    );
+}

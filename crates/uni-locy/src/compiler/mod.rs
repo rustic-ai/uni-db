@@ -18,7 +18,9 @@ use crate::config::LocyConfig;
 use crate::types::{CompiledAssume, CompiledCommand, CompiledProgram, Stratum};
 use errors::LocyCompileError;
 pub(crate) use scope::free_variables;
-pub use typecheck::{MonotonicityOracle, default_monotonicity_oracle};
+pub use typecheck::{
+    DirectionOracle, MonotonicityOracle, default_direction_oracle, default_monotonicity_oracle,
+};
 
 /// Validate and stratify a parsed Locy program into a `CompiledProgram`.
 ///
@@ -46,6 +48,7 @@ pub fn compile_with_external_rules(
         external_rules,
         false,
         &default_monotonicity_oracle,
+        &default_direction_oracle,
     )
 }
 
@@ -65,6 +68,7 @@ pub fn compile_with_external_rules_and_config(
         external_rules,
         config.neural_predicates_preview,
         &default_monotonicity_oracle,
+        &default_direction_oracle,
     )
 }
 
@@ -83,6 +87,7 @@ pub fn compile_with_modules(
         &[],
         false,
         &default_monotonicity_oracle,
+        &default_direction_oracle,
     )
 }
 
@@ -99,6 +104,7 @@ pub fn compile_with_config(
         &[],
         config.neural_predicates_preview,
         &default_monotonicity_oracle,
+        &default_direction_oracle,
     )
 }
 
@@ -132,6 +138,7 @@ pub fn compile_with_oracle_and_config(
         external_rules,
         config.neural_predicates_preview,
         is_monotonic,
+        &default_direction_oracle,
     )
 }
 
@@ -147,6 +154,33 @@ pub fn compile_with_oracle(
         external_rules,
         false,
         is_monotonic,
+        &default_direction_oracle,
+    )
+}
+
+/// Compile with host-supplied monotonicity *and* direction oracles and a
+/// [`LocyConfig`].
+///
+/// The entry hosts holding a `PluginRegistry` use: `is_monotonic` decides which
+/// aggregates a recursive stratum may FOLD, and `direction_of` decides which
+/// way a `REQUIRE` bound over such a fold may point. Both should resolve names
+/// through the same registry, or a registered aggregate could pass one check
+/// and fail the other.
+pub fn compile_with_oracles_and_config(
+    program: &LocyProgram,
+    available_modules: &HashMap<String, Vec<String>>,
+    external_rules: &[String],
+    config: &LocyConfig,
+    is_monotonic: MonotonicityOracle<'_>,
+    direction_of: DirectionOracle<'_>,
+) -> Result<CompiledProgram, LocyCompileError> {
+    compile_with_context(
+        program,
+        available_modules,
+        external_rules,
+        config.neural_predicates_preview,
+        is_monotonic,
+        direction_of,
     )
 }
 
@@ -157,6 +191,7 @@ fn compile_with_context(
     external_rules: &[String],
     neural_predicates_preview: bool,
     is_monotonic: MonotonicityOracle<'_>,
+    direction_of: DirectionOracle<'_>,
 ) -> Result<CompiledProgram, LocyCompileError> {
     let (model_catalog, mut model_warnings) =
         models::compile_models(program, neural_predicates_preview)?;
@@ -178,6 +213,7 @@ fn compile_with_context(
             neural_predicates_preview,
             &mut extra_warnings,
             is_monotonic,
+            direction_of,
         )?;
         model_warnings.extend(extra_warnings);
         return Ok(CompiledProgram {
@@ -203,6 +239,7 @@ fn compile_with_context(
         &model_catalog,
         &module_ctx,
         is_monotonic,
+        direction_of,
     )?;
     // Carry model-compilation warnings (e.g. G1-lite UncalibratedLLMLogprobs)
     // into the final program. Append after typecheck so source order is
@@ -247,6 +284,7 @@ fn compile_with_context(
         neural_predicates_preview,
         &mut extra_command_warnings,
         is_monotonic,
+        direction_of,
     )?;
     warnings.extend(extra_command_warnings);
 
@@ -372,7 +410,7 @@ fn check_command_where(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Threads the compile context (rules, modules, catalogs, preview gate, warning sink) plus the caller's monotonicity oracle into command extraction; grouping into a struct would just move the argument list."
+    reason = "Threads the compile context (rules, modules, catalogs, preview gate, warning sink) plus the caller's monotonicity and direction oracles into command extraction; grouping into a struct would just move the argument list."
 )]
 fn extract_commands(
     program: &LocyProgram,
@@ -385,6 +423,7 @@ fn extract_commands(
     // Threaded so an ASSUME body inherits the caller's oracle rather than
     // silently re-defaulting at the boundary.
     is_monotonic: MonotonicityOracle<'_>,
+    direction_of: DirectionOracle<'_>,
 ) -> Result<Vec<CompiledCommand>, LocyCompileError> {
     let validate_rule = |raw_name: &str| -> Result<(), LocyCompileError> {
         let resolved = modules::resolve_rule_name(module_ctx, raw_name);
@@ -494,6 +533,7 @@ fn extract_commands(
                     neural_predicates_preview_flag,
                     &mut body_extra_warnings,
                     is_monotonic,
+                    direction_of,
                 )?;
                 extra_warnings.extend(body_extra_warnings);
 
@@ -511,7 +551,9 @@ fn extract_commands(
                         // silently stop a host-supplied oracle at the ASSUME
                         // boundary, so a plugin aggregate legal in the outer
                         // program would be rejected inside an ASSUME body.
+                        // The direction oracle is inherited for the same reason.
                         is_monotonic,
+                        direction_of,
                     )?
                 } else {
                     CompiledProgram {
@@ -584,6 +626,16 @@ fn compile_calibrate(
         return Err(LocyCompileError::CalibrateOnNonProbModel {
             name,
             declared: format!("{:?}", model.output_type),
+        });
+    }
+    // The FEATURES expressions supply the INPUT values by position, as a call
+    // site's arguments do; without FEATURES the INPUT variables are passed
+    // themselves.
+    if !model.features.is_empty() && model.features.len() != model.inputs.len() {
+        return Err(LocyCompileError::CalibrateFeatureArity {
+            model_name: name,
+            inputs: model.inputs.len(),
+            features: model.features.len(),
         });
     }
     let holdout = cc.holdout.unwrap_or(0.2);

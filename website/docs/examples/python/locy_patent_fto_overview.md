@@ -12,7 +12,7 @@ Patent attorneys manually build claim charts, mapping each product feature to ea
 
 ## With Uni
 
-The notebook models claim infringement as a joint probability — the product of element-level mapping confidences. If any single element lacks a feature mapping, that claim's infringement probability drops to zero, correctly encoding the all-elements rule. Patent-level risk combines independent claims using noisy-OR: if any independent claim is infringed, the patent poses risk. Dependent claims automatically inherit parent elements through recursive rules, eliminating manual tracking errors. Prior art matching uses semantic similarity to find relevant prior art for each claim element. Design-around simulation removes one feature-element mapping at a time and recomputes patent risk, identifying the minimal set of product changes that eliminate infringement.
+The notebook models claim infringement as a joint probability — the product of element-level mapping confidences. If any single element lacks a feature mapping, that claim's infringement probability drops to zero, correctly encoding the all-elements rule. Patent-level risk combines independent claims using noisy-OR: if any independent claim is infringed, the patent poses risk. Dependent claims automatically inherit parent elements through recursive rules, eliminating manual tracking errors. Prior art matching uses semantic similarity to find relevant prior art for each claim element. Design-around simulation removes one feature-element mapping at a time and recomputes patent risk, identifying single product changes that eliminate infringement.
 
 ## What You'll See
 
@@ -20,7 +20,7 @@ The notebook models claim infringement as a joint probability — the product of
 - Patent risk per product combining independent claims — any single infringed claim creates exposure
 - Computational claim charts with full derivation of which features map to which elements and at what confidence
 - Design-around simulations answering "what if we redesign this feature?" with quantified risk impact
-- Minimal design-change candidates ranked by cost, each validated to eliminate infringement
+- Single design-change candidates ranked by cost, each validated to eliminate infringement
 
 ## Why It Matters
 

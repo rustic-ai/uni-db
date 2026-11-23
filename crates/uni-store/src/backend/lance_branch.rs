@@ -353,12 +353,10 @@ pub async fn full_text_search_on_branch(
 ) -> Result<Vec<arrow_array::RecordBatch>> {
     use futures::TryStreamExt;
     use lance_index::scalar::FullTextSearchQuery;
-    use lance_index::scalar::inverted::query::MatchQuery;
 
     let on_branch = open_branch(uri, branch).await?;
-    let match_query = MatchQuery::new(query.to_string()).with_column(Some(column.to_string()));
     let fts_query = FullTextSearchQuery {
-        query: match_query.into(),
+        query: super::lance_fts::lance_query(column, query)?,
         limit: Some(k as i64),
         wand_factor: None,
     };
@@ -483,9 +481,11 @@ pub async fn create_fts_index_on_branch(
 /// Create a Lance tag pinning `branch`'s current tip (Phase 4a).
 ///
 /// Tags are GC-exempt references — Lance's compaction retention sweep
-/// preserves any version referenced by an active tag. This is what
-/// lets `Uni::tag_fork` keep a fork's state on disk after the fork
-/// itself is dropped (e.g. for audit / regulatory hold).
+/// preserves any version referenced by an active tag, which is what lets
+/// `Uni::tag_fork` hold a fork's state for audit or regulatory retention.
+/// A tag also blocks deleting the branch it references (Lance refuses
+/// even a forced branch delete), so a tagged fork cannot be dropped until
+/// it is untagged: `Uni::drop_fork` refuses it up front.
 ///
 /// The reference resolved at creation time is the branch's current
 /// version: subsequent writes on the branch do not "follow" the tag.
@@ -530,13 +530,13 @@ pub async fn delete_tag(uri: &str, tag: &str) -> Result<()> {
         .with_context(|| format!("delete tag {tag} on {uri}"))
 }
 
-/// List all tags on the dataset, returning `(name, pinned_version)`
-/// pairs (Phase 4a).
+/// List all tags on the dataset with the branch and version each pins
+/// (Phase 4a).
 ///
 /// # Errors
 ///
 /// Object-store IO failures.
-pub async fn list_tags(uri: &str) -> Result<Vec<(String, u64)>> {
+pub async fn list_tags(uri: &str) -> Result<Vec<super::branching::BranchTag>> {
     let dataset = open_dataset(uri).await?;
     let map = dataset
         .tags()
@@ -545,7 +545,11 @@ pub async fn list_tags(uri: &str) -> Result<Vec<(String, u64)>> {
         .with_context(|| format!("list tags on {uri}"))?;
     Ok(map
         .into_iter()
-        .map(|(name, contents)| (name, contents.version))
+        .map(|(name, contents)| super::branching::BranchTag {
+            name,
+            branch: contents.branch,
+            version: contents.version,
+        })
         .collect())
 }
 
@@ -563,7 +567,14 @@ pub async fn list_tags(uri: &str) -> Result<Vec<(String, u64)>> {
 /// missing-branch case.
 pub async fn delete_branch(uri: &str, branch: &str) -> Result<()> {
     inject_fault_delete_branch()?;
-    let mut dataset = open_dataset(uri).await?;
+    // A dataset that is gone holds no branch: as for a missing branch below,
+    // the delete is done. Recovery would otherwise keep the fork Tombstoned
+    // on every open with nothing left to delete.
+    let mut dataset = match open_dataset(uri).await {
+        Ok(dataset) => dataset,
+        Err(e) if crate::store_utils::is_dataset_not_found(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     // Cheap pre-check: skip the force-delete if neither BranchContents
     // nor the shallow-clone tree exist. lance::Dataset::force_delete_branch
@@ -1246,7 +1257,7 @@ impl ForkBranching for LanceBranching {
         delete_tag(&self.dataset_uri(table), tag).await
     }
 
-    async fn list_tags(&self, table: &str) -> Result<Vec<(String, u64)>> {
+    async fn list_tags(&self, table: &str) -> Result<Vec<super::branching::BranchTag>> {
         list_tags(&self.dataset_uri(table)).await
     }
 
@@ -1492,6 +1503,7 @@ impl ForkBranching for LanceBranching {
         k: usize,
         filter: &FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&uni_common::core::schema::TokenizerConfig>,
     ) -> Result<TextSearch> {
         let sql = if filter.is_trivially_true() {
             None
@@ -1506,6 +1518,7 @@ impl ForkBranching for LanceBranching {
             k,
             sql.as_deref(),
             unstored,
+            analyzer,
             |_| {},
         )
         .await
@@ -1683,15 +1696,16 @@ mod tests {
 
         // List
         let tags = list_tags(&uri).await.unwrap();
-        assert!(
-            tags.iter().any(|(n, _)| n == "audit-2026"),
-            "tags = {tags:?}"
-        );
+        let tag = tags
+            .iter()
+            .find(|t| t.name == "audit-2026")
+            .unwrap_or_else(|| panic!("tags = {tags:?}"));
+        assert_eq!(tag.branch.as_deref(), Some("to-tag"));
 
         // Delete idempotent
         delete_tag(&uri, "audit-2026").await.unwrap();
         let tags2 = list_tags(&uri).await.unwrap();
-        assert!(!tags2.iter().any(|(n, _)| n == "audit-2026"));
+        assert!(!tags2.iter().any(|t| t.name == "audit-2026"));
 
         // Re-deleting a missing tag is a no-op.
         delete_tag(&uri, "audit-2026").await.unwrap();
@@ -1714,7 +1728,7 @@ mod tests {
 
         create_tag(&uri, "v1", "snap-branch").await.unwrap();
         let tags = list_tags(&uri).await.unwrap();
-        let (_, pinned_v) = tags.iter().find(|(n, _)| n == "v1").unwrap();
+        let pinned_v = tags.iter().find(|t| t.name == "v1").unwrap().version;
 
         // Append more after tagging; the tag's pinned version must not move.
         let batch2 = test_batch(vec![11], vec![1100]);
@@ -1723,7 +1737,7 @@ mod tests {
         write_to_branch(&uri, "snap-branch", reader2).await.unwrap();
 
         let tags_after = list_tags(&uri).await.unwrap();
-        let (_, pinned_after) = tags_after.iter().find(|(n, _)| n == "v1").unwrap();
+        let pinned_after = tags_after.iter().find(|t| t.name == "v1").unwrap().version;
         assert_eq!(
             pinned_v, pinned_after,
             "tag must pin to fork-time version, not follow branch tip"

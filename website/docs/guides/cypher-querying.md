@@ -515,8 +515,8 @@ WHERE p.email =~ '[\\w.-]+@[\\w.-]+\\.\\w+'
 // IN list
 WHERE p.venue IN ['NeurIPS', 'ICML', 'ICLR']
 
-// NOT IN
-WHERE p.venue NOT IN ['Workshop', 'Demo']
+// Not in list
+WHERE NOT p.venue IN ['Workshop', 'Demo']
 ```
 
 ### Property Existence
@@ -526,8 +526,8 @@ WHERE p.venue NOT IN ['Workshop', 'Demo']
 // Check if property exists
 WHERE p.abstract IS NOT NULL
 
-// In pattern
-WHERE EXISTS(p.doi)
+// Check if property is absent
+WHERE p.doi IS NULL
 ```
 
 ---
@@ -546,8 +546,12 @@ RETURN p.title
 // Multiple properties
 RETURN p.title, p.year, p.venue
 
-// All properties (*)
-RETURN p.*
+// All properties as a map
+RETURN properties(p)
+
+// Map projection: all properties, or selected ones
+RETURN p {.*}
+RETURN p {.title, .year}
 
 // Entire node
 RETURN p
@@ -581,6 +585,7 @@ RETURN 2 ^ 3   // 8.0
 // Temporal arithmetic takes durations; subtracting two values of one
 // temporal type gives a duration, and a number is not a duration
 RETURN date('2020-01-02') - date('2020-01-01')   // P1D
+RETURN date('2020-01-01') - date('2020-01-02')   // P-1D (a - b is the duration from b to a)
 RETURN duration('P1D') * 2                        // P2D
 // date('2020-01-02') + 1 is a type error
 
@@ -702,13 +707,25 @@ RETURN p.title, p.year, p.citations,
 ORDER BY p.year
 ```
 
-**Top N per group:**
+**Top N per group:** a window in `WITH` is a column the clause's `WHERE` and
+`ORDER BY`, and later clauses, can read by its alias.
 ```cypher
 MATCH (p:Paper)
 WITH p, row_number() OVER (PARTITION BY p.venue ORDER BY p.citations DESC) AS rn
 WHERE rn <= 3
 RETURN p.venue, p.title, p.citations
 ORDER BY p.venue, p.citations DESC
+```
+
+**Windows over grouped rows:** in a `WITH` or `RETURN` that aggregates, a
+window runs after the grouping, so it can rank or total the groups.
+```cypher
+MATCH (p:Paper)
+WITH p.venue AS venue, count(*) AS papers,
+     rank() OVER (ORDER BY count(*) DESC) AS venue_rank,
+     sum(count(*)) OVER () AS all_papers
+RETURN venue, papers, venue_rank, all_papers
+ORDER BY venue_rank
 ```
 
 ---
@@ -752,7 +769,7 @@ Math functions take numbers: `NULL` gives `NULL`, and any other value (a string,
 | `log(n)` | Natural logarithm | `RETURN log(2.718)` → `~1` |
 | `log10(n)` | Base-10 logarithm | `RETURN log10(100)` → `2` |
 | `exp(n)` | e^n | `RETURN exp(1)` → `~2.718` |
-| `power(base, exp)` / `pow(base, exp)` | Exponentiation | `RETURN power(2, 3)` → `8` |
+| `power(base, exp)` / `pow(base, exp)` | Exponentiation of any numbers, always a float; `base ^ exp` is the operator form | `RETURN pow(2, 3)` → `8.0`; `RETURN 2 ^ 3` → `8.0` |
 | `sin(n)`, `cos(n)`, `tan(n)` | Trigonometric | `RETURN sin(0)` → `0` |
 
 ### List Functions
@@ -791,7 +808,7 @@ MATCH (n:Person) WHERE created_at(n) > datetime("2026-05-01") RETURN n
 MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 ```
 
-The bulk loader can supply explicit per-row values; otherwise the engine assigns timestamps at insertion time.
+The bulk loader can supply explicit per-row values; otherwise the engine assigns timestamps at insertion time. Both are kept on declared and schemaless labels and edge types, before and after a flush, and `updated_at` is never earlier than `created_at`. An update (`SET`, `REMOVE`, `MERGE ... ON MATCH SET`) keeps `created_at` whether or not the vertex has been flushed.
 
 ### Type Conversion Functions
 
@@ -974,31 +991,6 @@ CREATE (:Person {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(:Person {name
 MATCH (n:Person {name: 'Alice'}) DETACH DELETE n
 ```
 
----|---|---|
-| `nodes_created` / `nodes_deleted` | `+nodes` / `-nodes` | Nodes created or deleted. A `SET`, `REMOVE` or `MERGE ... ON MATCH` on an existing node creates nothing. |
-| `relationships_created` / `relationships_deleted` | `+relationships` / `-relationships` | The same for relationships, including those `DETACH DELETE` removes. |
-| `properties_set` | `+properties` | Properties added, or overwritten with a different value. Assigning the value a property already has counts nothing. |
-| `properties_removed` | `-properties` | Properties removed, set to `null`, or overwritten with a different value, and every property of a deleted node or relationship. |
-| `labels_added` / `labels_removed` | `+labels` / `-labels` | Per node whose label set changes. |
-
-An entity created and changed in one statement reports only its final state;
-one created and deleted in the same statement reports no property changes.
-
-The label counters follow Neo4j's `labelsAdded` / `labelsRemoved`, not the
-TCK. The TCK compares the set of labels in use across the whole graph before
-and after the statement: `CREATE (:Label), (:Label)` is `+labels 1`, and
-`CREATE (:Label)` when other `:Label` nodes already exist is no label change.
-Here the first reports `labels_added = 2` and the second `labels_added = 1`,
-and deleting a node does not count its labels as removed.
-
-```cypher
-CREATE (:Person {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})
-
-// nodes_deleted = 1, relationships_deleted = 1,
-// properties_removed = 3 (two on Alice, one on the relationship)
-MATCH (n:Person {name: 'Alice'}) DETACH DELETE n
-```
-
 ---
 
 ## WITH Clause
@@ -1164,16 +1156,22 @@ CREATE VECTOR INDEX paper_embeddings
 FOR (p:Paper) ON p.embedding
 OPTIONS {type: 'hnsw'}
 
-// JSON Full-Text index
+// JSON Full-Text index (OPTIONS: with_positions, paths)
 CREATE JSON FULLTEXT INDEX article_fts
 FOR (a:Article) ON _doc
 OPTIONS {with_positions: true}
+
+// Inverted index on a LIST<STRING> property (OPTIONS: normalize, max_terms_per_doc)
+CREATE INVERTED INDEX paper_tags
+FOR (p:Paper) ON (p.tags)
+OPTIONS {normalize: true}
 ```
 
 ### Drop Indexes
 
 ```cypher
 DROP INDEX paper_year
+DROP INDEX IF EXISTS paper_year   // no error when the index does not exist
 ```
 
 ### Show Indexes
@@ -1181,6 +1179,10 @@ DROP INDEX paper_year
 ```cypher
 SHOW INDEXES
 ```
+
+Each row has `name`, `type` and `details`. `type` is one of `SCALAR`,
+`VECTOR`, `FULLTEXT`, `INVERTED`, `JSON_FTS` or `SPARSE`; `uni.schema.indexes()`
+uses the same names.
 
 ---
 
@@ -1209,16 +1211,15 @@ uni query "MATCH (p:Paper) WHERE p.year = \$year RETURN p" \
 
 ## Session Variables
 
-Session variables (`$session.*`) provide scoped context for multi-tenant queries. They're set when creating a session and accessible in all queries within that session.
+Session variables (`$session.*`) provide scoped context for multi-tenant queries. Set them with `session.params().set(...)`; every later query in that session can read them.
 
 === "Rust"
 
     ```rust
-    // Create session with tenant context
-    let session = db.session()
-        .set("tenant_id", "acme-corp")
-        .set("user_id", "user-123")
-        .build();
+    // Set tenant context on the session
+    let session = db.session();
+    session.params().set("tenant_id", "acme-corp");
+    session.params().set("user_id", "user-123");
 
     // All queries have access to $session.* variables
     let results = session.query(r#"
@@ -1231,13 +1232,10 @@ Session variables (`$session.*`) provide scoped context for multi-tenant queries
 === "Python"
 
     ```python
-    # Create session with tenant context
-    session = (
-        db.session()
-        .set("tenant_id", "acme-corp")
-        .set("user_id", "user-123")
-        .build()
-    )
+    # Set tenant context on the session
+    session = db.session()
+    session.params().set("tenant_id", "acme-corp")
+    session.params().set("user_id", "user-123")
 
     # All queries have access to $session.* variables
     results = session.query("""
@@ -1247,7 +1245,7 @@ Session variables (`$session.*`) provide scoped context for multi-tenant queries
     """)
     ```
 
-Session variables use the `$session.property_name` syntax and are resolved at query execution time.
+Session variables use the `$session.property_name` syntax (a plain `$tenant_id` does not see them) and are resolved at query execution time.
 
 ---
 
@@ -1597,22 +1595,26 @@ RETURN a.name AS name, 'highly_cited' AS category
 ## WITH RECURSIVE Clause
 
 WITH RECURSIVE enables Common Table Expressions (CTEs) for complex recursive queries.
+The body is a `UNION` of a base query and a recursive query that refers to the CTE by
+name; each part returns one column. The query that follows the CTE tests membership with
+`IN`.
 
 ```cypher
 // Find all transitive citations (papers cited by papers cited by...)
 WITH RECURSIVE citation_chain AS (
     // Base case: direct citations
     MATCH (start:Paper {title: 'Original Paper'})-[:CITES]->(cited:Paper)
-    RETURN cited, 1 AS depth
+    RETURN cited
 
     UNION
 
     // Recursive case: citations of citations
-    MATCH (prev)-[:CITES]->(cited:Paper)
-    WHERE prev IN citation_chain AND depth < 5
-    RETURN cited, depth + 1
+    MATCH (prev:Paper)-[:CITES]->(cited:Paper)
+    WHERE prev IN citation_chain
+    RETURN cited
 )
-SELECT cited.title, depth FROM citation_chain
+MATCH (p:Paper) WHERE p IN citation_chain
+RETURN p.title AS title
 ```
 
 !!! tip "Alternative: Variable-Length Paths"
@@ -1641,42 +1643,52 @@ LIMIT 10
 
 ### Understanding the Plan
 
-The EXPLAIN output shows:
-- **Scan operations**: How data is accessed (index scan, full scan)
+The plan shows:
+- **Scan operations**: How data is accessed, with any filter pushed into the scan
 - **Filter operations**: Where predicates are applied
-- **Join operations**: How patterns are matched
+- **Traversals**: How patterns are matched
 - **Aggregation**: Grouping and aggregation steps
 - **Sort/Limit**: Final ordering and pagination
-- **Index usage**: Which indexes are used and why
-- **Cost estimates**: Estimated rows and query cost
 
 ### EXPLAIN Output Example
 
+`EXPLAIN` returns one row with a `plan` column holding the logical plan, outermost
+operator first:
+
 ```
-Plan:
-├─ Scan: Paper
-│  ├─ Filter: year > 2020
-│  │  └─ Index: paper_year_btree (BTREE) ✓
-│  ├─ Estimated rows: 500
-│  └─ Cost: 12.5
-├─ Expand: CITES (OUTGOING)
-│  ├─ Estimated paths: 2500
-│  └─ Cost: 125.0
-└─ Target: Paper
-   └─ Estimated rows: 2500
+Project {
+    input: Scan {
+        label_id: 1,
+        labels: [
+            "Paper",
+        ],
+        variable: "p",
+        filter: Some(
+            BinaryOp {
+    ...
+```
 
-Index Usage:
-  ✓ Paper.year → paper_year_btree (BTREE)
-  ✗ Paper.venue → paper_venue_idx (not in filter)
+For structured output, call `explain()` on a query builder. It returns an `ExplainOutput`
+with `plan_text` (the same tree), `index_usage` (for each scan: label or type, property,
+index type, whether the index is used and why), `cost_estimates` (`estimated_rows`,
+`estimated_cost`), `warnings`, and `suggestions` (indexes that would help).
 
-Total estimated cost: 137.5
+```python
+explain = session.query_with(
+    "MATCH (p:Paper) WHERE p.year > 2020 RETURN p.title"
+).explain()
+
+for usage in explain.index_usage:
+    print(usage["property"], usage["index_type"], usage["used"], usage["reason"])
+print(explain.cost_estimates["estimated_rows"])
 ```
 
 ---
 
-## PROFILE Clause
+## Profiling
 
-PROFILE executes the query and returns runtime statistics alongside results.
+There is no `PROFILE` keyword. Call `profile()` on a query builder: it executes the query
+and returns the result together with a `ProfileOutput` of runtime statistics.
 
 === "Rust"
 
@@ -1705,15 +1717,17 @@ PROFILE executes the query and returns runtime statistics alongside results.
 
     ```python
     # Execute with profiling
-    results, profile = db.profile(
+    results, profile = session.query_with(
         "MATCH (p:Person) WHERE p.age > 25 RETURN p.name AS name"
-    )
+    ).profile()
 
-    print(f"Total time: {profile['total_time_ms']}ms")
-    print(f"Peak memory: {profile['peak_memory_bytes']} bytes")
+    print(f"Total time: {profile.total_time_ms}ms")
+    print(f"Peak memory: {profile.peak_memory_bytes} bytes")
+    for op in profile.operators:
+        print(op["operator"], op["time_ms"], op["actual_rows"])
     ```
 
-### PROFILE Output
+### Profile Output
 
 The profile includes:
 - **total_time_ms**: Total query execution time
@@ -2046,6 +2060,8 @@ CREATE LABEL Author (
 )
 ```
 
+A `DEFAULT` is stored when an insert does not name the property: Cypher `CREATE` and `MERGE`, bulk loads and `COPY FROM` alike, on labels and edge types. It is evaluated once, when the DDL runs, and must be a constant expression: literals, lists, maps, operators and functions of constants (`DEFAULT date('2020-01-01')`, `DEFAULT 3 + 4`). Variables, parameters, property reads, aggregates and functions without a fixed result (`rand()`, `timestamp()`, `datetime()`) are refused, as is a value the declared type cannot hold. An explicit `NULL` in a write is kept as NULL (a `NOT NULL` property then refuses it). Rows that exist before the default is declared are not backfilled: `ALTER LABEL ... ADD PROPERTY p T DEFAULT v` fills `p` for new rows only.
+
 #### Parameterized container types
 
 Property types can be parameterized, including nested forms:
@@ -2097,9 +2113,11 @@ ALTER LABEL Paper RENAME PROPERTY old_name TO new_name
 // Drop a label (must have no vertices)
 DROP LABEL TempLabel
 
-// Drop an edge type
+// Drop an edge type (must have no edges)
 DROP EDGE TYPE OLD_RELATIONSHIP
 ```
+
+A drop is refused while data carries the label or edge type, counting unflushed writes and the current transaction's own. The error names it and the count, for example `Cannot drop label 'TempLabel': 3 vertices still carry it; remove the label from them or delete them first`. `uni.schema.dropLabel` and `uni.schema.dropEdgeType` refuse the same way.
 
 ---
 
@@ -2123,7 +2141,7 @@ CREATE CONSTRAINT paper_year_valid
 ON (p:Paper) ASSERT p.year >= 1900
 ```
 
-CHECK enforcement covers a single `property <op> literal` comparison, where `<op>` is one of `=`, `!=`/`<>`, `>`, `<`, `>=`, `<=` and the literal is a single whitespace-free token. Spacing around the operator does not matter — `REQUIRE p.age>=18` and `REQUIRE p.age >= 18` are the same constraint. (Before, the expression was split on whitespace and had to be exactly three tokens, so the unspaced form was silently never enforced.) An expression that does not reduce to those three tokens — one joined with `AND`/`OR`, for instance — is still accepted and listed by `SHOW CONSTRAINTS`, but it logs a warning and permits the write rather than rejecting it, so do not rely on it to enforce a compound rule. Split it into one constraint per comparison instead. Do not point the right-hand side at a second property either: `REQUIRE p.year >= p.min_year` reduces to three tokens but compares against the *string* `p.min_year`, and the operands cannot be ordered, so the write fails with a comparison error rather than either passing or reporting a constraint violation. Numeric comparisons, including `=` and `!=`, coerce across `Int` and `Float`, so `REQUIRE p.score = 5` holds for a stored `5.0`. A missing property passes; use `IS NOT NULL` to require presence.
+CHECK enforcement covers a single `property <op> literal` comparison, where `<op>` is one of `=`, `!=`/`<>`, `>`, `<`, `>=`, `<=` and the literal is a single whitespace-free token. Spacing around the operator does not matter — `ASSERT p.age>=18` and `ASSERT p.age >= 18` are the same constraint. (Before, the expression was split on whitespace and had to be exactly three tokens, so the unspaced form was silently never enforced.) An expression that does not reduce to those three tokens — one joined with `AND`/`OR`, for instance — is still accepted and listed by `SHOW CONSTRAINTS`, but it logs a warning and permits the write rather than rejecting it, so do not rely on it to enforce a compound rule. Split it into one constraint per comparison instead. Do not point the right-hand side at a second property either: `ASSERT p.year >= p.min_year` reduces to three tokens but compares against the *string* `p.min_year`, and the operands cannot be ordered, so the write fails with a comparison error rather than either passing or reporting a constraint violation. Numeric comparisons, including `=` and `!=`, coerce across `Int` and `Float`, so `ASSERT p.score = 5` holds for a stored `5.0`. A missing property passes; use an `EXISTS(p.prop)` constraint to require presence (`ASSERT p.prop IS NOT NULL` does not reduce to a comparison, so it is not enforced).
 
 ### Show Constraints
 
@@ -2158,6 +2176,8 @@ BACKUP TO './backups/backup_2026_01_17'
 // Backup to S3
 BACKUP TO 's3://my-bucket/backups/backup_2026_01_17'
 ```
+
+A backup is itself a store: open it with `Uni::open("./backups/backup_2026_01_17")` (or the S3 URI) to read or restore from it. It holds the primary's data, indexes, schema, Locy rules, snapshot history and declared plugins; forks are not included. BACKUP flushes first and returns `status`, `snapshot_id`, `objects` and `bytes`. It fails in a fork session, and for a destination that already holds a store. A URL with the same scheme as the database's object store uses its endpoint and credentials. Local paths and `file://` URIs are checked against the file sandbox. A backup interrupted part way is refused at open: delete it and back up again. The copy is of the live store, so run it while writes are quiet.
 
 ### CHECKPOINT
 
@@ -2196,7 +2216,7 @@ YIELD tables_optimized, fragments_removed, fragments_added, bytes_reclaimed, dur
 
 // Check compaction status
 CALL uni.admin.compactionStatus()
-YIELD l1_runs, l1_size_bytes, in_progress, pending
+YIELD l1_runs, l1_estimated_bytes, in_progress, pending
 ```
 
 ### Edge endpoint verification
@@ -2281,10 +2301,10 @@ YIELD name, type, label, properties, state
 WHERE type = 'VECTOR'
 RETURN name, label
 
-// List all constraints
+// List all constraints; `target` is `(:Label)` or `[:TYPE]`, as SHOW CONSTRAINTS writes it
 CALL uni.schema.constraints()
-YIELD name, type, label, properties, enabled
-RETURN name, type
+YIELD name, type, label, properties, enabled, target
+RETURN name, type, target
 
 // Get detailed label info
 CALL uni.schema.labelInfo('Paper')
@@ -2305,7 +2325,7 @@ CALL uni.schema.createLabel('Product', {
   properties: {
     name: { type: 'STRING', nullable: false },
     price: { type: 'FLOAT64' },
-    embedding: { type: 'VECTOR' }
+    embedding: { type: 'VECTOR(384)' }   // a vector type needs its dimension
   }
 })
 
@@ -2313,7 +2333,7 @@ CALL uni.schema.createLabel('Product', {
 CALL uni.schema.createEdgeType('PURCHASED', ['Customer'], ['Product'], {
   properties: {
     quantity: { type: 'INT32' },
-    timestamp: { type: 'TIMESTAMP' }
+    timestamp: { type: 'DATETIME' }
   }
 })
 
@@ -2331,9 +2351,16 @@ CALL uni.schema.createConstraint('Product', 'UNIQUE', ['sku'])
 // Drop operations
 CALL uni.schema.dropLabel('TempLabel')
 CALL uni.schema.dropEdgeType('OLD_RELATIONSHIP')
-CALL uni.schema.dropIndex('Product', 'old_index')
-CALL uni.schema.dropConstraint('Product', 'constraint_name')
+CALL uni.schema.dropIndex('old_index')
+CALL uni.schema.dropConstraint('constraint_name')
 ```
+
+Property types in `createLabel` and `createEdgeType` are `STRING`, `INT` (`INTEGER`,
+`INT64`), `INT32`, `FLOAT` (`FLOAT64`, `DOUBLE`), `FLOAT32`, `BOOL` (`BOOLEAN`),
+`DATETIME`, `DATE`, `BTIC`, `VECTOR`, `LIST<T>` and `MAP<STRING, V>`. The drop procedures
+take the name alone; an index or constraint created by a procedure without a `name` is
+named `{label}_{property}_{type}` (for example `Product_name_btree`) or
+`{label}_unique_{property}`, as `SHOW INDEXES` and `SHOW CONSTRAINTS` list.
 
 ---
 
@@ -2410,7 +2437,9 @@ r.crdt_kind(CrdtKind::new("g-counter"), Arc::new(GCounterProvider))?;
 ```
 
 Declare a CRDT-typed property through the schema (`DataType::Crdt(..)`) and write
-it with ordinary `SET`; the registered provider merges concurrent updates.
+it with ordinary `SET`; the registered provider merges concurrent updates. Cypher DDL
+accepts the CRDT types `GCOUNTER` and `LWWREGISTER` (`CREATE LABEL Page (views GCOUNTER)`);
+declare the others through the schema builder.
 
 ### Distributed Sync
 
@@ -2471,11 +2500,11 @@ For detailed CRDT semantics and merge behavior, see [CRDT Types](../concepts/crd
 | Database Management (BACKUP, COPY, compaction) | Stable |
 | Snapshots (create, list, restore) | Stable |
 | Schema Introspection (`uni.schema.*`) | Stable |
-| Inverted Index (ANY IN pattern) | Stable |
+| Inverted Index (`uni.schema.createIndex` type `INVERTED`; not yet used by the planner) | Built only |
 | OPTIONAL MATCH | Stable |
 | Subqueries (EXISTS, CALL) | Stable |
 | WITH RECURSIVE (CTEs) | Stable |
-| PROFILE (runtime statistics) | Stable |
+| Profiling (`query_with(...).profile()`) | Stable |
 | Session Variables (`$session.*`) | Stable |
 | Multi-label Nodes | Stable |
 | Regular Expression Matching (`=~`) | Stable |

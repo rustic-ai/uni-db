@@ -1484,42 +1484,11 @@ pub struct PropertyExtractor<'a> {
 /// how the dense `Vector` column tolerates a `Value::List` from the same hazard.
 /// Returns `None` for any other value (→ a null struct row).
 fn sparse_pair_from_value(v: &Value) -> Option<(Vec<u32>, Vec<f32>)> {
-    match v {
-        Value::SparseVector { indices, values } => {
-            // Guard the native arm the same way the `Value::Map` arm below does: a
-            // length-mismatched value would otherwise emit an Arrow struct whose
-            // `indices`/`values` child lists desync, which the reader silently
-            // truncates via `.zip()` — pairing weights with the wrong term ids
-            // (issue #95). Reject it to a null struct row instead.
-            if indices.len() != values.len() {
-                return None;
-            }
-            Some((indices.clone(), values.clone()))
-        }
-        Value::Map(m) => {
-            let idx = match m.get("indices") {
-                Some(Value::List(l)) => l,
-                _ => return None,
-            };
-            let vals = match m.get("values") {
-                Some(Value::List(l)) => l,
-                _ => return None,
-            };
-            let indices: Vec<u32> = idx
-                .iter()
-                .map(|x| x.as_u64().map(|n| n as u32))
-                .collect::<Option<_>>()?;
-            let values: Vec<f32> = vals
-                .iter()
-                .map(|x| x.as_f64().map(|n| n as f32))
-                .collect::<Option<_>>()?;
-            if indices.len() != values.len() {
-                return None;
-            }
-            Some((indices, values))
-        }
-        _ => None,
-    }
+    // A length-mismatched value would otherwise emit an Arrow struct whose
+    // `indices`/`values` child lists desync, which the reader silently
+    // truncates via `.zip()`, pairing weights with the wrong term ids (issue
+    // #95); `sparse_parts` rejects it, so it becomes a null struct row.
+    v.sparse_parts()
 }
 
 /// Build a sparse-vector `Struct { indices: List<UInt32>, values: List<Float32> }`

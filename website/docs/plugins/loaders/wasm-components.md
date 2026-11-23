@@ -41,15 +41,17 @@ host's grants and reports the result as `effective_capabilities` /
 propagation). The capability-gated `host-net` interface (HTTP GET/POST) is added
 to the linker only when `Network` is granted — a plugin importing it without the
 grant fails at link time, and the host additionally enforces the granted URL
-allow-list and byte/timeout ceilings at call time. (`host-fs` is not yet exposed
-on the Component Model; on [Extism](extism.md) the filesystem/query/KMS/secret
-host functions are wired.) See `examples/example-wasm-net/` for a worked
+allow-list and byte/timeout ceilings at call time. `host-graph` and `host-arena`
+(the GraphCompute kernels an `algorithm-plugin` drives) are linked only when
+`GraphCompute` is granted. (`host-fs` is not yet exposed on the Component Model;
+[Extism](extism.md) wires HTTP, KMS, secret and GraphCompute host functions, and
+neither ABI has filesystem or host-query functions.) See `examples/example-wasm-net/` for a worked
 `host-net` consumer.
 
 ## The WIT worlds
 
 The canonical worlds live in `crates/uni-plugin-wasm/wit/world.wit`,
-package `uni:plugin@0.1.0`. There are three plugin worlds, one per
+package `uni:plugin@0.1.0`. There are four plugin worlds, one per
 plugin kind:
 
 - **`scalar-plugin`** — implements one or more Cypher scalar functions.
@@ -57,6 +59,9 @@ plugin kind:
   opaque state bytes between `agg-new` / `agg-update` / `agg-merge` /
   `agg-evaluate`.
 - **`procedure-plugin`** — implements Cypher procedures that yield rows.
+- **`algorithm-plugin`** — implements graph algorithms over the imported
+  `host-graph` / `host-arena` GraphCompute interfaces (see
+  [Graph Algorithms](../graph-algorithms.md)).
 
 Every world shares the same control surface and wire convention:
 
@@ -251,7 +256,7 @@ which host functions are linked into it.
     ```python
     from uni_db import Uni
 
-    db = Uni()
+    db = Uni.temporary()
 
     with open("example_wasm_geo.wasm", "rb") as f:
         wasm_bytes = f.read()
@@ -263,11 +268,12 @@ which host functions are linked into it.
     #   scalars_registered     -> ["ai.example.geo.haversine"]
     #   aggregates_registered  -> []
     #   procedures_registered  -> []
+    #   algorithms_registered  -> []
     #   effective_capabilities -> []   (declared ∩ granted)
     #   denied_capabilities    -> []
 
     # Now callable from Cypher by its registered qname:
-    rows = db.query(
+    rows = db.session().query(
         "RETURN `ai.example.geo.haversine`(48.8566, 2.3522, 51.5074, -0.1278) AS km"
     )
     ```
@@ -275,7 +281,8 @@ which host functions are linked into it.
     `grants` defaults to `None`, which grants the scalar / aggregate /
     procedure surfaces. On `AsyncUni`, `load_wasm_component` is awaitable
     with the same signature and return shape. The method is gated behind
-    the `wasm-plugins` cargo feature, which is on in the default wheel.
+    the `wasm-plugins` cargo feature, which the published wheels omit; build
+    the bindings with `maturin develop --features wasm-plugins` to get it.
 
 === "Rust"
 
@@ -289,7 +296,7 @@ which host functions are linked into it.
     // registrar_caps gates which surfaces may register;
     // host_grants gates which host-fn imports are linked.
     let caps = CapabilitySet::from_iter_of([Capability::ScalarFn]);
-    let host_grants: Vec<String> = vec![];
+    let host_grants = CapabilitySet::new();
 
     let outcome = db.load_wasm_component(&loader, &bytes, &host_grants, &caps)?;
 
@@ -303,8 +310,8 @@ which host functions are linked into it.
 
     `load_wasm_component` returns a `LoadOutcome` carrying `plugin_id`,
     `version`, `scalars_registered`, `aggregates_registered`,
-    `procedures_registered`, `effective_capabilities`, and
-    `denied_capabilities`. `effective_capabilities` is the intersection
+    `procedures_registered`, `algorithms_registered`,
+    `effective_capabilities`, and `denied_capabilities`. `effective_capabilities` is the intersection
     of the manifest's declared capabilities with the host grants;
     `denied_capabilities` lists declared-but-ungranted ones for
     diagnostics.

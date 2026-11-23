@@ -164,6 +164,8 @@ BUILDER_NOT_BOUND = {
     'UniBuilder.new': 'Python UniBuilder.open/create/temporary choose the open mode',
     'UniBuilder.plugin_trust': 'native trust-policy trait; Python plugin grants are per loader',
     'UniBuilder.remote_storage': 'Python hybrid(remote_url).cloud_config(dict)',
+    'UniBuilder.cloud_storage': 'Python cloud_config(dict) takes the same typed configuration',
+    'UniBuilder.storage_option': 'Python storage_options(dict) sets one or more raw options',
     'UniBuilder.xervo_catalog': 'Python xervo_catalog_from_str/from_file parse the same model catalog',
     'Session.add_python_plugin': 'native PythonPluginBuilder adapter; Python plugin() decorator performs this',
     'Session.finalize_python_plugin': 'native PythonPluginBuilder adapter; Python decorator completion performs this',

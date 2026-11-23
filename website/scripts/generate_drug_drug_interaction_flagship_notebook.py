@@ -407,7 +407,7 @@ def _build_notebook() -> dict[str, Any]:
                 "for row in sorted(compose_result.derived.get('joint_regimen_safety', []), key=lambda r: r['safety']):",
                 "    p = row.get('p')",
                 "    pid = p.properties.get('patient_id') if hasattr(p, 'properties') else '?'",
-                "    print(f'  patient={pid:<8}  safety={row[\"safety\"]:.4f}')",
+                "    print(f'  patient={pid:<8}  safety={row[\"safety\"]:.3e}')",
             ],
         )
     )
@@ -578,7 +578,7 @@ def _build_notebook() -> dict[str, Any]:
             [
                 "## 9) Patient Risk Ranking + Worst-Pair Annotation",
                 "",
-                "Combine joint regimen safety with the highest-shared-targets pair in each patient's regimen — the actionable substitution target.",
+                "Combine joint regimen safety with the highest-risk pair (by the classifier's calibrated per-pair score) in each patient's regimen — the actionable substitution target.",
             ],
         )
     )
@@ -637,13 +637,13 @@ def _build_notebook() -> dict[str, Any]:
                 "PATIENT_RANKING_LEN = len(ranking)",
                 "",
                 "print(f'Patient risk ranking ({PATIENT_RANKING_LEN} regimens):')",
-                "print(f'  {\"patient\":<8} {\"safety\":>7}  worst_pair')",
+                "print(f'  {\"patient\":<8} {\"safety\":>10}  worst_pair')",
                 "for pat, safety, worst in ranking:",
                 "    if worst is None:",
-                "        print(f'  {pat:<8} {safety:>7.4f}  (no cross-pair)')",
+                "        print(f'  {pat:<8} {safety:>10.3e}  (no cross-pair)')",
                 "    else:",
                 "        pid, (a, b), risk = worst",
-                "        print(f'  {pat:<8} {safety:>7.4f}  {pid} ({a}+{b}, pair_risk={risk:.4f})')",
+                "        print(f'  {pat:<8} {safety:>10.3e}  {pid} ({a}+{b}, pair_risk={risk:.4f})')",
             ],
         )
     )

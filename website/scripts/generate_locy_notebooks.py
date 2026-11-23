@@ -193,18 +193,18 @@ def _python_results_lines() -> list[str]:
     return [
         'print("Derived relation snapshots:")',
         "for rel_name, rel_rows in out.derived.items():",
-        '    print(f"\\\\n{rel_name}: {len(rel_rows)} row(s)")',
+        '    print(f"\\n{rel_name}: {len(rel_rows)} row(s)")',
         "    pprint(rel_rows)",
         "",
         "if out.command_results:",
-        '    print("\\\\nCommand results:")',
+        '    print("\\nCommand results:")',
         "for i, cmd in enumerate(out.command_results, start=1):",
-        '    print(f"\\\\nCommand #{i}:", cmd.command_type)',
+        '    print(f"\\nCommand #{i}:", cmd.command_type)',
         "    rows = getattr(cmd, 'rows', None)",
         "    if rows is not None:",
         "        pprint(rows)",
         "if not out.command_results:",
-        '    print("\\\\nNo QUERY/EXPLAIN/ABDUCE command outputs in this program.")',
+        '    print("\\nNo QUERY/EXPLAIN/ABDUCE command outputs in this program.")',
     ]
 
 
@@ -423,6 +423,16 @@ def _rust_notebook(case: LocyUseCase) -> dict[str, Any]:
             ],
         )
     )
+    cells.append(
+        _code_cell(
+            notebook_key,
+            len(cells),
+            [
+                ':dep uni-db = { path = "../../../crates/uni" }',
+                ':dep tokio = { version = "1", features = ["full"] }',
+            ],
+        )
+    )
     cells.append(_code_cell(notebook_key, len(cells), _rust_setup_lines()))
 
     cells.append(
@@ -572,7 +582,7 @@ def _cases() -> list[LocyUseCase]:
             expected_outcomes=[
                 "`non_compliant` should include `api` and `db` (reachable from internet and CVE >= 7).",
                 "`worker` should not appear in remediation rows because its CVE score is below threshold.",
-                "The `non_compliant` QUERY returns `action = 'patch-now'`; this literal is computed in the query projection, so it may display as `None` in the raw derived-relation snapshot (which materializes KEY columns).",
+                "Both the `non_compliant` QUERY rows and the `non_compliant` derived rows carry `action = 'patch-now'`.",
                 "`Queries executed` counts the Cypher statements a program runs and the pattern queries `EXPLAIN RULE` issues when it rebuilds a tree from the facts. A `QUERY` reads facts the fixpoint already derived and is not counted, so this program reports 0.",
             ],
         ),

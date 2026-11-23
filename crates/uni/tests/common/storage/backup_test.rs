@@ -72,8 +72,8 @@ async fn test_backup_and_restore() -> anyhow::Result<()> {
     // 3. Verify Backup
     assert!(backup_path.exists());
     assert!(backup_path.join("catalog").exists());
-    // LanceDB stores vertex tables as directories like "vertices_Person.lance"
-    assert!(backup_path.join("vertices_Person.lance").exists());
+    // A backup has the standard layout: tables under `storage/`.
+    assert!(backup_path.join("storage/vertices_Person.lance").exists());
 
     // 4. Restore (Open new Uni from backup)
     let restore_schema_manager =
@@ -81,7 +81,7 @@ async fn test_backup_and_restore() -> anyhow::Result<()> {
     let restore_schema_manager = Arc::new(restore_schema_manager);
     let restore_storage = Arc::new(
         StorageManager::new(
-            backup_path.to_str().unwrap(),
+            backup_path.join("storage").to_str().unwrap(),
             restore_schema_manager.clone(),
         )
         .await?,
@@ -93,7 +93,13 @@ async fn test_backup_and_restore() -> anyhow::Result<()> {
         .backend()
         .count_rows(&vtable_name, None)
         .await?;
-    assert!(count > 0);
+    assert_eq!(count, 1);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            backup_path.join("catalog/layout.json")
+        )?)?["layout"],
+        serde_json::json!("standard")
+    );
 
     Ok(())
 }

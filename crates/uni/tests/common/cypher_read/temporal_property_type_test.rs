@@ -166,3 +166,50 @@ async fn temporal_node_and_edge_properties_preserve_type() -> Result<()> {
 
     Ok(())
 }
+
+/// `a - b` on two dates or two datetimes is the duration from `b` to `a`:
+/// positive when `a` is later, negative when it is earlier, from a stored
+/// property and from a literal alike, in both storage tiers.
+#[tokio::test]
+async fn temporal_subtraction_is_left_minus_right() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    seed(&db).await?;
+
+    for tier in ["L0", "L1"] {
+        if tier == "L1" {
+            db.flush().await?;
+        }
+        let res = db
+            .session()
+            .query(
+                "MATCH (n:E {name: 'x'}) RETURN \
+                 toString(n.d - date('1984-10-01')) AS later, \
+                 toString(date('1984-10-01') - n.d) AS earlier, \
+                 toString(date('1984-10-11') - date('1984-10-01')) AS literal, \
+                 toString(n.ts - datetime('1984-10-11T10:00:00Z')) AS dt_later, \
+                 toString(datetime('1984-10-11T10:00:00Z') - n.ts) AS dt_earlier, \
+                 n.d - date('1984-10-01') = duration.between(date('1984-10-01'), n.d) AS agrees",
+            )
+            .await?;
+        let row = &res.rows()[0];
+        let s = |k: &str| match row.value(k) {
+            Some(Value::String(s)) => s.clone(),
+            other => panic!("{tier}: `{k}` must be a string, got {other:?}"),
+        };
+        assert_eq!(s("later"), "P10D", "{tier}: later date minus earlier");
+        assert_eq!(s("earlier"), "P-10D", "{tier}: earlier date minus later");
+        assert_eq!(s("literal"), "P10D", "{tier}: literal dates");
+        assert_eq!(
+            s("dt_later"),
+            "PT2H",
+            "{tier}: later datetime minus earlier"
+        );
+        assert_eq!(
+            s("dt_earlier"),
+            "PT-2H",
+            "{tier}: earlier datetime minus later"
+        );
+        assert_eq!(row.value("agrees"), Some(&Value::Bool(true)), "{tier}");
+    }
+    Ok(())
+}

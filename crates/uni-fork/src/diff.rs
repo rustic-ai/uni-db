@@ -22,9 +22,28 @@ use uni_common::core::id::{UniId, Vid};
 
 use crate::host::{ForkPromoteSink, ForkQueryHost};
 use crate::types::{
-    ConflictPolicy, DiffEdge, DiffVertex, EdgeDiff, ForkDiff, PromoteBaseline, PromoteOptions,
-    PromotePattern, PromoteReport, PropertyChange, VertexDiff, VertexPropertyChange,
+    ConflictPolicy, DiffEdge, DiffVertex, EdgeDiff, EdgePropertyChange, ForkDiff, PromoteBaseline,
+    PromoteOptions, PromotePattern, PromoteReport, PropertyChange, VertexDiff,
+    VertexPropertyChange,
 };
+
+/// Ids shared by the two sides of a diff because one descends from the
+/// other.
+///
+/// When `b` is a fork descended from `a` (or the reverse), every vertex id
+/// below `vid_floor` and edge id below `eid_floor` that the descendant holds
+/// was inherited at its fork point, so the same id on the ancestor side is
+/// the same row. Ids at or above the floors were allocated on each side
+/// independently and say nothing. The floors are the fork-point
+/// high-water marks of the fork directly below the ancestor on the path
+/// to the descendant (`ForkInfo::fork_point_vid_hwm` / `_eid_hwm`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SharedLineage {
+    /// Vertex ids below this are shared by both sides.
+    pub vid_floor: u64,
+    /// Edge ids below this are shared by both sides.
+    pub eid_floor: u64,
+}
 
 /// Compute the structural delta between two views.
 ///
@@ -32,10 +51,28 @@ use crate::types::{
 /// *forward*: returned `ForkDiff.vertices.added` is rows present in `b`
 /// but not `a`; `deleted` is rows in `a` but not `b`.
 ///
-/// Identity is content-addressed UID for vertices and `(src_uid,
-/// dst_uid)` for edges, scoped by edge type — so two unrelated forks
-/// with overlapping VIDs but distinct content pair correctly.
+/// Identity is content-addressed UID for vertices and an edge-content UID
+/// for edges, scoped by edge type — so two unrelated forks with
+/// overlapping VIDs but distinct content pair correctly. An added and a
+/// deleted vertex sharing `(label, ext_id)` are paired into `changed`.
+/// Ids are not paired: see [`compute_diff_with_lineage`].
 pub async fn compute_diff<Q: ForkQueryHost + ?Sized>(a: &Q, b: &Q) -> Result<ForkDiff> {
+    compute_diff_with_lineage(a, b, None).await
+}
+
+/// [`compute_diff`], also pairing rows by id when the sides share lineage.
+///
+/// With `lineage`, an added and a deleted vertex with the same VID below
+/// [`SharedLineage::vid_floor`] pair into `vertices.changed`, and edges
+/// likewise by EID into `edges.changed`; an edge pair whose properties are
+/// equal (only an endpoint's content changed) is dropped from the diff.
+/// Pass `None` for views that do not descend from one another: their ids
+/// are allocated independently and pairing them would match unrelated rows.
+pub async fn compute_diff_with_lineage<Q: ForkQueryHost + ?Sized>(
+    a: &Q,
+    b: &Q,
+    lineage: Option<SharedLineage>,
+) -> Result<ForkDiff> {
     let mut diff = ForkDiff::default();
 
     // vid → ext_id per side: ext_id is folded into the content UID but stripped
@@ -56,7 +93,7 @@ pub async fn compute_diff<Q: ForkQueryHost + ?Sized>(a: &Q, b: &Q) -> Result<For
     for label in labels_union {
         let rows_a = scan_label_nodes(a, label, &ext_a).await?;
         let rows_b = scan_label_nodes(b, label, &ext_b).await?;
-        diff_label(label, rows_a, rows_b, &mut diff.vertices);
+        diff_label(label, rows_a, rows_b, lineage, &mut diff.vertices);
     }
 
     let edges_a = edge_types_of(a).await?;
@@ -66,7 +103,7 @@ pub async fn compute_diff<Q: ForkQueryHost + ?Sized>(a: &Q, b: &Q) -> Result<For
     for edge_type in edges_union {
         let rows_a = scan_edge_type(a, edge_type, &ext_a).await?;
         let rows_b = scan_edge_type(b, edge_type, &ext_b).await?;
-        diff_edge_type(edge_type, rows_a, rows_b, &mut diff.edges);
+        diff_edge_type(edge_type, rows_a, rows_b, lineage, &mut diff.edges);
     }
 
     Ok(diff)
@@ -132,11 +169,13 @@ type EdgeBucket = HashMap<UniId, EdgeRow>;
 struct VertexRow {
     label: String,
     vid: Vid,
+    ext_id: Option<String>,
     properties: Properties,
 }
 
 #[derive(Debug, Clone)]
 struct EdgeRow {
+    eid: uni_common::core::id::Eid,
     src_uid: UniId,
     dst_uid: UniId,
     properties: Properties,
@@ -199,12 +238,23 @@ async fn scan_label_nodes<Q: ForkQueryHost + ?Sized>(
             ext_id_for(ext_ids, node.vid),
             &node.properties,
         );
+        // The storage map covers flushed rows; an unflushed row still carries
+        // its `ext_id` among its properties.
+        let ext_id = ext_id_for(ext_ids, node.vid)
+            .map(str::to_string)
+            .or_else(|| {
+                node.properties
+                    .get("ext_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
         if bucket
             .insert(
                 uid,
                 VertexRow {
                     label: label.to_string(),
                     vid: node.vid,
+                    ext_id,
                     properties: node.properties.clone(),
                 },
             )
@@ -254,6 +304,7 @@ async fn scan_edge_type<Q: ForkQueryHost + ?Sized>(
             .insert(
                 edge_uid,
                 EdgeRow {
+                    eid: edge.eid,
                     src_uid,
                     dst_uid,
                     properties: edge.properties.clone(),
@@ -270,106 +321,239 @@ async fn scan_edge_type<Q: ForkQueryHost + ?Sized>(
     Ok(bucket)
 }
 
-/// Split two content-keyed buckets into *added* (present in `b`, not `a`)
-/// and *deleted* (present in `a`, not `b`) rows, moving each row out of its
-/// owning map via the supplied builders. Returns the rows shared by both
-/// buckets (`(uid, row_a, row_b)`) so the caller can diff their properties.
-fn partition_added_deleted<R, A, D>(
-    mut a: HashMap<UniId, R>,
-    mut b: HashMap<UniId, R>,
-    mut mk_added: A,
-    mut mk_deleted: D,
-) -> Vec<(UniId, R, R)>
-where
-    A: FnMut(UniId, R),
-    D: FnMut(UniId, R),
-{
-    let keys_a: HashSet<UniId> = a.keys().copied().collect();
-    let keys_b: HashSet<UniId> = b.keys().copied().collect();
-
-    let mut common = Vec::new();
-    for uid in &keys_b {
-        if !keys_a.contains(uid) {
-            mk_added(*uid, b.remove(uid).expect("key from keys_b"));
-        }
-    }
-    for uid in &keys_a {
-        if keys_b.contains(uid) {
-            let row_a = a.remove(uid).expect("key from keys_a");
-            let row_b = b.remove(uid).expect("shared key in b");
-            common.push((*uid, row_a, row_b));
-        } else {
-            mk_deleted(*uid, a.remove(uid).expect("key from keys_a"));
-        }
-    }
-    common
+/// Rows of two content-keyed buckets, split by which side holds each UID.
+struct Partition<R> {
+    /// In `b` only.
+    added: Vec<(UniId, R)>,
+    /// In `a` only.
+    deleted: Vec<(UniId, R)>,
+    /// In both, as `(uid, row_a, row_b)`.
+    common: Vec<(UniId, R, R)>,
 }
 
-fn diff_label(label: &str, a: VertexBucket, b: VertexBucket, out: &mut VertexDiff) {
-    let common = partition_added_deleted(
-        a,
-        b,
-        |uid, row| {
-            out.added.push(DiffVertex {
-                label: row.label,
-                uid,
-                vid: Some(row.vid),
-                properties: row.properties,
-            });
-        },
-        |uid, row| {
-            out.deleted.push(DiffVertex {
-                label: row.label,
-                uid,
-                vid: Some(row.vid),
-                properties: row.properties,
-            });
-        },
+/// Split two content-keyed buckets into *added* (present in `b`, not `a`),
+/// *deleted* (present in `a`, not `b`) and shared rows.
+fn partition_added_deleted<R>(mut a: HashMap<UniId, R>, mut b: HashMap<UniId, R>) -> Partition<R> {
+    let mut out = Partition {
+        added: Vec::new(),
+        deleted: Vec::new(),
+        common: Vec::new(),
+    };
+    let keys_a: Vec<UniId> = a.keys().copied().collect();
+    for uid in keys_a {
+        let row_a = a.remove(&uid).expect("key from a");
+        match b.remove(&uid) {
+            Some(row_b) => out.common.push((uid, row_a, row_b)),
+            None => out.deleted.push((uid, row_a)),
+        }
+    }
+    out.added.extend(b);
+    out
+}
+
+/// Pair rows of `deleted` with rows of `added` that share a key.
+///
+/// `key` returns `None` for a row that must not pair. A key held by more
+/// than one row on a side is ambiguous and pairs nothing. Paired rows are
+/// moved out of both vectors and returned as `(deleted, added)`.
+fn pair_by_key<R, K, F>(
+    deleted: &mut Vec<(UniId, R)>,
+    added: &mut Vec<(UniId, R)>,
+    key: F,
+) -> Vec<((UniId, R), (UniId, R))>
+where
+    K: std::hash::Hash + Eq,
+    F: Fn(&R) -> Option<K>,
+{
+    fn unique_index<R, K: std::hash::Hash + Eq>(
+        rows: &[(UniId, R)],
+        key: &impl Fn(&R) -> Option<K>,
+    ) -> HashMap<K, usize> {
+        let mut seen: HashMap<K, Option<usize>> = HashMap::new();
+        for (i, (_, row)) in rows.iter().enumerate() {
+            if let Some(k) = key(row) {
+                seen.entry(k)
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(i));
+            }
+        }
+        seen.into_iter()
+            .filter_map(|(k, slot)| slot.map(|i| (k, i)))
+            .collect()
+    }
+    let del_index = unique_index(deleted, &key);
+    let add_index = unique_index(added, &key);
+    let mut pairs_idx: Vec<(usize, usize)> = del_index
+        .iter()
+        .filter_map(|(k, &di)| add_index.get(k).map(|&ai| (di, ai)))
+        .collect();
+    if pairs_idx.is_empty() {
+        return Vec::new();
+    }
+    // Remove from the back so earlier indices stay valid.
+    let mut del_taken: Vec<Option<(UniId, R)>> =
+        std::mem::take(deleted).into_iter().map(Some).collect();
+    let mut add_taken: Vec<Option<(UniId, R)>> =
+        std::mem::take(added).into_iter().map(Some).collect();
+    pairs_idx.sort_unstable();
+    let pairs = pairs_idx
+        .into_iter()
+        .map(|(di, ai)| {
+            (
+                del_taken[di].take().expect("unique index"),
+                add_taken[ai].take().expect("unique index"),
+            )
+        })
+        .collect();
+    deleted.extend(del_taken.into_iter().flatten());
+    added.extend(add_taken.into_iter().flatten());
+    pairs
+}
+
+/// The properties a vertex is compared on: its properties, with its
+/// `ext_id` folded in when the query result did not carry it, so a pair
+/// whose only difference is the `ext_id` still reports it.
+fn comparable_vertex_props(row: &VertexRow) -> std::borrow::Cow<'_, Properties> {
+    match &row.ext_id {
+        Some(eid) if !row.properties.contains_key("ext_id") => {
+            let mut props = row.properties.clone();
+            props.insert("ext_id".to_string(), Value::String(eid.clone()));
+            std::borrow::Cow::Owned(props)
+        }
+        _ => std::borrow::Cow::Borrowed(&row.properties),
+    }
+}
+
+fn diff_label(
+    label: &str,
+    a: VertexBucket,
+    b: VertexBucket,
+    lineage: Option<SharedLineage>,
+    out: &mut VertexDiff,
+) {
+    let Partition {
+        mut added,
+        mut deleted,
+        common,
+    } = partition_added_deleted(a, b);
+    // Rows sharing a UID have, by construction, identical content.
+    debug_assert!(
+        common
+            .iter()
+            .all(|(_, ra, rb)| property_changes(&ra.properties, &rb.properties).is_empty())
     );
-    for (uid, row_a, row_b) in common {
-        let changes = property_changes(&row_a.properties, &row_b.properties);
-        if !changes.is_empty() {
-            out.changed.push(VertexPropertyChange {
-                label: label.to_string(),
-                uid,
+
+    // An edited row has a new content UID on the side that edited it. Pair
+    // the before and after rows: by inherited VID under shared lineage
+    // first, then by `(label, ext_id)` (the label is fixed here).
+    let mut pairs = Vec::new();
+    if let Some(lin) = lineage {
+        pairs.extend(pair_by_key(&mut deleted, &mut added, |row: &VertexRow| {
+            (row.vid.as_u64() < lin.vid_floor).then_some(row.vid)
+        }));
+    }
+    pairs.extend(pair_by_key(&mut deleted, &mut added, |row: &VertexRow| {
+        row.ext_id.clone()
+    }));
+    for ((uid_a, row_a), (uid_b, row_b)) in pairs {
+        let changes = property_changes(
+            &comparable_vertex_props(&row_a),
+            &comparable_vertex_props(&row_b),
+        );
+        if changes.is_empty() {
+            continue;
+        }
+        out.changed.push(VertexPropertyChange {
+            label: label.to_string(),
+            uid: uid_a,
+            after_uid: uid_b,
+            ext_id: match (&row_a.ext_id, &row_b.ext_id) {
+                (Some(x), Some(y)) if x == y => Some(x.clone()),
+                _ => None,
+            },
+            vid: (row_a.vid == row_b.vid).then_some(row_a.vid),
+            changes,
+        });
+    }
+
+    for (uid, row) in added {
+        out.added.push(DiffVertex {
+            label: row.label,
+            uid,
+            vid: Some(row.vid),
+            properties: row.properties,
+        });
+    }
+    for (uid, row) in deleted {
+        out.deleted.push(DiffVertex {
+            label: row.label,
+            uid,
+            vid: Some(row.vid),
+            properties: row.properties,
+        });
+    }
+}
+
+fn diff_edge_type(
+    edge_type: &str,
+    a: EdgeBucket,
+    b: EdgeBucket,
+    lineage: Option<SharedLineage>,
+    out: &mut EdgeDiff,
+) {
+    // Rows sharing an edge UID have identical (src, dst, type, properties)
+    // by construction, so the shared rows carry no change and are dropped.
+    let Partition {
+        mut added,
+        mut deleted,
+        ..
+    } = partition_added_deleted(a, b);
+
+    // Under shared lineage an inherited EID is the same edge on both sides,
+    // so an added and a deleted row with that EID are one edge whose
+    // properties, or an endpoint's content, changed. Edges between
+    // unrelated views have no identity beyond their content.
+    if let Some(lin) = lineage {
+        let pairs = pair_by_key(&mut deleted, &mut added, |row: &EdgeRow| {
+            (row.eid.as_u64() < lin.eid_floor).then_some(row.eid)
+        });
+        for ((_, row_a), (_, row_b)) in pairs {
+            let changes = property_changes(&row_a.properties, &row_b.properties);
+            // Equal properties: only an endpoint changed, and that change is
+            // the endpoint's own row in `vertices.changed`.
+            if changes.is_empty() {
+                continue;
+            }
+            out.changed.push(EdgePropertyChange {
+                edge_type: edge_type.to_string(),
+                eid: row_a.eid,
+                src_uid: row_a.src_uid,
+                dst_uid: row_a.dst_uid,
+                after_src_uid: row_b.src_uid,
+                after_dst_uid: row_b.dst_uid,
                 changes,
             });
         }
     }
-}
 
-fn diff_edge_type(edge_type: &str, a: EdgeBucket, b: EdgeBucket, out: &mut EdgeDiff) {
-    // Note: under content-addressed identity, two edges with the same
-    // edge_uid have, by construction, identical (src, dst, type,
-    // properties) — so the shared (intersection) rows cannot contain a
-    // property difference. The `changed` branch is intentionally
-    // unreachable under multi-edge semantics; property mutations surface
-    // as added+deleted of distinct edge UIDs. `EdgePropertyChange` remains
-    // in the public API for forward compatibility with a future identity
-    // model that anchors on a stable edge id. We therefore discard the
-    // common rows.
-    partition_added_deleted(
-        a,
-        b,
-        |edge_uid, row| {
-            out.added.push(DiffEdge {
-                edge_type: edge_type.to_string(),
-                edge_uid,
-                src_uid: row.src_uid,
-                dst_uid: row.dst_uid,
-                properties: row.properties,
-            });
-        },
-        |edge_uid, row| {
-            out.deleted.push(DiffEdge {
-                edge_type: edge_type.to_string(),
-                edge_uid,
-                src_uid: row.src_uid,
-                dst_uid: row.dst_uid,
-                properties: row.properties,
-            });
-        },
-    );
+    for (edge_uid, row) in added {
+        out.added.push(DiffEdge {
+            edge_type: edge_type.to_string(),
+            edge_uid,
+            src_uid: row.src_uid,
+            dst_uid: row.dst_uid,
+            properties: row.properties,
+        });
+    }
+    for (edge_uid, row) in deleted {
+        out.deleted.push(DiffEdge {
+            edge_type: edge_type.to_string(),
+            edge_uid,
+            src_uid: row.src_uid,
+            dst_uid: row.dst_uid,
+            properties: row.properties,
+        });
+    }
 }
 
 fn property_changes(a: &Properties, b: &Properties) -> Vec<PropertyChange> {
@@ -429,7 +613,70 @@ fn vid_in_list(vids: impl IntoIterator<Item = u64>) -> String {
 /// matches, so a fork row diverging from a primary edit is correctly
 /// treated as absent and inserted as a twin. `primary_ext_ids` supplies
 /// each primary vid's `ext_id` to recompute the same double-folded UID.
+///
+/// The UidIndex holds flushed rows only, so a vertex primary has committed
+/// but not yet flushed (one an earlier promote inserted, say) is not in it.
+/// The UIDs the index does not resolve are therefore looked up again by a
+/// content scan of the label on primary ([`resolve_primary_vids_by_scan`]),
+/// which reads L0 as well; without it a second promote before primary's
+/// flush inserted every such vertex again.
 async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
+    primary: &Q,
+    primary_storage: &Arc<uni_store::storage::manager::StorageManager>,
+    label: &str,
+    uids: &[UniId],
+    primary_ext_ids: &HashMap<Vid, String>,
+) -> (HashMap<UniId, Vid>, bool) {
+    if uids.is_empty() {
+        return (HashMap::new(), false);
+    }
+    // A label undeclared on primary (schemaless, #306) has no per-label
+    // table and so no UidIndex: the flush registers UIDs only for declared
+    // labels. Every lookup would miss and promote would insert a duplicate
+    // of each row primary already holds. Resolve it by content instead.
+    if !primary.schema().schema().labels.contains_key(label) {
+        return resolve_primary_vids_by_scan(primary, label, uids, primary_ext_ids).await;
+    }
+    let (mut out, index_degraded) =
+        resolve_primary_vids_by_index(primary, primary_storage, label, uids, primary_ext_ids).await;
+    let misses: Vec<UniId> = uids
+        .iter()
+        .filter(|u| !out.contains_key(*u))
+        .cloned()
+        .collect();
+    if misses.is_empty() {
+        return (out, index_degraded);
+    }
+    // The index holds flushed rows only, so a miss may still be a row primary
+    // has not flushed. Only those rows are scanned: a promote of new vertices
+    // into a large label must not read the whole label. A host that cannot
+    // list its unflushed rows gets the full scan, whose verdict then stands
+    // even when the index lookup itself failed.
+    match primary.unflushed_vids(label) {
+        Some(unflushed) if unflushed.is_empty() => (out, index_degraded),
+        Some(unflushed) => {
+            let (found, scan_degraded) = resolve_primary_vids_by_scan_among(
+                primary,
+                label,
+                &misses,
+                primary_ext_ids,
+                Some(&unflushed),
+            )
+            .await;
+            out.extend(found);
+            (out, index_degraded || scan_degraded)
+        }
+        None => {
+            let (found, scan_degraded) =
+                resolve_primary_vids_by_scan(primary, label, &misses, primary_ext_ids).await;
+            out.extend(found);
+            (out, scan_degraded)
+        }
+    }
+}
+
+/// The UidIndex half of [`batch_resolve_primary_vids`]: flushed rows only.
+async fn resolve_primary_vids_by_index<Q: ForkQueryHost + ?Sized>(
     primary: &Q,
     primary_storage: &Arc<uni_store::storage::manager::StorageManager>,
     label: &str,
@@ -445,16 +692,6 @@ async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
     // from a failed resolve, so the resulting inserts are unverified and
     // may be duplicates — surfaced as `vertices_inserted_unverified`.
     let mut out: HashMap<UniId, Vid> = HashMap::new();
-    if uids.is_empty() {
-        return (out, false);
-    }
-    // A label undeclared on primary (schemaless, #306) has no per-label
-    // table and so no UidIndex: the flush registers UIDs only for declared
-    // labels. Every lookup would miss and promote would insert a duplicate
-    // of each row primary already holds. Resolve it by content instead.
-    if !primary.schema().schema().labels.contains_key(label) {
-        return resolve_primary_vids_by_scan(primary, label, uids, primary_ext_ids).await;
-    }
     // Collect *all* candidate VIDs per UID by scanning the shared
     // UidIndex with an IN filter. The shared index is not
     // branch-isolated, so a single UID may have a fork-only VID and
@@ -520,7 +757,8 @@ async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
 /// Resolve content UIDs to primary VIDs by scanning `label` on primary.
 ///
 /// The fallback of [`batch_resolve_primary_vids`] for a label with no
-/// UidIndex (undeclared on primary). Hashes every live primary vertex of
+/// UidIndex (undeclared on primary), and for the UIDs the index misses
+/// (rows primary has not flushed yet). Hashes every live primary vertex of
 /// the label exactly as the index path re-verifies a candidate, so the
 /// two paths agree on what "present" means. One primary query, linear in
 /// the label's size. A failed query degrades exactly as the index path
@@ -531,9 +769,28 @@ async fn resolve_primary_vids_by_scan<Q: ForkQueryHost + ?Sized>(
     uids: &[UniId],
     primary_ext_ids: &HashMap<Vid, String>,
 ) -> (HashMap<UniId, Vid>, bool) {
+    resolve_primary_vids_by_scan_among(primary, label, uids, primary_ext_ids, None).await
+}
+
+/// [`resolve_primary_vids_by_scan`] over the given vids of the label only
+/// (`None` for all of them).
+async fn resolve_primary_vids_by_scan_among<Q: ForkQueryHost + ?Sized>(
+    primary: &Q,
+    label: &str,
+    uids: &[UniId],
+    primary_ext_ids: &HashMap<Vid, String>,
+    among: Option<&[Vid]>,
+) -> (HashMap<UniId, Vid>, bool) {
     let mut out: HashMap<UniId, Vid> = HashMap::new();
     let wanted: HashSet<&UniId> = uids.iter().collect();
-    let cypher = format!("MATCH (n:`{}`) RETURN n", escape_backticks(label));
+    let cypher = match among {
+        None => format!("MATCH (n:`{}`) RETURN n", escape_backticks(label)),
+        Some(vids) => format!(
+            "MATCH (n:`{}`) WHERE id(n) IN [{}] RETURN n",
+            escape_backticks(label),
+            vid_in_list(vids.iter().map(|v| v.as_u64()))
+        ),
+    };
     let Ok(rs) = primary.query(&cypher).await else {
         return (out, true);
     };
@@ -742,6 +999,10 @@ where
 
                 // Per-label fork-point baseline (merge mode only).
                 let label_baseline = baseline.and_then(|b| b.ext.get(label));
+                if !ext_resolved.is_empty() {
+                    let vids: Vec<Vid> = ext_resolved.values().map(|(vid, _)| *vid).collect();
+                    primary_tx.prepare_vertex_updates(&vids).await?;
+                }
 
                 // Partition: ext_id matches become in-place upserts; every
                 // other candidate flows through the content-UID

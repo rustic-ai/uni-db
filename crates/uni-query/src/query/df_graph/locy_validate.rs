@@ -111,14 +111,7 @@ pub fn validate_collection_query(
 
 /// Convert a target Value to a bool label. Same rules as CALIBRATE.
 fn target_to_label(v: Option<&Value>) -> bool {
-    match v {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Int(i)) => *i != 0,
-        Some(Value::Float(f)) => *f != 0.0,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Null) | None => false,
-        Some(_) => false,
-    }
+    super::locy_calibrate::target_to_label(v)
 }
 
 /// Canonicalize a Value for join-key comparison.

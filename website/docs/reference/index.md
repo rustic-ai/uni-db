@@ -76,9 +76,17 @@ config.parallelism = 4;
 | `Int64` | 64-bit integer | `9223372036854775807` |
 | `Float32` | 32-bit float | `3.14` |
 | `Float64` | 64-bit float | `3.141592653589793` |
-| `Boolean` | True/false | `true` |
-| `Vector[N]` | N-dimensional float vector | `[0.1, 0.2, 0.3]` |
-| `Json` | Nested JSON document | `{"key": "value"}` |
+| `Bool` | True/false | `true` |
+| `Date` / `Time` / `DateTime` / `Timestamp` | Temporal values | `date('2024-01-15')` |
+| `Duration` | Time span | `duration('P1D')` |
+| `Bytes` | Binary data | |
+| `Point` | Geographic or Cartesian point | `point({x: 1.0, y: 2.0})` |
+| `Vector { dimensions }` | N-dimensional float vector | `[0.1, 0.2, 0.3]` |
+| `SparseVector { dimensions }` / `BinaryVector { dimensions }` | Sparse or bit-packed vectors | |
+| `Btic` | Bounded temporal interval | |
+| `Crdt(CrdtType)` | Conflict-free replicated type | |
+| `List(T)` / `Map(K, V)` | Typed list / map | `[1, 2, 3]` |
+| `CypherValue` | Schemaless value, nested JSON-like data (DDL `JSON`) | `{key: 'value'}` |
 
 ### Environment Variables
 

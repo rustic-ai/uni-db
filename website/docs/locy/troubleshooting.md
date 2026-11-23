@@ -46,7 +46,7 @@ Fix: Declared lattice folds are incompatible with witness selection. Use a separ
 
 ### ProbabilityDomainViolation (warning)
 
-Cause: `MNOR` or `MPROD` used with non-literal arguments that may produce values outside `[0, 1]`.
+Cause: `MNOR` or `MPROD` in a recursive rule takes a non-literal argument, which may produce values outside `[0, 1]`. It is a static hint in `compile_warnings`; no value was inspected.
 
 Fix: The compiler warning is informational — values are clamped at runtime unless `strict_probability_domain = true`. Sanitize upstream scores if clamping is masking a data quality issue.
 

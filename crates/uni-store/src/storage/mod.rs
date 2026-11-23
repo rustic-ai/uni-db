@@ -16,6 +16,7 @@ pub mod direction;
 pub mod edge;
 #[cfg(feature = "lance-backend")]
 pub mod index;
+pub mod index_datasets;
 pub mod index_manager;
 pub mod index_rebuild;
 #[cfg(feature = "lance-backend")]
@@ -27,6 +28,7 @@ pub mod main_vertex;
 pub mod manager;
 pub mod muvera_index;
 pub mod property_builder;
+pub mod read_cut;
 pub mod resilient_store;
 pub mod schema_evolution;
 pub mod shadow_csr;

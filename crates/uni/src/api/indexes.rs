@@ -53,9 +53,15 @@ impl Indexes<'_> {
                 self.inner.storage.base_path(),
                 self.inner.schema.clone(),
             )
-            .with_backend(self.inner.storage.backend_arc());
+            .with_backend(self.inner.storage.head_backend_arc())
+            .with_read_cut(std::sync::Arc::clone(self.inner.storage.read_cut()));
             idx_mgr
                 .rebuild_indexes_for_label(label)
+                .await
+                .map_err(UniError::Internal)?;
+            self.inner
+                .storage
+                .publish_cut()
                 .await
                 .map_err(UniError::Internal)?;
             Ok(None)

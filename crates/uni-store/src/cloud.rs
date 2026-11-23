@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
 use object_store::aws::AmazonS3Builder;
@@ -29,10 +29,12 @@ use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use uni_common::CloudStorageConfig;
 
-/// Builds an `ObjectStore` from a `CloudStorageConfig`.
+/// Builds an `ObjectStore` from a `CloudStorageConfig` alone.
 ///
 /// Creates the appropriate cloud storage client based on the configuration
-/// variant, applying all specified credentials and settings.
+/// variant, applying only the credentials and settings it names: unlike
+/// opening a database ([`crate::location::StoreLocation`]), it does not fall
+/// back to the environment for fields left `None`.
 ///
 /// # Errors
 ///
@@ -151,98 +153,35 @@ pub fn build_cloud_store(config: &CloudStorageConfig) -> Result<Arc<dyn ObjectSt
     }
 }
 
-/// Parses a URL and returns the appropriate `ObjectStore` and path prefix.
+/// Resolves a URL to a store rooted at its bucket and the decoded path under it.
 ///
-/// Supports the following URL schemes:
-/// - `s3://bucket/path` - Amazon S3
-/// - `gs://bucket/path` - Google Cloud Storage
-/// - `az://account/container/path` - Azure Blob Storage
-/// - `file:///path` or `/path` - Local filesystem
+/// Uses the same resolution as opening a database ([`StoreLocation`]): the
+/// environment (`AWS_*`, `GOOGLE_*`, `AZURE_*`) configures the client, and the
+/// URL conventions are `object_store`'s.
+///
+/// Supported: `s3://bucket/path` (and `s3a://`), `gs://bucket/path` (and
+/// `gcs://`), `az://container/path`, `abfss://container@account.dfs.core.windows.net/path`,
+/// `file:///path`, and plain local paths.
 ///
 /// # Errors
 ///
-/// Returns an error if the URL scheme is not recognized or if the store
-/// cannot be created.
+/// An unsupported scheme, or a store that cannot be built.
 ///
-/// # Examples
-///
-/// ```ignore
-/// let (store, prefix) = build_store_from_url("s3://my-bucket/data")?;
-/// ```
-pub fn build_store_from_url(url: &str) -> Result<(Arc<dyn ObjectStore>, Path)> {
-    // Handle local paths directly
+/// [`StoreLocation`]: crate::location::StoreLocation
+pub async fn build_store_from_url(url: &str) -> Result<(Arc<dyn ObjectStore>, Path)> {
     if !url.contains("://") {
-        let local_path = std::path::Path::new(url);
-        let store = Arc::new(LocalFileSystem::new_with_prefix(local_path)?);
+        let store = Arc::new(LocalFileSystem::new_with_prefix(std::path::Path::new(url))?);
         return Ok((store, Path::from("")));
     }
-
-    if let Some(path) = url.strip_prefix("file://") {
-        let local_path = std::path::Path::new(path);
-        let store = Arc::new(LocalFileSystem::new_with_prefix(local_path)?);
-        return Ok((store, Path::from("")));
-    }
-
-    let parsed = url::Url::parse(url).map_err(|e| anyhow!("Invalid URL '{}': {}", url, e))?;
-    let scheme = parsed.scheme();
-
-    match scheme {
-        "s3" => {
-            let bucket = parsed
-                .host_str()
-                .ok_or_else(|| anyhow!("S3 URL missing bucket: {}", url))?;
-            let prefix = parsed.path().trim_start_matches('/');
-
-            let config = CloudStorageConfig::s3_from_env(bucket);
-            let store = build_cloud_store(&config)?;
-
-            Ok((store, Path::from(prefix)))
-        }
-        "gs" => {
-            let bucket = parsed
-                .host_str()
-                .ok_or_else(|| anyhow!("GCS URL missing bucket: {}", url))?;
-            let prefix = parsed.path().trim_start_matches('/');
-
-            let config = CloudStorageConfig::gcs_from_env(bucket);
-            let store = build_cloud_store(&config)?;
-
-            Ok((store, Path::from(prefix)))
-        }
-        "az" | "azure" | "abfs" | "abfss" => {
-            // Format: az://account/container/path
-            let account = parsed
-                .host_str()
-                .ok_or_else(|| anyhow!("Azure URL missing account: {}", url))?;
-            let path_parts: Vec<&str> = parsed
-                .path()
-                .trim_start_matches('/')
-                .splitn(2, '/')
-                .collect();
-
-            if path_parts.is_empty() || path_parts[0].is_empty() {
-                return Err(anyhow!("Azure URL missing container: {}", url));
-            }
-
-            let container = path_parts[0];
-            let prefix = path_parts.get(1).unwrap_or(&"");
-
-            let config = CloudStorageConfig::Azure {
-                container: container.to_string(),
-                account: account.to_string(),
-                access_key: std::env::var("AZURE_STORAGE_ACCESS_KEY").ok(),
-                sas_token: std::env::var("AZURE_STORAGE_SAS_TOKEN").ok(),
-            };
-
-            let store = build_cloud_store(&config)?;
-
-            Ok((store, Path::from(*prefix)))
-        }
-        _ => Err(anyhow!(
-            "Unsupported URL scheme '{}'. Supported: s3://, gs://, az://",
-            scheme
-        )),
-    }
+    let location = crate::location::StoreLocation::resolve_from_env(
+        &crate::location::LocationSpec {
+            uri: url.to_string(),
+            ..Default::default()
+        },
+        &uni_common::config::ObjectStoreConfig::default(),
+    )
+    .await?;
+    Ok(location.object_handle())
 }
 
 /// Copies all objects from a source prefix to a destination prefix.
@@ -292,7 +231,9 @@ pub async fn copy_store_prefix(
 #[must_use]
 pub fn is_cloud_url(url: &str) -> bool {
     url.starts_with("s3://")
+        || url.starts_with("s3a://")
         || url.starts_with("gs://")
+        || url.starts_with("gcs://")
         || url.starts_with("az://")
         || url.starts_with("azure://")
         || url.starts_with("abfs://")
@@ -369,7 +310,7 @@ mod tests {
             access_key: None,
             sas_token: None,
         };
-        assert_eq!(azure.to_url(), "az://account/container");
+        assert_eq!(azure.to_url(), "az://container");
     }
 
     #[tokio::test]
@@ -377,7 +318,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().to_str().unwrap();
 
-        let result = build_store_from_url(path);
+        let result = build_store_from_url(path).await;
         assert!(result.is_ok());
 
         let (store, prefix) = result.unwrap();

@@ -73,12 +73,14 @@ pub struct SessionCapabilities {
 /// variant without carrying the actual provider trait object.
 #[derive(Debug, Clone)]
 pub enum WriteLeaseSummary {
-    /// Local single-process lock.
+    /// The built-in lock (local store) or lease (object store).
     Local,
     /// DynamoDB-based distributed lease.
     DynamoDB { table: String },
     /// Custom lease provider (opaque).
     Custom,
+    /// No lease: one writer by convention.
+    Unenforced,
 }
 
 /// Internal atomic counters for session-level metrics.
@@ -827,6 +829,7 @@ impl Session {
         })?;
         let registry = self.rule_registry.read().unwrap();
         let external_names: Vec<String> = registry.rules.keys().cloned().collect();
+        let modules = registry.modules.clone();
         drop(registry);
 
         // Consult the session registry before the instance one, so a
@@ -846,12 +849,27 @@ impl Session {
                     )
                 })
         };
-        uni_locy::compile_with_oracle_and_config(
+        // The `REQUIRE` direction oracle consults the registries in the same
+        // order, so an aggregate passes both checks against the same entry.
+        let direction = |name: &str| {
+            use uni_common::locy::FoldDirection;
+            match uni_query::query::df_graph::locy_fold::locy_direction_verdict(session_reg, name) {
+                FoldDirection::Unknown => {
+                    uni_query::query::df_graph::locy_fold::locy_direction_verdict(
+                        instance_reg,
+                        name,
+                    )
+                }
+                known => known,
+            }
+        };
+        uni_locy::compile_with_oracles_and_config(
             &ast,
-            &HashMap::new(),
+            &modules,
             &external_names,
             config,
             &oracle,
+            &direction,
         )
         .map_err(|e| UniError::Query {
             message: format!("LocyCompileError: {e}"),
@@ -1039,7 +1057,8 @@ impl Session {
     /// # Errors
     ///
     /// Returns [`UniError::ReadOnly`] when the session has no writer
-    /// (e.g. snapshot-pinned sessions).
+    /// (e.g. snapshot-pinned sessions) or belongs to a read-only handle,
+    /// and the storage layer's typed error when the flush itself fails.
     pub async fn flush(&self) -> Result<()> {
         if let Some(writer_lock) = &self.db.writer {
             let writer: &uni_store::Writer = writer_lock.as_ref();
@@ -1047,7 +1066,7 @@ impl Session {
                 .flush_to_l1(None)
                 .await
                 .map(|_| ())
-                .map_err(UniError::Internal)
+                .map_err(crate::api::storage_error)
         } else {
             Err(UniError::ReadOnly {
                 operation: "flush".to_string(),
@@ -1406,6 +1425,7 @@ impl Session {
                 table: table.clone(),
             },
             WriteLease::Custom(_) => WriteLeaseSummary::Custom,
+            WriteLease::Unenforced => WriteLeaseSummary::Unenforced,
         });
         SessionCapabilities {
             can_write: self.db.writer.is_some() && !self.is_pinned(),
@@ -1911,6 +1931,17 @@ impl uni_fork::ForkQueryHost for Session {
 
     fn schema(&self) -> Arc<uni_common::core::schema::SchemaManager> {
         self.db.schema.clone()
+    }
+
+    fn unflushed_vids(&self, label: &str) -> Option<Vec<uni_common::core::id::Vid>> {
+        let writer = self.db.writer.as_ref()?;
+        let l0 = &writer.l0_manager;
+        let mut vids: std::collections::BTreeSet<uni_common::core::id::Vid> =
+            std::collections::BTreeSet::new();
+        for buffer in std::iter::once(l0.get_current()).chain(l0.get_pending_flush()) {
+            vids.extend(buffer.read().vids_for_label(label));
+        }
+        Some(vids.into_iter().collect())
     }
 }
 

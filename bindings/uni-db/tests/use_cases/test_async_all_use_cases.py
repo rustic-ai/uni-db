@@ -110,6 +110,7 @@ async def test_recommendation(db):
     await (
         db.schema()
         .label("Product")
+        .property("embedding", "vector:4")
         .index("embedding", {"type": "vector", "metric": "cosine"})
         .apply()
     )
@@ -168,6 +169,7 @@ async def test_rag(db):
     await (
         db.schema()
         .label("Chunk")
+        .property("embedding", "vector:4")
         .index("embedding", {"type": "vector", "metric": "cosine"})
         .apply()
     )

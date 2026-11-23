@@ -47,12 +47,19 @@ pub struct RotatedFlush {
     /// by finalize (success or failure). Keeps `flush_in_progress` accurate
     /// for the full async pipeline duration.
     pub flush_in_progress_guard: FlushInProgressGuard,
+    /// Waits for this flush's stream turn (`ReadCut::stream_ticket`). Waited
+    /// for before the stream timeout starts: queueing behind an earlier
+    /// stream is not the stream stalling.
+    pub stream_turn: Option<crate::storage::read_cut::TurnWaiter>,
 }
 
 /// Result of a stream phase: the manifest to publish.
 pub struct FlushOutcome {
     pub new_manifest: SnapshotManifest,
     pub snapshot_id: String,
+    /// The flush's read-cut unit, closed when this outcome is dropped
+    /// without being finalized.
+    pub unit: Option<crate::storage::read_cut::UnitGuard>,
 }
 
 /// Carried across the spawn boundary so a finalize step can run without
@@ -442,6 +449,7 @@ impl FlushCoordinator {
         let current_version = rotated.current_version;
         let name = rotated.name.clone();
         let stream_timeout = self.stream_timeout;
+        let stream_turn = rotated.stream_turn.clone();
         // The seq guard guarantees this seq is submitted even if the task's
         // future is dropped before the normal `submit` below (issue #132).
         // It is built *before* the spawn and moved into the task, so it also
@@ -458,6 +466,9 @@ impl FlushCoordinator {
         };
         let task = async move {
             let guard = guard;
+            if let Some(turn) = &stream_turn {
+                turn.wait(crate::runtime::writer::STREAM_TURN_TIMEOUT).await;
+            }
             // `run_stream_catching` converts a panic into a submitted *failure*
             // (review H2). `timeout` additionally converts a STALLED stream — a
             // lost-wakeup in the sparse/multivec Lance read-modify-write — into
@@ -634,7 +645,12 @@ async fn finalizer_loop(
                 ..
             } = s;
             let ack_result = match result {
-                Ok(outcome) => finalize_fn.finalize(rotated, outcome, shared.clone()).await,
+                Ok(outcome) => {
+                    // Test seam: a stream has written its tables and its
+                    // finalize has not started (no lock held).
+                    fail::fail_point!("flush::before-async-finalize");
+                    finalize_fn.finalize(rotated, outcome, shared.clone()).await
+                }
                 Err(e) => {
                     // Captured before the error is consumed below. The count
                     // alone cannot be acted on: an occurrence that does not

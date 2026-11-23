@@ -113,3 +113,33 @@ pub use elementary_circuits::ElementaryCircuitsProcedure;
 
 mod graph_coloring;
 pub use graph_coloring::GraphColoringProcedure;
+
+#[cfg(test)]
+mod yield_type_tests {
+    use super::*;
+    use crate::algo::procedure_template::GraphAlgoAdapter;
+    use crate::algo::procedures::ValueType;
+
+    /// These algorithms return integer node ids, not nodes, and say so.
+    #[test]
+    fn node_id_outputs_are_declared_as_integers() {
+        let declared: Vec<(&str, Vec<(&str, ValueType)>)> = vec![
+            ("bridges", bridges::BridgesAdapter::yields()),
+            (
+                "articulationPoints",
+                articulation_points::ArticulationPointsAdapter::yields(),
+            ),
+            ("mst", mst::MstAdapter::yields()),
+            ("dijkstra", dijkstra::DijkstraAdapter::yields()),
+            ("maxMatching", max_matching::MaxMatchingAdapter::yields()),
+        ];
+        for (algo, yields) in declared {
+            for (name, ty) in yields {
+                assert!(
+                    !matches!(ty, ValueType::Node),
+                    "{algo}: `{name}` is an integer id but is declared as a node"
+                );
+            }
+        }
+    }
+}

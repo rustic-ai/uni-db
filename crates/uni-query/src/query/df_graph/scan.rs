@@ -223,8 +223,39 @@ pub struct GraphScanExec {
     /// no runtime filter to recover a prefilter from.
     planner_l0_prefilter: Option<L0PropertyPrefilter>,
 
+    /// An index candidate set resolved at execute time, unflushed rows
+    /// included. Narrows `vid_list_filter`; the predicate it came from stays
+    /// above the scan. See [`CandidatePrefilter`].
+    candidate_prefilter: Option<CandidatePrefilter>,
+
     /// Metrics for execution tracking.
     metrics: ExecutionPlanMetricsSet,
+}
+
+/// Candidate vids an index gives a scan for one of its predicates, read when
+/// the scan runs. The predicate stays above the scan, so a superset of the
+/// matches is all a candidate set has to be.
+#[derive(Debug, Clone)]
+pub(crate) enum CandidatePrefilter {
+    /// `ANY(x IN n.property WHERE x IN terms)` on an inverted index (C11).
+    Inverted {
+        /// The indexed `LIST<STRING>` property.
+        property: String,
+        /// The string terms of the predicate's list.
+        terms: Vec<String>,
+    },
+    /// `n.source[.path] CONTAINS term` on a JSON full-text index (C24): the
+    /// rows whose derived text column contains `term`.
+    JsonText {
+        /// The JSON property.
+        source: String,
+        /// The index's derived text column.
+        derived: String,
+        /// The index's paths (empty for the whole document).
+        paths: Vec<String>,
+        /// The substring searched for.
+        term: String,
+    },
 }
 
 impl fmt::Debug for GraphScanExec {
@@ -280,6 +311,7 @@ impl GraphScanExec {
             dynamic_vid_filter: slot,
             dynamic_property_filter: self.dynamic_property_filter.clone(),
             planner_l0_prefilter: self.planner_l0_prefilter.clone(),
+            candidate_prefilter: self.candidate_prefilter.clone(),
             is_schemaless: self.is_schemaless,
             schema: self.schema.clone(),
             properties: self.properties.clone(),
@@ -304,6 +336,13 @@ impl GraphScanExec {
 
     pub fn with_vid_list_filter(mut self, vids: Vec<u64>) -> Self {
         self.vid_list_filter = Some(vids);
+        self
+    }
+
+    /// Narrow the scan to the candidates an index gives for one of its
+    /// predicates (C11, C24).
+    pub(crate) fn with_candidate_prefilter(mut self, prefilter: CandidatePrefilter) -> Self {
+        self.candidate_prefilter = Some(prefilter);
         self
     }
 
@@ -393,6 +432,7 @@ impl GraphScanExec {
             dynamic_vid_filter: None,
             dynamic_property_filter: None,
             planner_l0_prefilter: None,
+            candidate_prefilter: None,
             is_schemaless: false,
             schema,
             properties,
@@ -463,6 +503,7 @@ impl GraphScanExec {
             dynamic_vid_filter: None,
             dynamic_property_filter: None,
             planner_l0_prefilter: None,
+            candidate_prefilter: None,
             is_schemaless: true,
             schema,
             properties,
@@ -547,6 +588,11 @@ impl GraphScanExec {
 
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
+            // System timestamps, read from the main table's own columns.
+            if is_system_timestamp(prop) {
+                fields.push(Field::new(&col_name, system_timestamp_type(), true));
+                continue;
+            }
             let uni_type = declared(prop.as_str()).map(|meta| &meta.r#type);
             let arrow_type = uni_type
                 .map(|t| t.to_arrow())
@@ -592,6 +638,24 @@ impl DisplayAs for GraphScanExec {
         )?;
         if self.filter.is_some() {
             write!(f, ", filter=<pushed>")?;
+        }
+        match &self.candidate_prefilter {
+            Some(CandidatePrefilter::Inverted { property, terms }) => write!(
+                f,
+                ", inverted_prefilter={}.{property} IN {terms:?}",
+                self.label
+            )?,
+            Some(CandidatePrefilter::JsonText {
+                source,
+                derived,
+                term,
+                ..
+            }) => write!(
+                f,
+                ", json_fts_prefilter={}.{source} ({derived}) CONTAINS {term:?}",
+                self.label
+            )?,
+            None => {}
         }
         Ok(())
     }
@@ -694,6 +758,7 @@ impl ExecutionPlan for GraphScanExec {
             context.memory_pool(),
             self.fetch,
             self.planner_l0_prefilter.clone(),
+            self.candidate_prefilter.clone(),
         )))
     }
 
@@ -730,6 +795,7 @@ impl ExecutionPlan for GraphScanExec {
             dynamic_vid_filter: self.dynamic_vid_filter.clone(),
             dynamic_property_filter: self.dynamic_property_filter.clone(),
             planner_l0_prefilter: self.planner_l0_prefilter.clone(),
+            candidate_prefilter: self.candidate_prefilter.clone(),
             is_schemaless: self.is_schemaless,
             schema: self.schema.clone(),
             properties: self.properties.clone(),
@@ -737,6 +803,89 @@ impl ExecutionPlan for GraphScanExec {
             metrics: self.metrics.clone(),
         }))
     }
+}
+
+/// The candidate vids of a [`CandidatePrefilter`], sorted: those the index
+/// gives, and every unflushed vertex of the label whose value matches, or that
+/// has no property row in a buffer (a relabel, read from its flushed row).
+///
+/// A superset of the matches is enough: the predicate is evaluated above the
+/// scan. The inverted index lists a vid for a term it no longer holds until
+/// the vid is deleted, folds case when it normalizes, and lists a document
+/// whose terms it capped under every term; the JSON text column is searched
+/// over every stored version of a row. What neither may do is miss a flushed
+/// match; the unflushed rows cover what no flush has written yet.
+async fn prefilter_candidates(
+    graph_ctx: &GraphExecutionContext,
+    label: &str,
+    pre: &CandidatePrefilter,
+) -> DFResult<Vec<u64>> {
+    let storage = graph_ctx.storage();
+    let mut vids: HashSet<u64> = HashSet::new();
+    match pre {
+        CandidatePrefilter::Inverted { property, terms } => {
+            let index = storage
+                .inverted_index(label, property)
+                .await
+                .map_err(exec_err)?;
+            vids.extend(
+                index
+                    .query_any(terms)
+                    .await
+                    .map_err(exec_err)?
+                    .into_iter()
+                    .map(|v| v.as_u64()),
+            );
+        }
+        CandidatePrefilter::JsonText { derived, term, .. } => {
+            let filter = uni_store::backend::types::FilterExpr::StringMatch {
+                column: derived.clone(),
+                kind: uni_store::backend::types::StringMatchKind::Contains,
+                pattern: term.clone(),
+            };
+            if let Some(batch) = storage
+                .scan_vertex_table(label, &["_vid"], Some(&filter))
+                .await
+                .map_err(exec_err)?
+                && let Some(col) = batch
+                    .column_by_name("_vid")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            {
+                vids.extend(col.iter().flatten());
+            }
+        }
+    }
+    let matches_l0 = |props: &uni_common::Properties| -> bool {
+        match pre {
+            CandidatePrefilter::Inverted { property, terms } => match props.get(property) {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .any(|i| i.as_str().is_some_and(|s| terms.iter().any(|t| t == s))),
+                _ => false,
+            },
+            CandidatePrefilter::JsonText {
+                source,
+                paths,
+                term,
+                ..
+            } => props
+                .get(source)
+                .and_then(|v| uni_common::core::schema::json_fts_text(v, paths))
+                .is_some_and(|text| text.contains(term.as_str())),
+        }
+    };
+    for l0 in graph_ctx.l0_context().iter_l0_buffers() {
+        let guard = l0.read();
+        for vid in guard.vids_for_label(label) {
+            let holds = guard.vertex_properties.get(&vid).is_none_or(matches_l0);
+            if holds {
+                vids.insert(vid.as_u64());
+            }
+        }
+    }
+    let mut out: Vec<u64> = vids.into_iter().collect();
+    out.sort_unstable();
+    Ok(out)
 }
 
 /// Widest `_vid` range a single scan call will ask for.
@@ -877,6 +1026,10 @@ enum SeekOutcome {
 
 /// State machine for graph scan stream execution.
 enum GraphScanState {
+    /// Read the inverted-index candidates into `vid_list_filter`, then `Init`.
+    ResolveCandidates,
+    /// Waiting for the candidates.
+    ResolvingCandidates(Pin<Box<dyn std::future::Future<Output = DFResult<Vec<u64>>> + Send>>),
     /// Initial state, ready to start scanning.
     Init,
     /// Scan a vid-filtered result one chunk of vids at a time.
@@ -1002,6 +1155,9 @@ struct GraphScanStream {
     /// The schemaless scan's L0 equality prefilter (W3b).
     planner_l0_prefilter: Option<L0PropertyPrefilter>,
 
+    /// Resolved into `vid_list_filter` before the scan starts.
+    candidate_prefilter: Option<CandidatePrefilter>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -1053,7 +1209,13 @@ impl GraphScanStream {
         pool: &Arc<dyn MemoryPool>,
         fetch: Option<usize>,
         planner_l0_prefilter: Option<L0PropertyPrefilter>,
+        candidate_prefilter: Option<CandidatePrefilter>,
     ) -> Self {
+        let state = if candidate_prefilter.is_some() {
+            GraphScanState::ResolveCandidates
+        } else {
+            GraphScanState::Init
+        };
         Self {
             range_target_bytes: range_target_bytes(pool),
             fetch,
@@ -1067,8 +1229,9 @@ impl GraphScanStream {
             extra_lance_filter,
             extra_runtime_filter,
             planner_l0_prefilter,
+            candidate_prefilter,
             schema,
-            state: GraphScanState::Init,
+            state,
             metrics,
             index_consulted,
             slice_size: slice_size.max(1),
@@ -2186,18 +2349,23 @@ async fn columnar_scan_schemaless_vertex_batch_static(
     // a column-pruning pass (there is none; see #184/#185), or a narrower rule
     // that an aggregate over an entity does not need the entity's properties.
     // Until then the blob is read regardless and this branch waits for it.
-    let needs_props_blob = !projected_properties.is_empty();
-    let scan_columns: &[&str] = if needs_props_blob {
-        &["_vid", "_deleted", "labels", "props_json", "_version"]
-    } else {
-        &["_vid", "_deleted", "labels", "_version"]
-    };
+    let needs_props_blob = projected_properties.iter().any(|p| !is_system_timestamp(p));
+    let mut scan_columns: Vec<&str> = vec!["_vid", "_deleted", "labels", "_version"];
+    if needs_props_blob {
+        scan_columns.push("props_json");
+    }
+    // `created_at(n)` / `updated_at(n)`: the main table stores both stamps.
+    for stamp in ["_created_at", "_updated_at"] {
+        if projected_properties.iter().any(|p| p == stamp) {
+            scan_columns.push(stamp);
+        }
+    }
 
     // Single Lance query via StorageManager domain method. Counted, so this
     // scan appears in `scans_reported` — the schemaless path was invisible to
     // the counters the labelled path already reports through.
     let lance_batch = storage
-        .scan_main_vertex_table_counted(scan_columns, filter.as_ref(), graph_ctx.counters())
+        .scan_main_vertex_table_counted(&scan_columns, filter.as_ref(), graph_ctx.counters())
         .await
         .map_err(exec_err)?;
 
@@ -2224,13 +2392,21 @@ async fn columnar_scan_schemaless_vertex_batch_static(
     // Use the Lance batch schema if available, otherwise build from scratch.
     let internal_schema = match &lance_deduped {
         Some(batch) => batch.schema(),
-        None => Arc::new(Schema::new(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_deleted", DataType::Boolean, false),
-            Field::new("labels", labels_data_type(), false),
-            Field::new("props_json", DataType::LargeBinary, true),
-            Field::new("_version", DataType::UInt64, false),
-        ])),
+        None => {
+            let mut fields = vec![
+                Field::new("_vid", DataType::UInt64, false),
+                Field::new("_deleted", DataType::Boolean, false),
+                Field::new("labels", labels_data_type(), false),
+                Field::new("props_json", DataType::LargeBinary, true),
+                Field::new("_version", DataType::UInt64, false),
+            ];
+            for stamp in ["_created_at", "_updated_at"] {
+                if scan_columns.contains(&stamp) {
+                    fields.push(Field::new(stamp, system_timestamp_type(), true));
+                }
+            }
+            Arc::new(Schema::new(fields))
+        }
     };
 
     // Build L0 batch. Prefer the multi-VID list when present (IN-list pushdown
@@ -2347,6 +2523,17 @@ async fn columnar_scan_schemaless_vertex_batch_static(
     apply_runtime_filter(mapped, extra_runtime_filter)
 }
 
+/// Whether `prop` is a system timestamp column (`created_at(n)` /
+/// `updated_at(n)`), which the main table stores outside `props_json`.
+fn is_system_timestamp(prop: &str) -> bool {
+    prop == "_created_at" || prop == "_updated_at"
+}
+
+/// The Arrow type of a system timestamp column.
+fn system_timestamp_type() -> DataType {
+    DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("UTC".into()))
+}
+
 /// Build a RecordBatch from L0 buffer data for schemaless vertices.
 ///
 /// Merges L0 buffers in visibility order (pending_flush → current → transaction),
@@ -2386,6 +2573,8 @@ fn build_l0_schemaless_vertex_batch(
     // vid -> (merged_props, highest_version, labels)
     let mut vid_data: HashMap<u64, (Properties, u64, Vec<String>)> = HashMap::new();
     let mut tombstones: HashSet<u64> = HashSet::new();
+    // System timestamps across the buffers: earliest creation, latest update.
+    let mut stamps: HashMap<u64, (Option<i64>, Option<i64>)> = HashMap::new();
 
     // Parse multi-label filter
     let label_filter: Vec<&str> = if label.is_empty() {
@@ -2486,6 +2675,13 @@ fn build_l0_schemaless_vertex_batch(
             if let Some(labels) = guard.vertex_labels.get(&vid) {
                 entry.2 = labels.clone();
             }
+            let stamp = stamps.entry(vid_u64).or_insert((None, None));
+            if let Some(&c) = guard.vertex_created_at.get(&vid) {
+                stamp.0 = Some(stamp.0.map_or(c, |cur| cur.min(c)));
+            }
+            if let Some(&u) = guard.vertex_updated_at.get(&vid) {
+                stamp.1 = Some(stamp.1.map_or(u, |cur| cur.max(u)));
+            }
         }
     }
 
@@ -2558,6 +2754,19 @@ fn build_l0_schemaless_vertex_batch(
             "_version" => {
                 let vals: Vec<u64> = vids.iter().map(|v| vid_data[v].1).collect();
                 columns.push(Arc::new(UInt64Array::from(vals)));
+            }
+            name @ ("_created_at" | "_updated_at") => {
+                let mut builder =
+                    arrow_array::builder::TimestampNanosecondBuilder::new().with_timezone("UTC");
+                for v in &vids {
+                    let stamp = stamps.get(v).and_then(
+                        |(c, u)| {
+                            if name == "_created_at" { *c } else { *u }
+                        },
+                    );
+                    builder.append_option(stamp);
+                }
+                columns.push(Arc::new(builder.finish()));
             }
             _ => {
                 // Unexpected column — fill with nulls
@@ -2667,7 +2876,16 @@ fn map_to_schemaless_output_schema(
         props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
 
     for prop in projected_properties {
-        if prop == "_all_props" {
+        if is_system_timestamp(prop) {
+            // The merged batch's own column (flushed row or L0 overlay).
+            let col = match batch.column_by_name(prop) {
+                Some(col) => {
+                    arrow::compute::cast(col, &system_timestamp_type()).map_err(arrow_err)?
+                }
+                None => arrow_array::new_null_array(&system_timestamp_type(), batch.num_rows()),
+            };
+            columns.push(col);
+        } else if prop == "_all_props" {
             // Fast path: if no L0 buffer has vertex property mutations,
             // the raw props_json passthrough is correct.
             let any_l0_has_vertex_props = l0_ctx.iter_l0_buffers().any(|l0| {
@@ -2776,6 +2994,47 @@ impl Stream for GraphScanStream {
             let state = std::mem::replace(&mut self.state, GraphScanState::Done);
 
             match state {
+                GraphScanState::ResolveCandidates => {
+                    let Some(pre) = self.candidate_prefilter.clone() else {
+                        self.state = GraphScanState::Init;
+                        continue;
+                    };
+                    let graph_ctx = self.graph_ctx.clone();
+                    let label = self.label.clone();
+                    let index_consulted = self.index_consulted.clone();
+                    self.state = GraphScanState::ResolvingCandidates(Box::pin(async move {
+                        let vids = prefilter_candidates(&graph_ctx, &label, &pre).await?;
+                        index_consulted.add(1);
+                        Ok(vids)
+                    }));
+                }
+                GraphScanState::ResolvingCandidates(mut fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(candidates)) => {
+                        let narrowed = match self.vid_list_filter.take() {
+                            Some(listed) => {
+                                let keep: HashSet<u64> = candidates.into_iter().collect();
+                                listed.into_iter().filter(|v| keep.contains(v)).collect()
+                            }
+                            None => candidates,
+                        };
+                        if narrowed.is_empty() {
+                            // An empty vid list reads as "no restriction"
+                            // further down; no candidates means no rows.
+                            self.state = GraphScanState::Done;
+                            return Poll::Ready(None);
+                        }
+                        self.vid_list_filter = Some(narrowed);
+                        self.state = GraphScanState::Init;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = GraphScanState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = GraphScanState::ResolvingCandidates(fut);
+                        return Poll::Pending;
+                    }
+                },
                 GraphScanState::Init => {
                     // Chunk only when the vid set is larger than one output
                     // batch. Below that the whole result already fits the bound

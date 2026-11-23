@@ -14,7 +14,6 @@ Uni supports point-in-time snapshots and time-travel queries. Snapshots are dura
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -25,8 +24,6 @@ Uni supports point-in-time snapshots and time-travel queries. Snapshots are dura
     )).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"

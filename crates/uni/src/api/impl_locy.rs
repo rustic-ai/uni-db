@@ -71,6 +71,53 @@ pub struct LocyRuleRegistry {
     /// Registered source programs, the durable source of truth for the
     /// registry. Compiled state is a pure function of this list.
     pub sources: Vec<crate::api::locy_rule_catalog::RegisteredSource>,
+    /// Modules declared by registered programs: module name to the short
+    /// names of the rules it defines.
+    ///
+    /// A `MODULE a.b` program's rules are catalogued as `a.b.<rule>`; this is
+    /// the map a later program's `USE a.b` resolves against. Rebuilt with the
+    /// rules, so it is a pure function of `sources` too.
+    pub modules: HashMap<String, Vec<String>>,
+}
+
+impl LocyRuleRegistry {
+    /// Records the rules a program declaring `module` added, under that module.
+    ///
+    /// `rule_names` are catalog keys; only those qualified by `module` belong
+    /// to it (a rule named with an explicit dot of its own does not).
+    fn record_module<'n>(
+        &mut self,
+        module: Option<&str>,
+        rule_names: impl IntoIterator<Item = &'n String>,
+    ) {
+        let Some(module) = module else {
+            return;
+        };
+        let prefix = format!("{module}.");
+        let entry = self.modules.entry(module.to_string()).or_default();
+        for name in rule_names {
+            if let Some(short) = name.strip_prefix(&prefix)
+                && !entry.iter().any(|r| r == short)
+            {
+                entry.push(short.to_string());
+            }
+        }
+        entry.sort();
+    }
+}
+
+/// The module a parsed program declares, if any.
+fn declared_module(ast: &uni_cypher::locy_ast::LocyProgram) -> Option<String> {
+    ast.module.as_ref().map(|m| m.name.to_string())
+}
+
+/// The config registered programs compile under: the neural-predicate preview
+/// gate off, as registration has always compiled.
+fn registration_config() -> LocyConfig {
+    LocyConfig {
+        neural_predicates_preview: false,
+        ..Default::default()
+    }
 }
 
 /// Merge a session's registered rules into a freshly compiled program.
@@ -195,20 +242,57 @@ pub(crate) fn rebuild_registry_from_sources(
     sources: &[crate::api::locy_rule_catalog::RegisteredSource],
     plugin_registry: &uni_plugin::PluginRegistry,
 ) -> Result<LocyRuleRegistry> {
+    rebuild_registry_reporting_source(sources, plugin_registry).map_err(|failed| failed.error)
+}
+
+/// A source that failed to recompile during a registry rebuild.
+pub(crate) struct FailedSource {
+    /// The rules the failing source defined when it was registered.
+    pub(crate) rule_names: Vec<String>,
+    /// Its parse or compile error.
+    pub(crate) error: UniError,
+}
+
+/// [`rebuild_registry_from_sources`], naming the rules of the source that
+/// failed, so a caller that removed a source can say which rules needed it.
+pub(crate) fn rebuild_registry_reporting_source(
+    sources: &[crate::api::locy_rule_catalog::RegisteredSource],
+    plugin_registry: &uni_plugin::PluginRegistry,
+) -> std::result::Result<LocyRuleRegistry, Box<FailedSource>> {
     let oracle = plugin_monotonicity_oracle(plugin_registry);
+    let direction = plugin_direction_oracle(plugin_registry);
+    let config = registration_config();
     let mut registry = LocyRuleRegistry::default();
     for src in sources {
-        let ast = uni_cypher::parse_locy(&src.source).map_err(map_parse_error)?;
+        let failed = |error: UniError| {
+            Box::new(FailedSource {
+                rule_names: src.rule_names.clone(),
+                error,
+            })
+        };
+        let ast = uni_cypher::parse_locy(&src.source)
+            .map_err(map_parse_error)
+            .map_err(failed)?;
         let external_names: Vec<String> = registry.rules.keys().cloned().collect();
-        let compiled =
-            uni_locy::compile_with_oracle(&ast, &HashMap::new(), &external_names, &oracle)
-                .map_err(map_compile_error)?;
+        // A source may `USE` a module an earlier source declared, so it
+        // compiles against the modules recorded so far.
+        let compiled = uni_locy::compile_with_oracles_and_config(
+            &ast,
+            &registry.modules,
+            &external_names,
+            &config,
+            &oracle,
+            &direction,
+        )
+        .map_err(map_compile_error)
+        .map_err(failed)?;
         let base_id = registry.strata.len();
         let mut this_names: Vec<String> = Vec::with_capacity(compiled.rule_catalog.len());
         for (name, rule) in compiled.rule_catalog {
             this_names.push(name.clone());
             registry.rules.insert(name, rule);
         }
+        registry.record_module(declared_module(&ast).as_deref(), &this_names);
         for mut stratum in compiled.strata {
             stratum.id += base_id;
             stratum.depends_on = stratum.depends_on.iter().map(|d| base_id + d).collect();
@@ -305,7 +389,7 @@ pub(crate) fn register_rules_on_registry(
     // Discover the rule names this program defines so that any prior source
     // defining them is superseded — the last registration of a name wins, and
     // each name is owned by exactly one source (keeping `remove` unambiguous).
-    let new_names = compile_defined_names(program, &existing, plugin_registry)?;
+    let new_names = compile_defined_names(program, &existing, &registry.modules, plugin_registry)?;
 
     let mut kept: Vec<crate::api::locy_rule_catalog::RegisteredSource> =
         Vec::with_capacity(existing.len() + 1);
@@ -358,6 +442,7 @@ pub(crate) fn register_rules_on_registry(
 fn compile_defined_names(
     program: &str,
     existing: &[crate::api::locy_rule_catalog::RegisteredSource],
+    modules: &HashMap<String, Vec<String>>,
     plugin_registry: &uni_plugin::PluginRegistry,
 ) -> Result<Vec<String>> {
     let ast = uni_cypher::parse_locy(program).map_err(map_parse_error)?;
@@ -366,8 +451,16 @@ fn compile_defined_names(
         .flat_map(|s| s.rule_names.iter().cloned())
         .collect();
     let oracle = plugin_monotonicity_oracle(plugin_registry);
-    let compiled = uni_locy::compile_with_oracle(&ast, &HashMap::new(), &external, &oracle)
-        .map_err(map_compile_error)?;
+    let direction = plugin_direction_oracle(plugin_registry);
+    let compiled = uni_locy::compile_with_oracles_and_config(
+        &ast,
+        modules,
+        &external,
+        &registration_config(),
+        &oracle,
+        &direction,
+    )
+    .map_err(map_compile_error)?;
     let mut names: Vec<String> = compiled.rule_catalog.keys().cloned().collect();
     names.sort();
     Ok(names)
@@ -455,6 +548,8 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
     max_memory: Option<usize>,
     principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
 ) -> Result<LocyResult> {
+    // A read-only handle picks up newer flushes, as a Cypher query does.
+    db.storage.refresh_read_cut().await;
     // Compile with the given registry
     let (ast, parameters) = match uni_cypher::parse_locy_with_parameters(program) {
         Ok(parsed) => parsed,
@@ -469,21 +564,22 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
             return Err(err);
         }
     };
-    let external_names: Option<Vec<String>> = {
+    let (external_names, modules): (Vec<String>, HashMap<String, Vec<String>>) = {
         let registry = rule_registry.read().unwrap();
-        if registry.rules.is_empty() {
-            None
-        } else {
-            Some(registry.rules.keys().cloned().collect())
-        }
+        (
+            registry.rules.keys().cloned().collect(),
+            registry.modules.clone(),
+        )
     };
     let oracle = plugin_monotonicity_oracle(&db.plugin_registry);
-    let mut compiled = uni_locy::compile_with_oracle_and_config(
+    let direction = plugin_direction_oracle(&db.plugin_registry);
+    let mut compiled = uni_locy::compile_with_oracles_and_config(
         &ast,
-        &HashMap::new(),
-        external_names.as_deref().unwrap_or(&[]),
+        &modules,
+        &external_names,
         config,
         &oracle,
+        &direction,
     )
     .map_err(map_compile_error)?;
 
@@ -534,6 +630,14 @@ pub(crate) fn plugin_monotonicity_oracle(
     move |name: &str| {
         uni_query::query::df_graph::locy_fold::locy_monotonicity_verdict(registry, name)
     }
+}
+
+/// Build a `REQUIRE` direction oracle backed by `registry`, falling back to the
+/// built-in `M*` table; the sibling of [`plugin_monotonicity_oracle`].
+pub(crate) fn plugin_direction_oracle(
+    registry: &uni_plugin::PluginRegistry,
+) -> impl Fn(&str) -> uni_common::locy::FoldDirection + '_ {
+    move |name: &str| uni_query::query::df_graph::locy_fold::locy_direction_verdict(registry, name)
 }
 
 /// Engine for evaluating Locy programs against a real database.
@@ -674,14 +778,17 @@ impl<'a> LocyEngine<'a> {
             uni_cypher::parse_locy_with_parameters(program).map_err(map_parse_error)?;
         let registry = self.db.locy_rule_registry.read().unwrap();
         let external_names: Vec<String> = registry.rules.keys().cloned().collect();
+        let modules = registry.modules.clone();
         drop(registry);
         let oracle = plugin_monotonicity_oracle(&self.db.plugin_registry);
-        let compiled = uni_locy::compile_with_oracle_and_config(
+        let direction = plugin_direction_oracle(&self.db.plugin_registry);
+        let compiled = uni_locy::compile_with_oracles_and_config(
             &ast,
-            &HashMap::new(),
+            &modules,
             &external_names,
             config,
             &oracle,
+            &direction,
         )
         .map_err(map_compile_error)?;
         Ok((compiled, parameters))
@@ -695,7 +802,12 @@ impl<'a> LocyEngine<'a> {
     /// redeclaring the full rule set each time.
     pub fn register(&self, program: &str) -> Result<()> {
         let compiled = self.compile_only(program)?;
+        let module = uni_cypher::parse_locy(program)
+            .map_err(map_parse_error)
+            .map(|ast| declared_module(&ast))?;
         let mut registry = self.db.locy_rule_registry.write().unwrap();
+        let names: Vec<String> = compiled.rule_catalog.keys().cloned().collect();
+        registry.record_module(module.as_deref(), &names);
         for (name, rule) in compiled.rule_catalog {
             registry.rules.insert(name, rule);
         }
@@ -714,6 +826,7 @@ impl<'a> LocyEngine<'a> {
         let mut registry = self.db.locy_rule_registry.write().unwrap();
         registry.rules.clear();
         registry.strata.clear();
+        registry.modules.clear();
     }
 
     /// Parse, compile, and evaluate a Locy program with default config.
@@ -842,6 +955,7 @@ impl<'a> LocyEngine<'a> {
             program,
             &compiled,
         )?;
+        self.db.storage.refresh_read_cut().await;
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => Err(UniError::Cancelled),

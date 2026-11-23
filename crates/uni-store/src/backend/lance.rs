@@ -78,6 +78,10 @@ pub struct LanceDbBackend {
     /// The table versions a snapshot view reads at; `None` for a live
     /// backend. See [`StorageBackend::at_table_versions`].
     read_versions: Option<Arc<HashMap<String, u64>>>,
+    /// The store's read cut, once attached: every commit records the version
+    /// it produced there, and checks the version it read against it. Empty
+    /// for a snapshot view, which never commits.
+    read_cut: Arc<std::sync::OnceLock<Arc<crate::storage::read_cut::ReadCut>>>,
 }
 
 /// Opens `table` for a read: at its version in `versions` when that is set
@@ -162,6 +166,7 @@ impl LanceDbBackend {
             schema_cache: DashMap::new(),
             staged_holds: Arc::new(DashMap::new()),
             read_versions: None,
+            read_cut: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -176,6 +181,52 @@ impl LanceDbBackend {
             anyhow::bail!("write to '{table}' through a read-only snapshot view");
         }
         Ok(())
+    }
+
+    /// Starts a commit on `table` against the read cut, if one is attached.
+    ///
+    /// Fails, before anything is committed, once the handle's write fence
+    /// has tripped (a lost lease, a closed or read-only handle): every Lance
+    /// commit passes here, so a stale writer's background flush, compaction
+    /// or index build commits nothing.
+    fn begin_commit(&self, table: &str) -> Result<Option<crate::storage::read_cut::CommitTicket>> {
+        match self.read_cut.get() {
+            Some(cut) => {
+                cut.check_fence()?;
+                Ok(Some(cut.begin(table)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Opens `table` at its newest version to commit to it, checking that
+    /// version against the read cut.
+    async fn open_for_commit(
+        &self,
+        table: &str,
+    ) -> Result<(
+        lance::Dataset,
+        Option<crate::storage::read_cut::CommitTicket>,
+    )> {
+        let ticket = self.begin_commit(table)?;
+        let dataset = self.directory.open(table).await?;
+        if let Some(ticket) = &ticket {
+            ticket.check_read(dataset.version().version)?;
+        }
+        Ok((dataset, ticket))
+    }
+
+    /// Records the version a commit produced. `read` is the version a single
+    /// Lance commit was made on, when it was one.
+    fn finish_commit(
+        ticket: Option<crate::storage::read_cut::CommitTicket>,
+        read: Option<u64>,
+        version: u64,
+    ) -> Result<()> {
+        match ticket {
+            Some(ticket) => ticket.finish(read, version),
+            None => Ok(()),
+        }
     }
 
     /// Get or insert the per-table write mutex used to serialize
@@ -210,11 +261,18 @@ impl LanceDbBackend {
         }
         let uri = self.directory.dataset_uri(table);
         let mut params = self.directory.write_params(mode);
+        let ticket = self.begin_commit(table)?;
+        let mut read = None;
         // Resolve once, as Dataset::write does internally. Existing datasets
         // retain their exact format; only absent datasets use Uni's 2.1 policy.
         let destination = match self.directory.open(table).await {
             Ok(dataset) => {
                 params.data_storage_version = None;
+                let version = dataset.version().version;
+                if let Some(ticket) = &ticket {
+                    ticket.check_read(version)?;
+                }
+                read = Some(version);
                 lance::dataset::WriteDestination::Dataset(Arc::new(dataset))
             }
             Err(error) if crate::store_utils::is_dataset_not_found(&error) => {
@@ -226,12 +284,12 @@ impl LanceDbBackend {
             Err(error) => return Err(error),
         };
         let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-        lance::dataset::InsertBuilder::new(destination)
+        let written = lance::dataset::InsertBuilder::new(destination)
             .with_params(&params)
             .execute_stream(Box::new(reader))
             .await
             .map_err(|e| anyhow!("Write to '{}' ({:?}) failed: {}", table, mode, e))?;
-        Ok(())
+        Self::finish_commit(ticket, read, written.version().version)
     }
 
     /// Execute a scan query on the primary branch.
@@ -407,9 +465,14 @@ impl LanceDbBackend {
         table_name: &str,
         dataset: Arc<lance::Dataset>,
         fragments: Vec<lance::table::format::Fragment>,
+        ticket: Option<crate::storage::read_cut::CommitTicket>,
     ) -> Result<()> {
         use lance::dataset::transaction::{Operation, TransactionBuilder};
 
+        let read = dataset.version().version;
+        if let Some(ticket) = &ticket {
+            ticket.check_read(read)?;
+        }
         let transaction =
             TransactionBuilder::new(dataset.version().version, Operation::Append { fragments })
                 .build();
@@ -421,11 +484,16 @@ impl LanceDbBackend {
         {
             commit = commit.with_store_params(store_params);
         }
-        commit
-            .execute(transaction)
+        // Boxed: unboxed, the Send proof of a future holding this one
+        // overflows (E0275, as `write_dataset_with_lance_conflict_retry`
+        // notes).
+        let execute: std::pin::Pin<
+            Box<dyn std::future::Future<Output = lance::Result<lance::Dataset>> + Send>,
+        > = Box::pin(commit.execute(transaction));
+        let published = execute
             .await
             .map_err(|e| anyhow!("Failed to publish staged rows to '{table_name}': {e}"))?;
-        Ok(())
+        Self::finish_commit(ticket, Some(read), published.version().version)
     }
 }
 
@@ -438,6 +506,25 @@ pub(crate) async fn staged_append_committed(
     paths: &HashSet<&str>,
     published_after: Option<u64>,
 ) -> bool {
+    let shown = dataset.fragments().iter().any(|f| {
+        f.files
+            .iter()
+            .any(|file| paths.contains(file.path.as_str()))
+    });
+    shown
+        || staged_append_version(dataset, paths, published_after)
+            .await
+            .is_some()
+}
+
+/// The version that committed the staged files `paths`, when some retained
+/// version did (see [`staged_append_committed`]): the Append transaction's
+/// version, or the current one when only the current manifest shows them.
+pub(crate) async fn staged_append_version(
+    dataset: &lance::Dataset,
+    paths: &HashSet<&str>,
+    published_after: Option<u64>,
+) -> Option<u64> {
     use lance::dataset::transaction::Operation;
 
     let references = |fragments: &[lance::table::format::Fragment]| {
@@ -447,9 +534,6 @@ pub(crate) async fn staged_append_committed(
                 .any(|file| paths.contains(file.path.as_str()))
         })
     };
-    if references(dataset.fragments()) {
-        return true;
-    }
     let current = dataset.version().version;
     let first = published_after.map_or(1, |v| v.saturating_add(1));
     for version in first..=current {
@@ -459,14 +543,21 @@ pub(crate) async fn staged_append_committed(
             && let Operation::Append { fragments } = &transaction.operation
             && references(fragments)
         {
-            return true;
+            return Some(version);
         }
     }
-    false
+    references(dataset.fragments()).then_some(current)
 }
 
 #[async_trait]
 impl StorageBackend for LanceDbBackend {
+    fn check_write_fence(&self) -> Result<()> {
+        match self.read_cut.get() {
+            Some(cut) => cut.check_fence(),
+            None => Ok(()),
+        }
+    }
+
     // ========================
     // Table Lifecycle
     // ========================
@@ -563,10 +654,14 @@ impl StorageBackend for LanceDbBackend {
     async fn drop_table(&self, name: &str) -> Result<()> {
         self.ensure_writable(name)?;
         self.schema_cache.remove(name);
+        let ticket = self.begin_commit(name)?;
         self.directory
             .remove_table(name)
             .await
             .map_err(|e| anyhow!("Failed to drop table '{}': {}", name, e))?;
+        if let Some(ticket) = ticket {
+            ticket.finish_dropped();
+        }
         self.existence_cache.insert(name.to_string(), false);
         Ok(())
     }
@@ -735,7 +830,8 @@ impl StorageBackend for LanceDbBackend {
         // beyond the default `DoNothing`: partial writes only update existing
         // rows; CREATE goes through the full-row Append path. Unmatched source
         // rows are dropped.
-        let dataset = self.directory.open(table_name).await?;
+        let (dataset, ticket) = self.open_for_commit(table_name).await?;
+        let read = dataset.version().version;
         let mut builder = lance::dataset::MergeInsertBuilder::try_new(Arc::new(dataset), on_owned)
             .map_err(|e| anyhow!("merge_insert builder on '{}': {}", table_name, e))?;
         builder
@@ -744,20 +840,22 @@ impl StorageBackend for LanceDbBackend {
         let job = builder
             .try_build()
             .map_err(|e| anyhow!("merge_insert build on '{}': {}", table_name, e))?;
-        job.execute_reader(Box::new(reader))
+        let (merged, _) = job
+            .execute_reader(Box::new(reader))
             .await
             .map_err(|e| anyhow!("merge_insert on '{}': {}", table_name, e))?;
-        Ok(())
+        Self::finish_commit(ticket, Some(read), merged.version().version)
     }
 
     async fn delete_rows(&self, table_name: &str, filter: &FilterExpr) -> Result<()> {
         self.ensure_writable(table_name)?;
-        let mut dataset = self.directory.open(table_name).await?;
+        let (mut dataset, ticket) = self.open_for_commit(table_name).await?;
+        let read = dataset.version().version;
         dataset
             .delete(&filter.to_sql()?)
             .await
             .map_err(|e| anyhow!("Failed to delete from '{}': {}", table_name, e))?;
-        Ok(())
+        Self::finish_commit(ticket, Some(read), dataset.version().version)
     }
 
     async fn replace_table_atomic(
@@ -779,11 +877,13 @@ impl StorageBackend for LanceDbBackend {
                 // schema along with the rows. `delete("true")` keeps the table
                 // and its schema, which is what callers expect from "replace
                 // with nothing".
-                let mut dataset = self.directory.open(name).await?;
+                let (mut dataset, ticket) = self.open_for_commit(name).await?;
+                let read = dataset.version().version;
                 dataset
                     .delete("true")
                     .await
                     .map_err(|e| anyhow!("Failed to clear table '{}': {}", name, e))?;
+                Self::finish_commit(ticket, Some(read), dataset.version().version)?;
             } else {
                 let batch_schema = batches[0].schema();
                 self.write_batches(
@@ -828,6 +928,7 @@ impl StorageBackend for LanceDbBackend {
             // Serialize against `write` / `merge_insert` / `create_table`,
             // which take this same per-table mutex internally.
             let _guard = self.lock_table_for_write(table_name).await;
+            let ticket = self.begin_commit(table_name)?;
 
             // Reopen *inside* the lock. `add_columns` commits an
             // `Operation::Merge` against the manifest version captured when
@@ -837,6 +938,9 @@ impl StorageBackend for LanceDbBackend {
             // `lance_branch.rs` shows a stale handle returning
             // `RetryableCommitConflict`.
             let mut dataset = self.directory.open(table_name).await?;
+            if let Some(ticket) = &ticket {
+                ticket.check_read(dataset.version().version)?;
+            }
             let current: Arc<ArrowSchema> = Arc::new(dataset.schema().into());
 
             let mut missing: Vec<arrow_schema::Field> = Vec::new();
@@ -911,7 +1015,7 @@ impl StorageBackend for LanceDbBackend {
             // re-populates the pre-widen schema and the next append re-diffs
             // against stale data.
             self.schema_cache.remove(table_name);
-            Ok(())
+            Self::finish_commit(ticket, None, dataset.version().version)
         })
         .await
     }
@@ -927,6 +1031,10 @@ impl StorageBackend for LanceDbBackend {
 
     fn stages_invisibly(&self) -> bool {
         true
+    }
+
+    fn attach_read_cut(&self, cut: Arc<crate::storage::read_cut::ReadCut>) {
+        let _ = self.read_cut.set(cut);
     }
 
     async fn stage_append(
@@ -980,8 +1088,11 @@ impl StorageBackend for LanceDbBackend {
         // flush appends and with compaction's scan → overwrite.
         let lock = self.write_lock_for(table_name);
         let _guard = lock.lock().await;
+        // Begun before the open, so a commit of this handle overlapping it is
+        // known as one.
+        let ticket = self.begin_commit(table_name)?;
         let dataset = Arc::new(self.directory.open(table_name).await?);
-        self.commit_staged_append(table_name, dataset, fragments)
+        self.commit_staged_append(table_name, dataset, fragments, ticket)
             .await
     }
 
@@ -1043,9 +1154,16 @@ impl StorageBackend for LanceDbBackend {
         // record can interleave between the check and the commit.
         let lock = self.write_lock_for(table_name);
         let _guard = lock.lock().await;
+        let ticket = self.begin_commit(table_name)?;
         let dataset = Arc::new(self.directory.open(table_name).await?);
 
-        if staged_append_committed(&dataset, &paths, published_after).await {
+        if let Some(landed) = staged_append_version(&dataset, &paths, published_after).await {
+            // Published before a crash. The store holds the table at the
+            // version that published it -- not at its newest, which may
+            // carry commits no manifest names (a compaction pass that ran
+            // after the crash point and was never published), and which the
+            // open rolls back with the rest of that pass.
+            Self::finish_commit(ticket, None, landed)?;
             return Ok(RecordedPublish::AlreadyPublished);
         }
 
@@ -1094,7 +1212,7 @@ impl StorageBackend for LanceDbBackend {
                  staged files are missing and no retained version references them"
             );
         }
-        self.commit_staged_append(table_name, dataset, fragments)
+        self.commit_staged_append(table_name, dataset, fragments, ticket)
             .await?;
         Ok(RecordedPublish::Published)
     }
@@ -1155,6 +1273,7 @@ impl StorageBackend for LanceDbBackend {
 
     async fn rollback_table(&self, table_name: &str, target_version: u64) -> Result<()> {
         self.ensure_writable(table_name)?;
+        let ticket = self.begin_commit(table_name)?;
         // lancedb's protocol was `checkout(v)` then `restore()`: pin the handle
         // to the target version, then commit that as a new version. Opening
         // directly at the version is the same first step, and `restore` is
@@ -1183,7 +1302,7 @@ impl StorageBackend for LanceDbBackend {
         // it is gone, and a cached schema that still lists it would make every
         // projection of that column fail in Lance.
         self.schema_cache.remove(table_name);
-        Ok(())
+        Self::finish_commit(ticket, None, dataset.version().version)
     }
 
     async fn tag_table_version(&self, table_name: &str, tag: &str, version: u64) -> Result<()> {
@@ -1227,7 +1346,7 @@ impl StorageBackend for LanceDbBackend {
         version_retention: std::time::Duration,
     ) -> Result<OptimizeReport> {
         self.ensure_writable(table_name)?;
-        let mut dataset = self.directory.open(table_name).await?;
+        let (mut dataset, ticket) = self.open_for_commit(table_name).await?;
 
         // The three steps lancedb's `OptimizeAction::All` performed, in order
         // (`lancedb/src/table/optimize.rs:172-186`). lancedb discarded its
@@ -1293,6 +1412,14 @@ impl StorageBackend for LanceDbBackend {
                 // compaction of a table once its snapshot outlived the
                 // retention window. Tagged versions are kept either way.
                 error_if_tagged_old_versions: false,
+                // Never the version readers read, nor any after it: until a
+                // manifest names this pass's result, readers read the version
+                // before it.
+                before_version: self
+                    .read_cut
+                    .get()
+                    .and_then(|cut| cut.published())
+                    .and_then(|published| published.tables.get(table_name).copied()),
                 ..Default::default()
             };
             lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
@@ -1307,6 +1434,7 @@ impl StorageBackend for LanceDbBackend {
         )
         .await
         .map_err(|e| anyhow!("Failed to optimize indices on '{}': {}", table_name, e))?;
+        Self::finish_commit(ticket, None, dataset.version().version)?;
 
         Ok(OptimizeReport {
             fragments_removed: metrics.fragments_removed,
@@ -1408,6 +1536,7 @@ impl StorageBackend for LanceDbBackend {
             read_versions: Some(Arc::new(
                 versions.iter().map(|(t, v)| (t.clone(), *v)).collect(),
             )),
+            read_cut: Arc::new(std::sync::OnceLock::new()),
         }))
     }
 
@@ -1582,8 +1711,10 @@ impl StorageBackend for LanceDbBackend {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
+        analyzer: Option<&TokenizerConfig>,
         counters: Option<Arc<QueryCounters>>,
     ) -> Result<TextSearch> {
+        let analyzer = analyzer.cloned();
         let sql = if filter.is_trivially_true() {
             None
         } else {
@@ -1611,6 +1742,7 @@ impl StorageBackend for LanceDbBackend {
                 k,
                 sql.as_deref(),
                 unstored,
+                analyzer.as_ref(),
                 |scanner| attach_search_stats(scanner, counters, SearchKind::FullText),
             )
             .await
@@ -1768,8 +1900,8 @@ impl StorageBackend for LanceDbBackend {
             ),
         };
 
-        let mut dataset = self.directory.open(table).await?;
-        lance::index::DatasetIndexExt::create_index(
+        let (mut dataset, ticket) = self.open_for_commit(table).await?;
+        let built = lance::index::DatasetIndexExt::create_index(
             &mut dataset,
             &[column],
             lance_index::IndexType::Vector,
@@ -1788,7 +1920,9 @@ impl StorageBackend for LanceDbBackend {
                 column,
                 e
             )
-        })
+        });
+        built?;
+        Self::finish_commit(ticket, None, dataset.version().version)
     }
 
     async fn create_scalar_index(
@@ -1809,8 +1943,8 @@ impl StorageBackend for LanceDbBackend {
         };
         let params = lance_index::scalar::ScalarIndexParams::for_builtin(builtin);
 
-        let mut dataset = self.directory.open(table).await?;
-        lance::index::DatasetIndexExt::create_index(
+        let (mut dataset, ticket) = self.open_for_commit(table).await?;
+        let built = lance::index::DatasetIndexExt::create_index(
             &mut dataset,
             columns,
             lance_index::IndexType::Scalar,
@@ -1829,7 +1963,9 @@ impl StorageBackend for LanceDbBackend {
                 columns,
                 e
             )
-        })
+        });
+        built?;
+        Self::finish_commit(ticket, None, dataset.version().version)
     }
 
     async fn create_fts_index(
@@ -1858,8 +1994,8 @@ impl StorageBackend for LanceDbBackend {
                 )
             })?;
 
-        let mut dataset = self.directory.open(table).await?;
-        lance::index::DatasetIndexExt::create_index(
+        let (mut dataset, ticket) = self.open_for_commit(table).await?;
+        let built = lance::index::DatasetIndexExt::create_index(
             &mut dataset,
             columns,
             lance_index::IndexType::Inverted,
@@ -1897,12 +2033,14 @@ impl StorageBackend for LanceDbBackend {
                     e
                 )
             }
-        })
+        });
+        built?;
+        Self::finish_commit(ticket, None, dataset.version().version)
     }
 
     async fn drop_index(&self, table: &str, index_name: &str) -> Result<()> {
         self.ensure_writable(table)?;
-        let mut dataset = self.directory.open(table).await?;
+        let (mut dataset, ticket) = self.open_for_commit(table).await?;
         lance::index::DatasetIndexExt::drop_index(&mut dataset, index_name)
             .await
             .map_err(|e| {
@@ -1912,7 +2050,8 @@ impl StorageBackend for LanceDbBackend {
                     table,
                     e
                 )
-            })
+            })?;
+        Self::finish_commit(ticket, None, dataset.version().version)
     }
 
     async fn list_indexes(&self, table: &str) -> Result<Vec<IndexInfo>> {

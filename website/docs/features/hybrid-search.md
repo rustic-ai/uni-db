@@ -31,7 +31,6 @@ Uni provides hybrid search that combines vector similarity and full-text search 
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -48,8 +47,6 @@ Uni provides hybrid search that combines vector similarity and full-text search 
     "#).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -100,9 +97,9 @@ pass `null` to auto-embed `query_text` instead.
 
 | Option | Values | Description |
 |--------|--------|-------------|
-| `method` | `'rrf'` (default), `'weighted'` | Fusion algorithm |
+| `method` | `'rrf'` (default), `'weighted'`, `'relative_score'` (alias `'rsf'`), `'dbsf'` | Fusion algorithm; an unrecognised value falls back to RRF |
 | `alpha` | 0.0 - 1.0 | Vector weight for **2-way** weighted fusion (default: 0.5) |
-| `weights` | `[vector, fts, sparse]` | Per-arm weights for **3-way** weighted fusion |
+| `weights` | `[vector, fts, sparse]` | Per-arm weights for **3-way** weighted fusion, `relative_score` and `dbsf` (default: equal thirds) |
 | `rrf_k` | Integer | RRF constant (default: 60) |
 | `over_fetch` | Float | Over-fetch factor (default: 2.0) |
 | `sparse_query` | Map or sparse vector | `{indices, values}` query enabling the sparse arm (see below) |
@@ -134,6 +131,10 @@ score = alpha × vector_score + (1 - alpha) × fts_score
 - `alpha = 0.7` → Favor semantic similarity
 - `alpha = 0.3` → Favor keyword matching
 - `alpha = 0.5` → Equal weight (default)
+
+### Relative-Score and Distribution-Based Fusion
+
+`method: 'relative_score'` (or `'rsf'`) normalizes each arm's scores and sums them with `weights`. `method: 'dbsf'` (Distribution-Based Score Fusion) z-score normalizes each arm before the weighted sum, so one outlier score does not stretch a whole list.
 
 ## Examples
 
@@ -360,7 +361,7 @@ Use hybrid search when:
 
 Hybrid search requires both:
 
-1. A **vector index** with embedding configuration
+1. A **vector index** with embedding configuration (`alias` names a model in the Uni-Xervo catalog)
 2. A **fulltext index** on the text property
 
 ```cypher
@@ -368,7 +369,7 @@ Hybrid search requires both:
 CREATE VECTOR INDEX doc_embed FOR (d:Document) ON (d.embedding)
 OPTIONS {
     metric: 'cosine',
-    embedding: {provider: 'Candle', model: 'all-MiniLM-L6-v2', source: ['content']}
+    embedding: {alias: 'embed/default', source: ['content']}
 }
 
 // Fulltext index

@@ -2451,9 +2451,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -6907,7 +6907,7 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -6916,7 +6916,7 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -6939,7 +6939,7 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "rmp-serde",
  "rustc-hash",
@@ -6953,7 +6953,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -6975,7 +6975,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -7006,7 +7006,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -7014,7 +7014,7 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "5.3.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7022,6 +7022,10 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-types",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -7042,6 +7046,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7122,9 +7127,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

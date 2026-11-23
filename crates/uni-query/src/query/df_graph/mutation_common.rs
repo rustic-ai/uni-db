@@ -171,6 +171,26 @@ pub(crate) async fn prefetch_remove_targets(
     collect_and_fetch_vertex_prefetch(&touched_vars, rows, pm, ctx).await
 }
 
+/// Read the stored `created_at` of the prefetched vertices in one batch, so
+/// the per-row updates that follow keep their stamps without a storage read
+/// each ([`Writer::carry_stored_created_at`]).
+async fn carry_created_at(
+    prefetch: &Prefetch,
+    writer: &Writer,
+    tx_l0: Option<&Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>>,
+) -> DFResult<()> {
+    if prefetch.vertex.is_empty() {
+        return Ok(());
+    }
+    let vids: Vec<Vid> = prefetch.vertex.keys().copied().collect();
+    writer
+        .carry_stored_created_at(&vids, tx_l0)
+        .await
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!("created_at read failed: {e}"))
+        })
+}
+
 /// Inspect a property-access expr (e.g. `n.prop` or `n[expr]`) and return
 /// the root variable name if it's a plain `Variable("n").Property("prop")`.
 fn extract_var_from_property_expr(expr: &Expr) -> Option<&str> {
@@ -952,6 +972,7 @@ async fn apply_mutations(
             let prefetch = prefetch_set_targets(items, rows, pm, ctx)
                 .await
                 .map_err(|e| df_err("SET prefetch failed", e))?;
+            carry_created_at(&prefetch, writer, tx_l0).await?;
             for row in rows.iter_mut() {
                 exec.execute_set_items_locked(
                     items, row, writer, pm, params, ctx, tx_l0, &prefetch,
@@ -964,6 +985,7 @@ async fn apply_mutations(
             let prefetch = prefetch_remove_targets(items, rows, pm, ctx)
                 .await
                 .map_err(|e| df_err("REMOVE prefetch failed", e))?;
+            carry_created_at(&prefetch, writer, tx_l0).await?;
             for row in rows.iter_mut() {
                 exec.execute_remove_items_locked(items, row, writer, pm, ctx, tx_l0, &prefetch)
                     .await

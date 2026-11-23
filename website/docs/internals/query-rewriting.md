@@ -19,7 +19,7 @@ RETURN c.name
 // Automatically rewritten to
 MATCH (p:Person)-[e:EMPLOYED_BY]->(c:Company)
 WHERE e.start <= datetime('2021-06-15')
-  AND (e.end IS NULL OR e.end >= datetime('2021-06-15'))
+  AND (e.end IS NULL OR e.end > datetime('2021-06-15'))
 RETURN c.name
 ```
 
@@ -76,15 +76,12 @@ pub trait RewriteRule: Send + Sync {
 The rewriting framework integrates into the query pipeline at the planning stage:
 
 ```rust
-// In planner.rs
-pub fn plan_with_scope(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
+// In planner.rs (reached from plan_with_scope / plan_with_typed_scope)
+fn plan_with_scope_unresolved(&self, query: Query, vars: Vec<VariableInfo>) -> Result<LogicalPlan> {
     // Apply query rewrites before planning
     let rewritten_query = crate::query::rewrite::rewrite_query(query)?;
 
-    match rewritten_query {
-        Query::Single(stmt) => self.plan_single(stmt, vars),
-        // ... rest of planning
-    }
+    // ... function-call rewrites, then planning of rewritten_query
 }
 ```
 
@@ -98,14 +95,14 @@ Uni includes several temporal function rewrites that enable efficient time-based
 
 | Function | Transformation |
 |----------|---------------|
-| `uni.temporal.validAt(e, 'start', 'end', ts)` | `e.start <= ts AND (e.end IS NULL OR e.end >= ts)` |
-| `uni.temporal.overlaps(e, 'start', 'end', rs, re)` | `e.start <= re AND (e.end IS NULL OR e.end >= rs)` |
+| `uni.temporal.validAt(e, 'start', 'end', ts)` | `e.start <= ts AND (e.end IS NULL OR e.end > ts)` |
+| `uni.temporal.overlaps(e, 'start', 'end', rs, re)` | `e.start <= re AND (e.end IS NULL OR e.end > rs)` |
 | `uni.temporal.precedes(e, 'end', ts)` | `e.end < ts` |
 | `uni.temporal.succeeds(e, 'start', ts)` | `e.start > ts` |
 | `uni.temporal.isOngoing(e, 'end')` | `e.end IS NULL` |
 | `uni.temporal.hasClosed(e, 'end')` | `e.end IS NOT NULL` |
 
-All temporal rewrites preserve three-valued logic and handle null values correctly (treating null end dates as "ongoing").
+Intervals are half-open, `[start, end)`: the start is inclusive and the end exclusive. All temporal rewrites preserve three-valued logic and handle null values correctly (treating null end dates as "ongoing").
 
 ## Adding New Rewrite Rules
 
@@ -114,10 +111,10 @@ All temporal rewrites preserve three-valued logic and handle null values correct
 Create a new struct implementing `RewriteRule`:
 
 ```rust
-use crate::query::rewrite::{RewriteRule, RewriteContext, RewriteError};
-use crate::query::rewrite::rule::{Arity, ArgConstraints};
-use uni_cypher::ast::{BinaryOp, Expr};
-use serde_json::Value;
+use crate::rewrite::context::RewriteContext;
+use crate::rewrite::error::RewriteError;
+use crate::rewrite::rule::{ArgConstraints, Arity, RewriteRule};
+use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr};
 
 pub struct InRangeRule;
 
@@ -160,6 +157,15 @@ impl RewriteRule for InRangeRule {
         })
     }
 }
+
+fn extract_string_literal(expr: &Expr) -> Result<String, RewriteError> {
+    match expr {
+        Expr::Literal(CypherLiteral::String(s)) => Ok(s.clone()),
+        _ => Err(RewriteError::TransformError {
+            message: "Expected string literal".to_string(),
+        }),
+    }
+}
 ```
 
 ### Step 2: Register the Rule
@@ -190,9 +196,9 @@ mod tests {
 
         let args = vec![
             Expr::Variable("p".into()),
-            Expr::Literal(Value::String("age".into())),
-            Expr::Literal(Value::Number(18.into())),
-            Expr::Literal(Value::Number(65.into())),
+            Expr::Literal(CypherLiteral::String("age".into())),
+            Expr::Literal(CypherLiteral::Integer(18)),
+            Expr::Literal(CypherLiteral::Integer(65)),
         ];
 
         let result = rule.rewrite(args, &ctx).unwrap();
@@ -217,10 +223,10 @@ Example of correct null handling:
 
 ```rust
 // WRONG: Breaks when end is null
-// e.start <= ts AND e.end >= ts
+// e.start <= ts AND e.end > ts
 
 // CORRECT: Treats null end as "ongoing"
-// e.start <= ts AND (e.end IS NULL OR e.end >= ts)
+// e.start <= ts AND (e.end IS NULL OR e.end > ts)
 ```
 
 ### 2. Declarative Validation
@@ -288,7 +294,7 @@ RETURN count(*)
 ```cypher
 MATCH (p)-[e:EMPLOYED_BY]->()
 WHERE e.start <= datetime('2021-06-15')
-  AND (e.end IS NULL OR e.end >= datetime('2021-06-15'))
+  AND (e.end IS NULL OR e.end > datetime('2021-06-15'))
 RETURN count(*)
 ```
 
@@ -434,17 +440,17 @@ fn validate_args(&self, args: &[Expr]) -> Result<(), RewriteError> {
 
 Always consider how nulls should be handled:
 
-```rust
+```text
 // For temporal "valid at" queries:
 // null end date means "ongoing" - should match!
-e.start <= ts AND (e.end IS NULL OR e.end >= ts)
+e.start <= ts AND (e.end IS NULL OR e.end > ts)
 ```
 
 ### 3. Keep Rewrites Simple
 
 Rewritten expressions should be simple enough for storage layer optimization:
 
-```rust
+```text
 // Good: Simple comparisons
 entity.start_date >= datetime('2021-01-01')
 
@@ -469,7 +475,7 @@ Clearly document what each rule does:
 /// Rewrite rule for uni.temporal.validAt
 ///
 /// Transforms: uni.temporal.validAt(e, 'start', 'end', ts)
-/// Into: e.start <= ts AND (e.end IS NULL OR e.end >= ts)
+/// Into: e.start <= ts AND (e.end IS NULL OR e.end > ts)
 ///
 /// This preserves the semantics where a null end date means "ongoing".
 pub struct ValidAtRule;

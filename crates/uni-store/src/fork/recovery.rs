@@ -36,9 +36,10 @@ use crate::backend::branching::ForkBranching;
 /// # Errors
 ///
 /// Returns the underlying [`UniError`] from the first unrecoverable
-/// failure. Recovery is intentionally best-effort for individual
-/// branches: a missing branch on a `Pending` rollback path is
-/// success.
+/// failure. A missing branch is success. A branch that cannot be
+/// deleted (typically one a tag pins) is not an error, but it keeps
+/// its fork Tombstoned, tombstone and all, so the next open retries:
+/// finishing the drop would orphan the branch.
 #[instrument(
     skip(registry, storage_store, candidate_datasets, branching),
     level = "info"
@@ -83,7 +84,19 @@ pub async fn recover_forks(
 
     for info in tombstoned {
         info!(fork_name = %info.name, fork_id = %info.id, "completing tombstoned drop");
-        delete_all_branches(&info, branching).await;
+        if !delete_all_branches(&info, branching).await {
+            // `finish_drop` deletes the tombstone, the only anchor that brings
+            // recovery back here: with a branch still on disk it would orphan
+            // that branch (and any tag pinning it). Leave the fork Tombstoned
+            // so the next open retries.
+            warn!(
+                fork_name = %info.name,
+                fork_id = %info.id,
+                "tombstoned drop left incomplete: a branch could not be deleted; \
+                 the fork stays Tombstoned and the next open retries"
+            );
+            continue;
+        }
         // Artifacts before `finish_drop`, matching `Uni::drop_fork`: the
         // tombstone is the anchor that brings us back here, so it must outlive
         // what it points at. The reverse order leaks the WAL directory and id
@@ -103,7 +116,15 @@ pub async fn recover_forks(
             fork_id = %info.id,
             "sweeping orphan tombstone"
         );
-        delete_all_branches(&info, branching).await;
+        if !delete_all_branches(&info, branching).await {
+            // Keep the tombstone: it is the only record of these branches.
+            warn!(
+                fork_name = %info.name,
+                fork_id = %info.id,
+                "orphan tombstone kept: a branch could not be deleted; the next open retries"
+            );
+            continue;
+        }
         // Artifacts before `finish_drop`, matching `Uni::drop_fork`: the
         // tombstone is the anchor that brings us back here, so it must outlive
         // what it points at. The reverse order leaks the WAL directory and id
@@ -116,22 +137,39 @@ pub async fn recover_forks(
     Ok(reconciled)
 }
 
-/// Best-effort: try to remove every branch in `info.datasets`. Errors
-/// are logged at warn level and otherwise ignored, since the whole
-/// point of force-delete is to mop up partial state.
-async fn delete_all_branches(info: &ForkInfo, branching: Option<&dyn ForkBranching>) {
+/// Try to remove every branch in `info.datasets`, returning whether all of
+/// them are gone.
+///
+/// Each failure is logged at warn level, with the tags pinning that branch
+/// when there are any: Lance refuses to delete a tagged branch, even forced,
+/// so a tag is the usual cause and the log says which one to remove. A
+/// backend without branching has no branches, so that case is `true`.
+async fn delete_all_branches(info: &ForkInfo, branching: Option<&dyn ForkBranching>) -> bool {
     let Some(branching) = branching else {
-        return;
+        return true;
     };
+    let mut all_deleted = true;
     for (dataset, branch) in &info.datasets {
         if let Err(e) = branching.delete_branch(dataset, branch).await {
+            all_deleted = false;
+            let blocking: Vec<String> = match branching.list_tags(dataset).await {
+                Ok(tags) => tags
+                    .into_iter()
+                    .filter(|t| t.branch.as_deref() == Some(branch.as_str()))
+                    .map(|t| t.name)
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
             warn!(
+                fork_name = %info.name,
                 dataset = %dataset,
                 branch = %branch,
+                blocking_tags = ?blocking,
                 "delete_branch during recovery failed: {e}"
             );
         }
     }
+    all_deleted
 }
 
 /// On Pending rollback, the registry's `datasets` map may be empty
@@ -146,6 +184,8 @@ async fn rollback_branches(
     branching: Option<&dyn ForkBranching>,
 ) {
     // Recorded branches (the writer got far enough to persist `datasets`).
+    // A Pending fork was never Active, so it cannot have been tagged; a
+    // failure here is logged and the rollback proceeds as before.
     if !info.datasets.is_empty() {
         delete_all_branches(info, branching).await;
     }

@@ -111,8 +111,8 @@ Error: Invalid manifest at version 42: CRC mismatch
 **Solution:**
 ```bash
 # Restore from snapshot (recommended)
-uni snapshot list --path ./storage
-uni snapshot restore <snapshot_id> --path ./storage
+uni snapshot --path ./storage list
+uni snapshot --path ./storage restore <snapshot_id>
 
 # Or via Cypher
 uni query "CALL uni.admin.snapshot.list()" --path ./storage
@@ -268,8 +268,10 @@ Error: Query execution failed: Out of memory
 2. **Stream results:**
    ```rust
    let mut cursor = session.query_with(query).cursor().await?;
-   while let Some(row) = cursor.next().await? {
-       // Process a row at a time
+   while let Some(batch) = cursor.next_batch().await {
+       for row in batch? {
+           // Process a page of rows at a time
+       }
    }
    ```
 
@@ -537,8 +539,10 @@ target.
 3. **Use streaming queries:**
    ```rust
    let mut cursor = session.query_with(query).cursor().await?;
-   while let Some(_row) = cursor.next().await? {
-       // Process results without loading all into memory
+   while let Some(batch) = cursor.next_batch().await {
+       for _row in batch? {
+           // Process results without loading all into memory
+       }
    }
    ```
 
@@ -550,7 +554,9 @@ target.
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `DatabaseLocked` | Another process holds the lock | Close other process or use a different path |
+| `StoreLocked` | Another handle holds the store open for writing (an OS lock locally, a lease on an object store); the error names the holder | Close it, open this handle `read_only()`, or wait for its lease to lapse (`ttl` plus `clock_skew` after its last renewal: 35 s by default) |
+| `WriterFenced` | This handle lost the store: its lease was taken over or could not be renewed, it was closed, it is read-only, or it met a table version another writer committed | Reopen; the WAL keeps this handle's unflushed commits |
+| `StaleWal` | A hybrid store's local WAL belongs to an earlier writer (another host, or a copy of this directory, has opened the store since) | Open with `set_aside_stale_wal()` to move it to `wal_set_aside/`, or open on the host that wrote last |
 | `ReadOnly` | Write attempted on a read-only database | Open in write mode or avoid writes |
 | `Storage` | Underlying storage failure | Check storage config/permissions |
 | `Io` | OS I/O error (e.g., disk full) | Fix disk/permissions |
@@ -605,14 +611,11 @@ uni query "PROFILE MATCH (p:Paper) WHERE p.year > 2020 RETURN COUNT(p)" --path .
 ### Storage Inspection
 
 ```bash
-# List all datasets
-ls -la ./storage/vertices/
-ls -la ./storage/edges/
-ls -la ./storage/adjacency/
+# List all datasets (vertices*.lance, edges.lance, deltas_*.lance, adjacency_*.lance)
+ls -la <db>/storage/
 
-# Check Lance dataset info
 # View on-disk schema
-cat ./storage/catalog/schema.json | jq .
+cat <db>/catalog/schema.json | jq .
 ```
 
 ### Memory Profiling

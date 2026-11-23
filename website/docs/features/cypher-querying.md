@@ -21,7 +21,6 @@ returned to the caller; `elementId(entity)` is its string representation.
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -32,8 +31,6 @@ returned to the caller; `elementId(entity)` is its string representation.
         .await?;
 
     println!("{:?}", results);
-    # Ok(())
-    # }
     ```
 
 === "Python"

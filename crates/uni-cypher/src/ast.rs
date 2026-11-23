@@ -35,6 +35,7 @@ pub enum SchemaCommand {
     CreateFullTextIndex(CreateFullTextIndex),
     CreateScalarIndex(CreateScalarIndex),
     CreateJsonFtsIndex(CreateJsonFtsIndex),
+    CreateInvertedIndex(CreateInvertedIndex),
     DropIndex(DropIndex),
     CreateConstraint(CreateConstraint),
     DropConstraint(DropConstraint),
@@ -51,7 +52,12 @@ pub enum SchemaCommand {
     ShowStatistics,
     Vacuum,
     Checkpoint,
-    Backup { path: String },
+    /// `BACKUP TO 'url' [WITH {option: value, ...}]`: the options are
+    /// object-store options for the destination, over those it inherits.
+    Backup {
+        path: String,
+        options: HashMap<String, Value>,
+    },
     CopyTo(CopyToCommand),
     CopyFrom(CopyFromCommand),
 }
@@ -70,6 +76,17 @@ pub struct CreateFullTextIndex {
     pub name: String,
     pub label: String,
     pub properties: Vec<String>,
+    pub options: HashMap<String, Value>,
+    pub if_not_exists: bool,
+}
+
+/// `CREATE INVERTED INDEX name FOR (n:Label) ON (n.prop) [OPTIONS {...}]`:
+/// a term-to-vid index over a `LIST<STRING>` property.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateInvertedIndex {
+    pub name: String,
+    pub label: String,
+    pub property: String,
     pub options: HashMap<String, Value>,
     pub if_not_exists: bool,
 }

@@ -9,7 +9,9 @@ callable as a `NeuralClassifier` Locy can dispatch to.
 The contract under test:
 
 - The callable receives `list[dict[str, Any]]` (one dict per row, keyed
-  by the FEATURES (...) identifiers from the CREATE MODEL statement).
+  by the model's INPUT binding names). At a rule's call site `m(n.score)`
+  the value is the argument expression; under `CALIBRATE` it is the model's
+  FEATURES expression at the same position, so both see the same inputs.
 - The callable returns `list[float]` of the same length, with values in
   [0, 1].
 - Any Python exception, length mismatch, NaN, or out-of-range value
@@ -313,3 +315,101 @@ def test_multiple_classifiers_register_independently():
         assert row["risk"] == pytest.approx(0.3)
     for row in result.derived.get("risky_slow", []):
         assert row["risk"] == pytest.approx(0.8)
+
+
+def _recording(calls: list[dict[str, Any]]):
+    def classify(inputs: list[dict[str, Any]]) -> list[float]:
+        calls.extend(inputs)
+        return [max(0.0, min(1.0, float(r["n"] or 0.0))) for r in inputs]
+
+    return classify
+
+
+def test_calibrate_passes_the_same_inputs_as_a_rule_call():
+    """CALIBRATE gives the classifier the model's FEATURES values under the
+    INPUT names, as a rule's call site does, never None."""
+    db = _populated_asset_db()
+    session = db.session()
+    tx = session.tx()
+    tx.execute("MATCH (n:Asset) SET n.bad = n.score > 0.5")
+    tx.commit()
+
+    rule_calls: list[dict[str, Any]] = []
+    config = uni_db.LocyConfig()
+    config.register_classifier("risk_scorer", _recording(rule_calls))
+    session.locy_with(CONSTANT_RISK_PROGRAM).with_config(config).run()
+
+    calibrate_calls: list[dict[str, Any]] = []
+    config = uni_db.LocyConfig()
+    config.register_classifier("risk_scorer", _recording(calibrate_calls))
+    result = (
+        session.locy_with(
+            """
+CREATE MODEL risk_scorer AS
+  INPUT (n)
+  FEATURES n.score
+  OUTPUT PROB risk
+  USING xervo('classify/risk-v1')
+
+CALIBRATE risk_scorer
+  ON MATCH (n:Asset)
+  TARGET n.bad
+  METHOD platt_scaling
+  HOLDOUT 0.4
+"""
+        )
+        .with_config(config)
+        .run()
+    )
+    records = [
+        c
+        for c in result.command_results
+        if isinstance(c, dict) and c.get("type") == "calibrate"
+    ]
+    assert len(records) == 1
+
+    assert calibrate_calls, "CALIBRATE never called the classifier"
+    assert all(r["n"] is not None for r in calibrate_calls), calibrate_calls
+    assert sorted(r["n"] for r in calibrate_calls) == sorted(r["n"] for r in rule_calls)
+
+
+def test_calibrate_passes_a_node_input_as_a_rule_call_does():
+    """A model without FEATURES passes its INPUT variable: a node arrives
+    as the same value under CALIBRATE as at a call site `m(n)`."""
+    db = _populated_asset_db()
+    session = db.session()
+    tx = session.tx()
+    tx.execute("MATCH (n:Asset) SET n.bad = n.score > 0.5")
+    tx.commit()
+
+    def recorder(calls: list[dict[str, Any]]):
+        def classify(inputs: list[dict[str, Any]]) -> list[float]:
+            calls.extend(inputs)
+            return [0.5 for _ in inputs]
+
+        return classify
+
+    model = """
+CREATE MODEL risk_scorer AS
+  INPUT (n)
+  OUTPUT PROB risk
+  USING xervo('classify/risk-v1')
+"""
+    rule_calls: list[dict[str, Any]] = []
+    config = uni_db.LocyConfig()
+    config.register_classifier("risk_scorer", recorder(rule_calls))
+    session.locy_with(
+        model
+        + "\nCREATE RULE risky AS MATCH (n:Asset) YIELD KEY n, risk_scorer(n) AS risk"
+    ).with_config(config).run()
+
+    calibrate_calls: list[dict[str, Any]] = []
+    config = uni_db.LocyConfig()
+    config.register_classifier("risk_scorer", recorder(calibrate_calls))
+    session.locy_with(
+        model + "\nCALIBRATE risk_scorer ON MATCH (n:Asset) TARGET n.bad "
+        "METHOD platt_scaling HOLDOUT 0.4"
+    ).with_config(config).run()
+
+    assert all(r["n"] is not None for r in calibrate_calls), calibrate_calls
+    assert sorted(r["n"] for r in calibrate_calls) == sorted(r["n"] for r in rule_calls)

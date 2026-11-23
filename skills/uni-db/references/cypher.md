@@ -72,15 +72,15 @@ RETURN a.name, paper_count
 
 <!-- doctest: skip -->
 ```cypher
-WITH RECURSIVE reachable(vid, depth) AS (
-    MATCH (n:Person {name: 'Alice'}) RETURN id(n) AS vid, 0 AS depth
-    UNION ALL
-    MATCH (a)-[:KNOWS]->(b)
-    WHERE id(a) IN reachable.vid AND reachable.depth < 5
-    RETURN id(b) AS vid, reachable.depth + 1 AS depth
+WITH RECURSIVE reachable AS (
+    MATCH (n:Person {name: 'Alice'}) RETURN n
+    UNION
+    MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a IN reachable RETURN b
 )
-RETURN DISTINCT vid, min(depth) AS min_depth
+MATCH (m:Person) WHERE m IN reachable RETURN m.name AS name ORDER BY name
 ```
+
+The CTE name takes no column list (`WITH RECURSIVE name AS (anchor UNION recursive)`); refer to the CTE with `x IN name`.
 
 ### RETURN
 
@@ -251,7 +251,7 @@ RETURN n{.name, .age, city: n.address.city} AS person_data
 | **Comparison** | `=`, `<>`, `!=`, `<`, `<=`, `>`, `>=` |
 | **Logical** | `AND`, `OR`, `XOR`, `NOT` |
 | **String** | `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `=~` (regex) |
-| **List** | `IN`, `NOT IN` |
+| **List** | `IN`; negate with `NOT x IN [...]` (`x NOT IN` is not supported) |
 | **Null** | `IS NULL`, `IS NOT NULL` |
 
 ### CASE Expression
@@ -278,7 +278,7 @@ REDUCE(total = 0, x IN n.scores | total + x) AS sum
 
 ### Parameters
 
-`$name` syntax prevents injection and enables plan caching. Session variables: `$session.tenant_id` (set via `db.session().set("tenant_id", "val").build()`).
+`$name` syntax prevents injection and enables plan caching. Session variables: `$session.tenant_id` (set via `session.params().set("tenant_id", "val")`).
 
 ---
 
@@ -302,7 +302,7 @@ Non-aggregated columns in RETURN become implicit GROUP BY keys.
 
 | Function | Returns | Description |
 |---|---|---|
-| `id(node_or_rel)` | UInt64 | Internal VID or EID |
+| `id(node_or_rel)` | Integer (Int64) | Internal VID or EID |
 | `created_at(node_or_rel)` | DateTime (UTC, ns) | First-insert timestamp. Read-only, system-managed; never changes after creation. |
 | `updated_at(node_or_rel)` | DateTime (UTC, ns) | Most-recent write-touch timestamp. Bumps on any CREATE/SET/MERGE that targets the row, including same-value writes. |
 | `type(rel)` | String | Edge type name |
@@ -337,7 +337,7 @@ Non-aggregated columns in RETURN become implicit GROUP BY keys.
 |---|---|
 | `abs(x)`, `ceil(x)`, `floor(x)`, `round(x)` | Rounding / absolute |
 | `sqrt(x)`, `exp(x)`, `log(x)`, `log10(x)` | Roots and logarithms |
-| `pow(x, y)` / `power(x, y)` | Exponentiation |
+| `x ^ y`, `pow(x, y)` / `power(x, y)` | Exponentiation of any numbers, always a float, e.g. `2 ^ 3`, `pow(2, 3)` = `8.0` |
 | `sign(x)` | -1, 0, or 1 |
 | `rand()` | Random float in [0, 1) |
 | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2` | Trigonometric |
@@ -390,7 +390,7 @@ BTIC encodes half-open time intervals `[lo, hi)` as a single 24-byte property wi
 
 **Literal formats:** `btic('1985')` (year), `btic('1985-03')` (month), `btic('1939/1945')` (range), `btic('~1985')` (approximate), `btic('2020-03/')` (ongoing), `btic('/')` (unbounded).
 
-**Accessors:** `btic_lo(b)`, `btic_hi(b)` (DateTime), `btic_duration(b)` (Int64 ms), `btic_granularity(b)`, `btic_certainty(b)` (String), `btic_is_finite(b)`, `btic_is_unbounded(b)`, `btic_is_instant(b)` (Boolean).
+**Accessors:** `btic_lo(b)`, `btic_hi(b)` (DateTime; an error for a bound outside about 1677-2262), `btic_duration(b)` (Int64 ms), `btic_granularity(b)`, `btic_certainty(b)` (String), `btic_is_finite(b)`, `btic_is_unbounded(b)`, `btic_is_instant(b)` (Boolean).
 
 **Predicates (2-arg → Boolean):** `btic_contains_point(b, point)`, `btic_overlaps(a, b)`, `btic_contains(a, b)`, `btic_before(a, b)`, `btic_after(a, b)`, `btic_meets(a, b)`, `btic_adjacent(a, b)`, `btic_disjoint(a, b)`, `btic_equals(a, b)`, `btic_starts(a, b)`, `btic_during(a, b)`, `btic_finishes(a, b)`.
 
@@ -427,7 +427,7 @@ Options: `method` (`'rrf'`|`'weighted'`), `weights` (list), `k` (RRF constant, d
 
 ### Bitwise Functions
 
-`bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`, `shift_left`, `shift_right`
+`uni.bitwise.and(a, b)`, `uni.bitwise.or(a, b)`, `uni.bitwise.xor(a, b)`, `uni.bitwise.not(a)`, `uni.bitwise.shiftLeft(a, n)`, `uni.bitwise.shiftRight(a, n)` (arithmetic; a shift amount outside `0..63` is an error)
 
 ---
 
@@ -461,7 +461,19 @@ RETURN n.name, n.salary, n.department,
     SUM(n.salary) OVER (PARTITION BY n.department) AS dept_total
 ```
 
-**Gotcha:** Queries that mix manual window functions (e.g. `ROW_NUMBER`) and aggregate window functions (e.g. `SUM OVER`) in the same RETURN clause are not yet supported.
+A window works in `WITH` too, so its alias can be filtered and sorted on (top-N per group), and in an aggregating `WITH`/`RETURN` it runs over the grouped rows:
+
+```cypher
+MATCH (n:Employee)
+WITH n, ROW_NUMBER() OVER (PARTITION BY n.department ORDER BY n.salary DESC) AS rn
+WHERE rn <= 3
+RETURN n.department, n.name, n.salary
+
+MATCH (n:Employee)
+WITH n.department AS dept, sum(n.salary) AS total,
+     RANK() OVER (ORDER BY sum(n.salary) DESC) AS dept_rank
+RETURN dept, total, dept_rank
+```
 
 ---
 
@@ -476,6 +488,8 @@ ALTER LABEL Person DROP PROPERTY age
 ALTER LABEL Person RENAME PROPERTY name TO full_name
 DROP LABEL IF EXISTS Person
 ```
+
+A property may carry a constant `DEFAULT` (`CREATE LABEL Item (qty INT DEFAULT 1)`), stored when an insert omits the property; an explicit `NULL` stays NULL and existing rows are not backfilled. `DROP LABEL` / `DROP EDGE TYPE` are refused while data carries them; the error names the count.
 
 ### Edge Types
 
@@ -492,6 +506,7 @@ CREATE INDEX idx_name FOR (p:Person) ON (p.name)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding) OPTIONS { metric: 'cosine' }
 CREATE FULLTEXT INDEX idx_content FOR (a:Article) ON EACH [a.content]
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
+CREATE INVERTED INDEX idx_tags FOR (d:Data) ON (d.tags) OPTIONS { normalize: true }
 DROP INDEX idx_name
 ```
 
@@ -515,7 +530,7 @@ CHECK is enforced by the bulk loader and the transactional path, which share one
 
 ### Admin Commands
 
-`VACUUM` (reclaim space), `CHECKPOINT` (force flush), `BACKUP '/path'`, `COPY (Label) TO/FROM '/path' FORMAT csv|parquet`
+`VACUUM` (reclaim space), `CHECKPOINT` (force flush), `BACKUP TO '/path' [WITH {...}]`, `COPY Label TO|FROM '/path' [WITH {format: 'csv'|'parquet', delimiter, header}]`
 
 ---
 
@@ -531,25 +546,27 @@ CALL uni.schema.indexes() YIELD name, type, label, state, properties
 CALL uni.schema.constraints() YIELD name, type, enabled, properties, target
 ```
 
+Index `type` (here and in `SHOW INDEXES`): `SCALAR`, `VECTOR`, `FULLTEXT`, `INVERTED`, `JSON_FTS`, `SPARSE`. Constraint `target` is `(:Label)` or `[:TYPE]`. `DROP INDEX IF EXISTS name` succeeds when the index is missing.
+
 ### Vector Search
 
 <!-- doctest: skip -->
 ```cypher
-CALL uni.vector.query(label, property, query_vector, k [, filter] [, threshold])
-YIELD node, score, distance, vector_score, vid
+CALL uni.vector.query(label, property, query_vector, k [, filter] [, threshold] [, options])
+YIELD node, vid, distance, score, rerank_score
 ```
 
-`query_vector` can be a `List<Float>` or a `String` (auto-embedded when embedding config exists). Score is normalized to 0-1.
+`query_vector` can be a `List<Float>` or a `String` (auto-embedded when embedding config exists). Larger `score` is better; `threshold` is a minimum `score`.
 
 ### Full-Text Search
 
 <!-- doctest: skip -->
 ```cypher
-CALL uni.fts.query(label, property, search_term, k [, threshold])
-YIELD node, score, fts_score, vid
+CALL uni.fts.query(label, property, search_term, k [, filter] [, threshold] [, options])
+YIELD node, vid, score, rerank_score
 ```
 
-BM25-based. Scores normalized to 0-1 relative to top match.
+BM25-based. `score` is `bm25 / (bm25 + fts_k)` (`options.fts_k`, default 1.0), in `[0, 1)`; `threshold` is a minimum `score`. A plain word list is OR-ed; `AND`, `OR`, `NOT` / `-word`, `"phrase"` and parentheses are interpreted (`AND` binds tighter than `OR`; operators only in upper case). A blank query matches nothing; an all-negated query or an unbalanced quote/parenthesis is an error. On a `JSON` column with a JSON full-text index it searches the document's string values.
 
 ### Hybrid Search
 
@@ -559,7 +576,7 @@ CALL uni.search(label, properties, query_text, query_vector, k [, filter] [, opt
 YIELD node, score, vector_score, fts_score, vid
 ```
 
-Options: `method` (`'rrf'`|`'weighted'`), `alpha` (vector vs FTS weight), `over_fetch` (default 2.0).
+Options: `method` (`'rrf'` default, `'weighted'`, `'relative_score'`/`'rsf'`, `'dbsf'`; an unknown method falls back to RRF), `alpha` (vector vs FTS weight for two-way `weighted`), `weights`, `over_fetch` (default 2.0).
 
 ### Snapshots
 
@@ -577,7 +594,7 @@ CALL uni.admin.snapshot.restore($snapshot_id) YIELD status
 
 ```cypher
 CALL uni.admin.compact() YIELD tables_optimized, fragments_removed, fragments_added, bytes_reclaimed, duration_ms
-CALL uni.admin.compactionStatus() YIELD l1_runs, l1_size_bytes, in_progress, pending
+CALL uni.admin.compactionStatus() YIELD l1_runs, l1_rows, l1_estimated_bytes, in_progress, pending, total_compactions, total_bytes_reclaimed, status_refreshes
 ```
 
 ---
@@ -588,19 +605,17 @@ Query historical data without restoring a snapshot.
 
 ```cypher
 // By snapshot ID
-MATCH (n:Person) VERSION AS OF 'snapshot-abc123'
-RETURN n.name, n.age
+MATCH (n:Person) RETURN n.name, n.age VERSION AS OF 'snapshot-abc123'
 
 // By timestamp
-MATCH (n:Person) TIMESTAMP AS OF '2025-01-15T12:00:00Z'
-RETURN n.name, n.age
+MATCH (n:Person) RETURN n.name, n.age TIMESTAMP AS OF '2025-01-15T12:00:00Z'
 ```
 
-The time-travel clause goes between the pattern and RETURN/WHERE.
+The time-travel clause follows the whole query.
 
 ---
 
-## 9. EXPLAIN and PROFILE
+## 9. EXPLAIN and Profiling
 
 ### EXPLAIN
 
@@ -613,17 +628,17 @@ RETURN cited.title, COUNT(*) AS citation_count
 ORDER BY citation_count DESC LIMIT 10
 ```
 
-Output: scan operations, filter/join/aggregation steps, index usage, estimated rows, cost.
+Output: one `plan` column holding the logical plan dump. For structured output (index usage, cost estimates, warnings, suggestions) use the API: `session.query_with(q).explain()` returns `ExplainOutput`.
 
 ### PROFILE
 
-Executes the query and returns per-operator runtime statistics.
+`PROFILE` is not a Cypher keyword; profile through the API. `session.query_with(q).profile()` executes the query and returns `(QueryResult, ProfileOutput)`.
 
-```cypher
-EXPLAIN MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m
+```python
+result, prof = session.query_with("MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m").profile()
 ```
 
-Output: `total_time_ms`, `rows_scanned`, `peak_memory_bytes`, per-operator `time_ms` and `rows_produced`.
+`ProfileOutput`: `total_time_ms`, `peak_memory_bytes`, the plan (Python `plan_text`, Rust `explain`), and per-operator stats `operator`, `actual_rows`, `time_ms` (Python `operators`, Rust `runtime_stats`).
 
 ---
 

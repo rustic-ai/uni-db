@@ -1,0 +1,2408 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2024-2026 Dragonscale Team
+
+//! Where a store lives, resolved once.
+//!
+//! A [`StoreLocation`] is built from the URI a database is opened with, an
+//! optional typed [`CloudStorageConfig`], raw storage options, and the
+//! environment. It owns the one option map that configures **both** object
+//! store clients — uni's own (`object_store` 0.13, for the catalog, WAL and
+//! ID allocator) and Lance's (for tables and indexes) — and a store handle
+//! rooted at the store's root `R`, never at the bucket.
+//!
+//! Every store kind uses the same layout under `R`:
+//!
+//! ```text
+//! R/catalog/            schema, Locy rules, fork registry, layout marker
+//! R/wal/                primary WAL           (hybrid: local directory)
+//! R/id_allocator.json                         (hybrid: local directory)
+//! R/storage/            tables, indexes, snapshot manifests, fork WALs
+//! ```
+//!
+//! Remote stores written before this layout keep their tables directly under
+//! `R` ([`StoreLayout::Flat`]); they are recognized, not moved.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow, bail};
+use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjPath;
+use object_store::prefix::PrefixStore;
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
+use uni_common::CloudStorageConfig;
+use uni_common::config::ObjectStoreConfig;
+
+/// Path of the layout marker, relative to the store root.
+pub const LAYOUT_MARKER_PATH: &str = "catalog/layout.json";
+
+/// Present at a backup destination while `BACKUP` is copying into it; a
+/// store holding it is refused at open.
+pub const IN_PROGRESS_MARKER: &str = "catalog/backup_in_progress";
+
+/// Storage option naming the directory a `file://` location treats as its
+/// bucket root. Only consulted for legacy-layout detection; meant for tests
+/// that reproduce an object-store bucket on the local filesystem.
+#[doc(hidden)]
+pub const FILE_BUCKET_ROOT_OPTION: &str = "uni_file_bucket_root";
+
+/// Directory, under the store root, holding tables in [`StoreLayout::Standard`].
+pub const TABLES_DIR: &str = "storage";
+
+/// Source of environment variables. Lets resolution be tested without
+/// mutating the process environment.
+pub trait EnvSource: Send + Sync {
+    /// Every variable, as `(name, value)`.
+    fn vars(&self) -> Vec<(String, String)>;
+
+    /// One variable.
+    fn get(&self, name: &str) -> Option<String> {
+        self.vars()
+            .into_iter()
+            .find_map(|(k, v)| (k == name).then_some(v))
+    }
+}
+
+/// The process environment.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessEnv;
+
+impl EnvSource for ProcessEnv {
+    fn vars(&self) -> Vec<(String, String)> {
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect()
+    }
+
+    fn get(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+}
+
+impl EnvSource for BTreeMap<String, String> {
+    fn vars(&self) -> Vec<(String, String)> {
+        self.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    fn get(&self, name: &str) -> Option<String> {
+        BTreeMap::get(self, name).cloned()
+    }
+}
+
+/// Object-store provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    /// Amazon S3 and S3-compatible services.
+    S3,
+    /// Google Cloud Storage.
+    Gcs,
+    /// Azure Blob Storage.
+    Azure,
+    /// A local directory addressed as `file://`, laid out like an object store.
+    File,
+}
+
+impl Scheme {
+    /// The scheme Lance and `object_store` both understand.
+    #[must_use]
+    pub fn canonical(self) -> &'static str {
+        match self {
+            Self::S3 => "s3",
+            Self::Gcs => "gs",
+            Self::Azure => "az",
+            Self::File => "file",
+        }
+    }
+}
+
+/// What kind of location a store is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocationKind {
+    /// A plain local directory path.
+    Local {
+        /// The database directory.
+        dir: PathBuf,
+    },
+    /// An object store (or `file://`) location.
+    Remote {
+        /// Provider.
+        scheme: Scheme,
+        /// Bucket or container (empty for `file://`).
+        bucket: String,
+        /// Decoded path under the bucket, without leading or trailing `/`.
+        prefix: String,
+    },
+}
+
+/// How a store's tables are placed under its root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreLayout {
+    /// Tables, indexes and snapshot manifests under `R/storage/`.
+    Standard,
+    /// Tables directly under `R` — remote stores written before the
+    /// standard layout.
+    Flat,
+}
+
+/// Result of inspecting a store before opening it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutProbe {
+    /// The store records its layout in [`LAYOUT_MARKER_PATH`].
+    Recorded(StoreLayout),
+    /// The store has no marker; its layout was inferred from what it holds.
+    Inferred(StoreLayout),
+    /// A prefixed store written by uni-db ≤ 5.3.0: tables under the prefix,
+    /// metadata at the bucket root.
+    LegacyPrefixed {
+        /// Bucket-root metadata objects found.
+        root_files: Vec<String>,
+    },
+}
+
+/// Inputs to [`StoreLocation::resolve`].
+#[derive(Clone, Default)]
+pub struct LocationSpec {
+    /// The URI or path the store is opened at.
+    pub uri: String,
+    /// Typed provider configuration.
+    pub cloud: Option<CloudStorageConfig>,
+    /// Raw `object_store` / Lance storage options; highest precedence.
+    pub options: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for LocationSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocationSpec")
+            .field("uri", &self.uri)
+            .field("cloud", &self.cloud)
+            .field("options", &StorageOptions(self.options.clone()))
+            .finish()
+    }
+}
+
+/// Resolved storage options. `Debug` prints keys and only non-secret values.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct StorageOptions(pub(crate) BTreeMap<String, String>);
+
+impl StorageOptions {
+    /// Every option, by canonical name.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Look up one option by its canonical name.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+
+    /// All options.
+    #[must_use]
+    pub fn as_map(&self) -> &BTreeMap<String, String> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for StorageOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut m = f.debug_map();
+        for (k, v) in &self.0 {
+            if is_public_option(k) {
+                m.entry(k, v);
+            } else {
+                m.entry(k, &"<redacted>");
+            }
+        }
+        m.finish()
+    }
+}
+
+/// Options whose values are safe to print.
+fn is_public_option(key: &str) -> bool {
+    const PUBLIC: &[&str] = &[
+        "aws_region",
+        "aws_default_region",
+        "aws_bucket",
+        "aws_endpoint",
+        "aws_endpoint_url_s3",
+        "aws_virtual_hosted_style_request",
+        "aws_s3_express",
+        "aws_imdsv1_fallback",
+        "aws_metadata_endpoint",
+        "aws_role_arn",
+        "aws_role_session_name",
+        "aws_endpoint_url_sts",
+        "aws_skip_signature",
+        "aws_conditional_put",
+        "aws_copy_if_not_exists",
+        "aws_request_payer",
+        "aws_web_identity_token_file",
+        "aws_server_side_encryption",
+        "google_bucket",
+        "google_base_url",
+        "google_service_account",
+        "google_application_credentials",
+        "google_skip_signature",
+        "azure_storage_account_name",
+        "azure_container_name",
+        "azure_storage_endpoint",
+        "azure_storage_use_emulator",
+        "azure_msi_endpoint",
+        "azure_storage_client_id",
+        "azure_storage_tenant_id",
+        "azure_use_azure_cli",
+        "azure_skip_signature",
+        "allow_http",
+        "allow_invalid_certificates",
+        "connect_timeout",
+        "timeout",
+        "user_agent",
+        "client_max_retries",
+        "client_retry_timeout",
+        "download_retry_count",
+        "use_opendal",
+        FILE_BUCKET_ROOT_OPTION,
+    ];
+    PUBLIC.contains(&key)
+}
+
+/// Joins a relative path onto a store URI or path, with exactly one `/`.
+#[must_use]
+pub fn join_uri(base: &str, rel: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let rel = rel.trim_matches('/');
+    if rel.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}/{rel}")
+    }
+}
+
+const SUPPORTED: &str = "s3://, s3a://, gs://, gcs://, az://, abfss://, file://, or a local path";
+
+/// Canonical `object_store` key for `key` under `scheme`, or `None` when the
+/// provider does not know it (it may still be a Lance-only option).
+fn canonical_key(scheme: Scheme, key: &str) -> Option<String> {
+    use object_store::aws::AmazonS3ConfigKey;
+    use object_store::azure::AzureConfigKey;
+    use object_store::gcp::GoogleConfigKey;
+    let key = key.to_ascii_lowercase();
+    match scheme {
+        Scheme::S3 => key
+            .parse::<AmazonS3ConfigKey>()
+            .ok()
+            .map(|k| k.as_ref().to_string()),
+        Scheme::Gcs => key
+            .parse::<GoogleConfigKey>()
+            .ok()
+            .map(|k| k.as_ref().to_string()),
+        Scheme::Azure => key
+            .parse::<AzureConfigKey>()
+            .ok()
+            .map(|k| k.as_ref().to_string()),
+        Scheme::File => None,
+    }
+}
+
+fn env_prefix(scheme: Scheme) -> &'static str {
+    match scheme {
+        Scheme::S3 => "AWS_",
+        Scheme::Gcs => "GOOGLE_",
+        Scheme::Azure => "AZURE_",
+        Scheme::File => "\0",
+    }
+}
+
+/// What a URI says, before any option is applied.
+struct ParsedUri {
+    kind: LocationKind,
+    /// Account named by the URI (Azure `abfss://c@acct…`).
+    account: Option<String>,
+}
+
+fn parse_uri(uri: &str) -> Result<ParsedUri> {
+    if !uri.contains("://") {
+        return Ok(ParsedUri {
+            kind: LocationKind::Local {
+                dir: PathBuf::from(uri),
+            },
+            account: None,
+        });
+    }
+    let url = url::Url::parse(uri).map_err(|e| anyhow!("Invalid store URI '{uri}': {e}"))?;
+    let decoded_path = || -> Result<String> {
+        let path = object_store::path::Path::from_url_path(url.path())
+            .map_err(|e| anyhow!("Invalid path in store URI '{uri}': {e}"))?;
+        Ok(path.as_ref().trim_matches('/').to_string())
+    };
+    let host = || -> Result<String> {
+        url.host_str()
+            .filter(|h| !h.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("Store URI '{uri}' names no bucket or container"))
+    };
+    let (scheme, bucket, prefix, account) = match url.scheme() {
+        "s3" | "s3a" => (Scheme::S3, host()?, decoded_path()?, None),
+        "gs" | "gcs" => (Scheme::Gcs, host()?, decoded_path()?, None),
+        // `az://container/path`, the account from the configuration. The
+        // `az://account/container/…` form of uni-db ≤ 5.3.0 is no longer
+        // read: `az://acme/data` named either container `data` or container
+        // `acme` with prefix `data`, depending on the account configured.
+        "az" | "azure" => (Scheme::Azure, host()?, decoded_path()?, None),
+        "abfss" | "abfs" => {
+            let user = url.username();
+            let host = host()?;
+            if user.is_empty() {
+                (Scheme::Azure, host, decoded_path()?, None)
+            } else {
+                let account = host
+                    .split('.')
+                    .next()
+                    .filter(|a| !a.is_empty())
+                    .ok_or_else(|| anyhow!("Store URI '{uri}' names no account"))?
+                    .to_string();
+                (
+                    Scheme::Azure,
+                    user.to_string(),
+                    decoded_path()?,
+                    Some(account),
+                )
+            }
+        }
+        "file" => {
+            let path = url
+                .to_file_path()
+                .map_err(|()| anyhow!("Invalid file URI '{uri}'"))?;
+            let prefix = path
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .trim_end_matches('/')
+                .to_string();
+            (Scheme::File, String::new(), prefix, None)
+        }
+        other => bail!("Unsupported store URI scheme '{other}' in '{uri}'. Supported: {SUPPORTED}"),
+    };
+    Ok(ParsedUri {
+        kind: LocationKind::Remote {
+            scheme,
+            bucket,
+            prefix,
+        },
+        account,
+    })
+}
+
+/// The option map, built layer by layer.
+struct OptionLayers {
+    scheme: Scheme,
+    map: BTreeMap<String, String>,
+    /// Keys set above the environment.
+    explicit: std::collections::BTreeSet<String>,
+}
+
+impl OptionLayers {
+    fn new(scheme: Scheme) -> Self {
+        Self {
+            scheme,
+            map: BTreeMap::new(),
+            explicit: Default::default(),
+        }
+    }
+
+    fn key(&self, key: &str) -> String {
+        canonical_key(self.scheme, key).unwrap_or_else(|| key.to_ascii_lowercase())
+    }
+
+    fn env(&mut self, env: &dyn EnvSource) {
+        let prefix = env_prefix(self.scheme);
+        for (name, value) in env.vars() {
+            if name.starts_with(prefix)
+                && let Some(key) = canonical_key(self.scheme, &name)
+            {
+                self.map.insert(key, value);
+            }
+        }
+        // Variables `from_env` reads by a name outside the provider prefix.
+        match self.scheme {
+            Scheme::Gcs => {
+                if let Some(v) = env.get("SERVICE_ACCOUNT") {
+                    self.map.entry("google_service_account".into()).or_insert(v);
+                }
+            }
+            Scheme::Azure => {
+                if let Some(v) = env.get("IDENTITY_ENDPOINT") {
+                    self.map.entry("azure_msi_endpoint".into()).or_insert(v);
+                }
+                // The name the Azure CLI and SDKs use, which object_store's
+                // key set lacks.
+                if let Some(v) = env.get("AZURE_STORAGE_ACCOUNT") {
+                    self.map
+                        .entry("azure_storage_account_name".into())
+                        .or_insert(v);
+                }
+            }
+            Scheme::S3 | Scheme::File => {}
+        }
+    }
+
+    fn set(&mut self, key: &str, value: impl Into<String>) {
+        let key = self.key(key);
+        self.map.insert(key.clone(), value.into());
+        self.explicit.insert(key);
+    }
+
+    fn set_opt(&mut self, key: &str, value: Option<&String>) {
+        if let Some(v) = value {
+            self.set(key, v.clone());
+        }
+    }
+
+    fn is_explicit(&self, key: &str) -> bool {
+        self.explicit.contains(&self.key(key))
+    }
+
+    fn get(&self, key: &str) -> Option<&String> {
+        self.map.get(&self.key(key))
+    }
+}
+
+fn duration_option(d: std::time::Duration) -> String {
+    if d.subsec_millis() == 0 {
+        format!("{}s", d.as_secs())
+    } else {
+        format!("{}ms", d.as_millis())
+    }
+}
+
+/// Builds the option map for an object-store location.
+async fn resolve_options(
+    scheme: Scheme,
+    bucket: &str,
+    url_account: Option<&str>,
+    spec: &LocationSpec,
+    env: &dyn EnvSource,
+    net: &ObjectStoreConfig,
+) -> Result<(
+    BTreeMap<String, String>,
+    Option<object_store::aws::AwsCredentialProvider>,
+)> {
+    let mut o = OptionLayers::new(scheme);
+    o.env(env);
+
+    // URL layer.
+    match scheme {
+        Scheme::S3 => o.set("aws_bucket", bucket),
+        Scheme::Gcs => o.set("google_bucket", bucket),
+        Scheme::Azure => {
+            o.set("azure_container_name", bucket);
+            if let Some(a) = url_account {
+                o.set("azure_storage_account_name", a);
+            }
+        }
+        Scheme::File => {}
+    }
+
+    // Typed config layer.
+    if let Some(cfg) = &spec.cloud {
+        let cfg_bucket = cfg.bucket_name();
+        let matches = matches!(
+            (cfg, scheme),
+            (CloudStorageConfig::S3 { .. }, Scheme::S3)
+                | (CloudStorageConfig::Gcs { .. }, Scheme::Gcs)
+                | (CloudStorageConfig::Azure { .. }, Scheme::Azure)
+        );
+        if !matches {
+            bail!(
+                "The cloud storage configuration is for {} but the store URI '{}' is not",
+                cfg.to_url(),
+                spec.uri
+            );
+        }
+        if cfg_bucket != bucket {
+            bail!(
+                "The store URI '{}' names bucket '{bucket}' but the cloud storage \
+                 configuration names bucket '{cfg_bucket}'",
+                spec.uri
+            );
+        }
+        match cfg {
+            CloudStorageConfig::S3 {
+                region,
+                endpoint,
+                access_key_id,
+                secret_access_key,
+                session_token,
+                virtual_hosted_style,
+                ..
+            } => {
+                o.set_opt("aws_region", region.as_ref());
+                o.set_opt("aws_endpoint", endpoint.as_ref());
+                o.set_opt("aws_access_key_id", access_key_id.as_ref());
+                o.set_opt("aws_secret_access_key", secret_access_key.as_ref());
+                o.set_opt("aws_session_token", session_token.as_ref());
+                if *virtual_hosted_style {
+                    o.set("aws_virtual_hosted_style_request", "true");
+                }
+            }
+            CloudStorageConfig::Gcs {
+                service_account_path,
+                service_account_key,
+                ..
+            } => {
+                o.set_opt("google_service_account", service_account_path.as_ref());
+                o.set_opt("google_service_account_key", service_account_key.as_ref());
+            }
+            CloudStorageConfig::Azure {
+                account,
+                access_key,
+                sas_token,
+                ..
+            } => {
+                if let Some(url_account) = url_account
+                    && url_account != account
+                {
+                    bail!(
+                        "The store URI '{}' names account '{url_account}' but the cloud \
+                         storage configuration names account '{account}'",
+                        spec.uri
+                    );
+                }
+                o.set("azure_storage_account_name", account.clone());
+                o.set_opt("azure_storage_account_key", access_key.as_ref());
+                o.set_opt("azure_storage_sas_key", sas_token.as_ref());
+            }
+        }
+    }
+
+    // Raw options layer.
+    for (k, v) in &spec.options {
+        if k == FILE_BUCKET_ROOT_OPTION {
+            continue;
+        }
+        o.set(k, v.clone());
+    }
+
+    // A named AWS profile fills what every layer above left unset, as the
+    // AWS SDKs order it: environment variables beat the profile.
+    let aws_credentials = match env.get("AWS_PROFILE").filter(|p| !p.is_empty()) {
+        Some(profile) if scheme == Scheme::S3 => apply_aws_profile(&mut o, &profile, env).await?,
+        _ => None,
+    };
+
+    if scheme == Scheme::S3 {
+        // An endpoint chosen above the environment beats an inherited
+        // `AWS_ENDPOINT_URL_S3`, which both clients would otherwise prefer.
+        if o.is_explicit("aws_endpoint") && !o.is_explicit("aws_endpoint_url_s3") {
+            let ep = o.get("aws_endpoint").cloned().unwrap_or_default();
+            o.map.insert("aws_endpoint_url_s3".into(), ep);
+        }
+        let endpoint = o
+            .get("aws_endpoint_url_s3")
+            .or_else(|| o.get("aws_endpoint"))
+            .cloned();
+        if o.get("aws_region").is_none() {
+            let region = match (o.get("aws_default_region").cloned(), &endpoint) {
+                (Some(r), _) => r,
+                // A custom endpoint (MinIO, R2, LocalStack): Lance would
+                // otherwise probe the instance metadata service for a region.
+                (None, Some(_)) => "us-east-1".to_string(),
+                (None, None) => {
+                    let mut opts = object_store::ClientOptions::new();
+                    for (k, v) in &o.map {
+                        if let Ok(key) = k.parse::<object_store::ClientConfigKey>() {
+                            opts = opts.with_config(key, v);
+                        }
+                    }
+                    object_store::aws::resolve_bucket_region(bucket, &opts)
+                        .await
+                        .map_err(|e| {
+                            anyhow!(
+                                "Could not determine the region of bucket '{bucket}' ({e}). \
+                                 Set AWS_REGION, the `aws_region` storage option, or the \
+                                 region in the cloud storage configuration."
+                            )
+                        })?
+                }
+            };
+            o.map.insert("aws_region".into(), region);
+        }
+    }
+
+    // `az://account/container` no longer names an account: a URI whose
+    // container is the configured account was most likely written in that
+    // removed form, and now names a container of that name.
+    if scheme == Scheme::Azure
+        && url_account.is_none()
+        && o.get("azure_storage_account_name").map(String::as_str) == Some(bucket)
+    {
+        tracing::warn!(
+            uri = %spec.uri,
+            "`az://{bucket}/…` names the container '{bucket}', which is also the configured \
+             storage account's name; `az://account/container/…` is no longer read as \
+             account then container: write `az://container/prefix` (or \
+             `abfss://container@account.dfs.core.windows.net/prefix`)"
+        );
+    }
+
+    // A plain-HTTP endpoint needs the HTTP allowance, unless it was decided
+    // explicitly.
+    if o.get("allow_http").is_none() {
+        let endpoint_key = match scheme {
+            Scheme::S3 => o
+                .get("aws_endpoint_url_s3")
+                .or_else(|| o.get("aws_endpoint")),
+            Scheme::Gcs => o.get("google_base_url"),
+            Scheme::Azure => o.get("azure_storage_endpoint"),
+            Scheme::File => None,
+        };
+        if endpoint_key.is_some_and(|e| e.starts_with("http://")) {
+            o.map.insert("allow_http".into(), "true".into());
+        }
+    }
+
+    // Network settings, unless chosen explicitly.
+    o.map
+        .entry("connect_timeout".into())
+        .or_insert_with(|| duration_option(net.connect_timeout));
+    o.map
+        .entry("timeout".into())
+        .or_insert_with(|| duration_option(net.read_timeout.max(net.write_timeout)));
+
+    Ok((o.map, aws_credentials))
+}
+
+/// Applies the named AWS profile `profile`: its region and endpoint where no
+/// layer set them, and a credential provider when no static keys were given.
+/// The provider resolves the profile's credentials as the AWS SDKs do
+/// (static keys, SSO, an assumed role, `credential_process`).
+async fn apply_aws_profile(
+    o: &mut OptionLayers,
+    profile: &str,
+    env: &dyn EnvSource,
+) -> Result<Option<object_store::aws::AwsCredentialProvider>> {
+    use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
+    // A file named by `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`
+    // replaces the default one; like the AWS SDKs, `~` is the home directory
+    // and a named file that does not exist is skipped rather than an error.
+    let home = env.get("HOME").or_else(|| env.get("USERPROFILE"));
+    let mut files = EnvConfigFiles::builder();
+    for (var, kind) in [
+        ("AWS_CONFIG_FILE", EnvConfigFileKind::Config),
+        (
+            "AWS_SHARED_CREDENTIALS_FILE",
+            EnvConfigFileKind::Credentials,
+        ),
+    ] {
+        let default = match env.get(var) {
+            Some(path) => {
+                let path = match (path.strip_prefix("~/"), &home) {
+                    (Some(rest), Some(home)) => std::path::Path::new(home).join(rest),
+                    _ => std::path::PathBuf::from(&path),
+                };
+                if path.exists() {
+                    files = files.with_file(kind, path);
+                }
+                false
+            }
+            None => true,
+        };
+        files = match kind {
+            EnvConfigFileKind::Config => files.include_default_config_file(default),
+            _ => files.include_default_credentials_file(default),
+        };
+    }
+    let files = files.build();
+
+    let vars = env.vars();
+    let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let shim_env = aws_types::os_shim_internal::Env::from_slice(&pairs);
+    let set = aws_config::profile::load(
+        &aws_types::os_shim_internal::Fs::real(),
+        &shim_env,
+        &files,
+        Some(std::borrow::Cow::Owned(profile.to_string())),
+    )
+    .await
+    .map_err(|e| anyhow!("Read the AWS config files for profile '{profile}': {e}"))?;
+    // An undefined profile is not an error, as for the AWS SDKs and Lance:
+    // `AWS_PROFILE=default` with no AWS files is common in containers.
+    let Some(section) = set.get_profile(profile) else {
+        tracing::debug!(
+            profile,
+            "AWS_PROFILE names a profile that is not defined; ignored"
+        );
+        return Ok(None);
+    };
+
+    if o.get("aws_region").is_none()
+        && o.get("aws_default_region").is_none()
+        && let Some(region) = section.get("region")
+    {
+        o.map.insert("aws_region".into(), region.to_string());
+    }
+    let ignore_endpoints = env
+        .get("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS")
+        .or_else(|| {
+            section
+                .get("ignore_configured_endpoint_urls")
+                .map(str::to_string)
+        })
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    // The profile's `services` section's `s3 = endpoint_url = …` names
+    // S3's endpoint ahead of the profile-wide `endpoint_url`, as for the
+    // SDKs.
+    let service_endpoint = section.get("services").and_then(|services| {
+        let key = aws_runtime::env_config::property::PropertiesKey::builder()
+            .section_key("services")
+            .section_name(services)
+            .property_name("s3")
+            .sub_property_name("endpoint_url")
+            .build()
+            .ok()?;
+        set.other_sections().get(&key).cloned()
+    });
+    if !ignore_endpoints
+        && o.get("aws_endpoint").is_none()
+        && o.get("aws_endpoint_url_s3").is_none()
+        && let Some(endpoint) =
+            service_endpoint.or_else(|| section.get("endpoint_url").map(str::to_string))
+    {
+        o.map.insert("aws_endpoint".into(), endpoint);
+    }
+    if o.get("aws_access_key_id").is_some() && o.get("aws_secret_access_key").is_some() {
+        return Ok(None);
+    }
+    // A profile with no credential source of its own (only a region, say)
+    // leaves the rest of the chain to apply: instance metadata, containers,
+    // web identity.
+    const CREDENTIAL_SOURCES: &[&str] = &[
+        "aws_access_key_id",
+        "role_arn",
+        "credential_process",
+        "sso_session",
+        "sso_start_url",
+        "sso_account_id",
+        "web_identity_token_file",
+        "login_session",
+    ];
+    if !CREDENTIAL_SOURCES.iter().any(|k| section.get(k).is_some()) {
+        return Ok(None);
+    }
+    // Assumed roles and web identity call STS, which needs a region: the
+    // profile's (taken above) or the environment's, else STS's global one.
+    let region = Some(aws_types::region::Region::new(
+        o.get("aws_region")
+            .or_else(|| o.get("aws_default_region"))
+            .cloned()
+            .unwrap_or_else(|| "us-east-1".to_string()),
+    ));
+    let provider_config =
+        aws_config::provider_config::ProviderConfig::without_region().with_region(region);
+    let provider = aws_config::profile::ProfileFileCredentialsProvider::builder()
+        .configure(&provider_config)
+        .profile_files(files)
+        .profile_name(profile)
+        .build();
+    Ok(Some(Arc::new(ProfileCredentials {
+        provider: aws_credential_types::provider::SharedCredentialsProvider::new(provider),
+        cached: tokio::sync::Mutex::new(None),
+    })))
+}
+
+/// An AWS SDK credential provider as `object_store` credentials, cached until
+/// shortly before they expire.
+#[derive(Debug)]
+struct ProfileCredentials {
+    provider: aws_credential_types::provider::SharedCredentialsProvider,
+    cached: tokio::sync::Mutex<
+        Option<(
+            Arc<object_store::aws::AwsCredential>,
+            Option<std::time::SystemTime>,
+        )>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl object_store::CredentialProvider for ProfileCredentials {
+    type Credential = object_store::aws::AwsCredential;
+
+    async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
+        use aws_credential_types::provider::ProvideCredentials;
+        let mut cached = self.cached.lock().await;
+        // Refreshed a minute before they expire, as Lance does.
+        let margin = std::time::Duration::from_secs(60);
+        if let Some((credential, expiry)) = cached.as_ref() {
+            let fresh = expiry.is_none_or(|at| {
+                at.duration_since(std::time::SystemTime::now())
+                    .is_ok_and(|left| left > margin)
+            });
+            if fresh {
+                return Ok(Arc::clone(credential));
+            }
+        }
+        let got = self.provider.provide_credentials().await.map_err(|e| {
+            object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(e),
+            }
+        })?;
+        let credential = Arc::new(object_store::aws::AwsCredential {
+            key_id: got.access_key_id().to_string(),
+            secret_key: got.secret_access_key().to_string(),
+            token: got.session_token().map(str::to_string),
+        });
+        *cached = Some((Arc::clone(&credential), got.expiry()));
+        Ok(credential)
+    }
+}
+
+fn retry_config(
+    net: &ObjectStoreConfig,
+    options: &BTreeMap<String, String>,
+) -> object_store::RetryConfig {
+    let default = object_store::RetryConfig::default();
+    // Lance's `client_max_retries` / `client_retry_timeout` (seconds) given as
+    // raw options govern uni's client too, so the two retry alike.
+    let max_retries = options
+        .get("client_max_retries")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(net.max_retries as usize);
+    let retry_timeout = options
+        .get("client_retry_timeout")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(default.retry_timeout, std::time::Duration::from_secs);
+    object_store::RetryConfig {
+        backoff: object_store::BackoffConfig {
+            init_backoff: net.retry_backoff_base,
+            max_backoff: net.retry_backoff_max,
+            base: 2.0,
+        },
+        max_retries,
+        retry_timeout,
+    }
+}
+
+/// uni's own client for the bucket, from the resolved options. Options the
+/// provider does not know are left for Lance.
+fn build_bucket_store(
+    scheme: Scheme,
+    options: &BTreeMap<String, String>,
+    aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
+    net: &ObjectStoreConfig,
+) -> Result<Arc<dyn ObjectStore>> {
+    use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+    use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
+    use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
+    let lance_only = |k: &str| tracing::debug!(key = k, "storage option passed to Lance only");
+    Ok(match scheme {
+        Scheme::S3 => {
+            let mut b = AmazonS3Builder::new();
+            for (k, v) in options {
+                match k.parse::<AmazonS3ConfigKey>() {
+                    Ok(key) => b = b.with_config(key, v),
+                    Err(_) => lance_only(k),
+                }
+            }
+            if let Some(credentials) = aws_credentials {
+                b = b.with_credentials(credentials);
+            }
+            Arc::new(b.with_retry(retry_config(net, options)).build()?)
+        }
+        Scheme::Gcs => {
+            let mut b = GoogleCloudStorageBuilder::new();
+            for (k, v) in options {
+                match k.parse::<GoogleConfigKey>() {
+                    Ok(key) => b = b.with_config(key, v),
+                    Err(_) => lance_only(k),
+                }
+            }
+            Arc::new(b.with_retry(retry_config(net, options)).build()?)
+        }
+        Scheme::Azure => {
+            let mut b = MicrosoftAzureBuilder::new();
+            for (k, v) in options {
+                match k.parse::<AzureConfigKey>() {
+                    Ok(key) => b = b.with_config(key, v),
+                    Err(_) => lance_only(k),
+                }
+            }
+            Arc::new(b.with_retry(retry_config(net, options)).build()?)
+        }
+        Scheme::File => bail!("a file:// location has no bucket store"),
+    })
+}
+
+fn prefixed(store: Arc<dyn ObjectStore>, prefix: &str) -> Arc<dyn ObjectStore> {
+    if prefix.is_empty() {
+        store
+    } else {
+        Arc::new(PrefixStore::new(store, prefix))
+    }
+}
+
+/// The object-store provider a URI names, or `None` for a local path or an
+/// unsupported scheme.
+#[must_use]
+pub fn scheme_of(uri: &str) -> Option<Scheme> {
+    let (scheme, _) = uri.split_once("://")?;
+    match scheme {
+        "s3" | "s3a" => Some(Scheme::S3),
+        "gs" | "gcs" => Some(Scheme::Gcs),
+        "az" | "azure" | "abfs" | "abfss" => Some(Scheme::Azure),
+        "file" => Some(Scheme::File),
+        _ => None,
+    }
+}
+
+/// A resolved store location. See the module docs.
+#[derive(Clone)]
+pub struct StoreLocation {
+    kind: LocationKind,
+    root_uri: String,
+    options: StorageOptions,
+    /// Credentials from a named AWS profile, when no static keys were given.
+    aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
+    meta: Arc<dyn ObjectStore>,
+    bucket_root: Option<Arc<dyn ObjectStore>>,
+    fs_root: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for StoreLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreLocation")
+            .field("kind", &self.kind)
+            .field("root_uri", &self.root_uri)
+            .field("options", &self.options)
+            .field("fs_root", &self.fs_root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StoreLocation {
+    /// Resolves a location. A plain local directory must already exist.
+    ///
+    /// # Errors
+    /// An unsupported scheme, a bucket that disagrees with the typed config,
+    /// or a store that cannot be built.
+    pub async fn resolve(
+        spec: &LocationSpec,
+        env: &dyn EnvSource,
+        net: &ObjectStoreConfig,
+    ) -> Result<Self> {
+        let uri = spec.uri.trim();
+        let parsed = parse_uri(uri)?;
+        match parsed.kind {
+            LocationKind::Local { dir } => {
+                if spec.cloud.is_some() {
+                    bail!(
+                        "A cloud storage configuration was given for the local path '{uri}'. \
+                         Open an object-store URI, or use hybrid mode for data in an object \
+                         store."
+                    );
+                }
+                let meta: Arc<dyn ObjectStore> = Arc::new(
+                    LocalFileSystem::new_with_prefix(&dir)
+                        .map_err(|e| anyhow!("Open local store at {}: {e}", dir.display()))?,
+                );
+                Ok(Self {
+                    root_uri: dir.display().to_string(),
+                    kind: LocationKind::Local { dir: dir.clone() },
+                    options: StorageOptions::default(),
+                    aws_credentials: None,
+                    meta,
+                    bucket_root: None,
+                    fs_root: Some(dir),
+                })
+            }
+            LocationKind::Remote {
+                scheme: Scheme::File,
+                prefix,
+                ..
+            } => {
+                if spec.cloud.is_some() {
+                    bail!("A cloud storage configuration was given for the file URI '{uri}'");
+                }
+                let path = PathBuf::from(format!("/{prefix}"));
+                let (bucket_store, rel, bucket_root): (Arc<dyn ObjectStore>, String, bool) =
+                    match spec.options.get(FILE_BUCKET_ROOT_OPTION) {
+                        Some(root) => {
+                            let root = PathBuf::from(root);
+                            let rel = path
+                                .strip_prefix(&root)
+                                .map_err(|_| {
+                                    anyhow!(
+                                        "{FILE_BUCKET_ROOT_OPTION} {} does not contain {}",
+                                        root.display(),
+                                        path.display()
+                                    )
+                                })?
+                                .to_string_lossy()
+                                .trim_matches('/')
+                                .to_string();
+                            std::fs::create_dir_all(&root)?;
+                            (
+                                Arc::new(LocalFileSystem::new_with_prefix(&root)?),
+                                rel,
+                                true,
+                            )
+                        }
+                        None => (Arc::new(LocalFileSystem::new()), prefix, false),
+                    };
+                let root_uri = url::Url::from_file_path(&path)
+                    .map_err(|()| anyhow!("Invalid file URI '{uri}'"))?
+                    .to_string()
+                    .trim_end_matches('/')
+                    .to_string();
+                Ok(Self {
+                    kind: LocationKind::Remote {
+                        scheme: Scheme::File,
+                        bucket: String::new(),
+                        prefix: rel.clone(),
+                    },
+                    root_uri,
+                    options: StorageOptions::default(),
+                    aws_credentials: None,
+                    meta: prefixed(Arc::clone(&bucket_store), &rel),
+                    bucket_root: bucket_root.then_some(bucket_store),
+                    fs_root: Some(path),
+                })
+            }
+            LocationKind::Remote {
+                scheme,
+                bucket,
+                prefix,
+            } => {
+                let (mut options, aws_credentials) =
+                    resolve_options(scheme, &bucket, parsed.account.as_deref(), spec, env, net)
+                        .await?;
+                options
+                    .entry("client_max_retries".into())
+                    .or_insert_with(|| net.max_retries.to_string());
+                let bucket_store =
+                    build_bucket_store(scheme, &options, aws_credentials.clone(), net)
+                        .map_err(|e| anyhow!("Build the object store client for '{uri}': {e:#}"))?;
+                let mut url = url::Url::parse(&format!("{}://{bucket}/", scheme.canonical()))
+                    .map_err(|e| anyhow!("Invalid store URI '{uri}': {e}"))?;
+                // The prefix as uni's own client writes it (`PrefixStore` takes
+                // it through `object_store::path::Path`, which escapes a
+                // literal `%`), so Lance, decoding the URL once, lands on the
+                // same keys.
+                url.set_path(object_store::path::Path::from(prefix.as_str()).as_ref());
+                let root_uri = url.to_string().trim_end_matches('/').to_string();
+                Ok(Self {
+                    kind: LocationKind::Remote {
+                        scheme,
+                        bucket,
+                        prefix: prefix.clone(),
+                    },
+                    root_uri,
+                    options: StorageOptions(options),
+                    aws_credentials,
+                    meta: prefixed(Arc::clone(&bucket_store), &prefix),
+                    bucket_root: Some(bucket_store),
+                    fs_root: None,
+                })
+            }
+        }
+    }
+
+    /// [`resolve`](Self::resolve) against the process environment.
+    ///
+    /// # Errors
+    /// See [`resolve`](Self::resolve).
+    pub async fn resolve_from_env(spec: &LocationSpec, net: &ObjectStoreConfig) -> Result<Self> {
+        Self::resolve(spec, &ProcessEnv, net).await
+    }
+
+    /// What kind of location this is.
+    #[must_use]
+    pub fn kind(&self) -> &LocationKind {
+        &self.kind
+    }
+
+    /// Whether the location is an object store reached over the network.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        matches!(&self.kind, LocationKind::Remote { scheme, .. } if *scheme != Scheme::File)
+    }
+
+    /// The decoded prefix under the bucket; empty for a bucket root or a
+    /// local directory.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        match &self.kind {
+            LocationKind::Remote { prefix, .. } => prefix,
+            LocationKind::Local { .. } => "",
+        }
+    }
+
+    /// The store root `R` as a URI (or path for a local directory), without
+    /// a trailing `/`.
+    #[must_use]
+    pub fn root_uri(&self) -> &str {
+        &self.root_uri
+    }
+
+    /// Credentials from a named AWS profile (`AWS_PROFILE`), when the
+    /// location has no static keys and the profile supplies them.
+    #[must_use]
+    pub fn aws_credentials(&self) -> Option<&object_store::aws::AwsCredentialProvider> {
+        self.aws_credentials.as_ref()
+    }
+
+    /// The resolved option map.
+    #[must_use]
+    pub fn options(&self) -> &StorageOptions {
+        &self.options
+    }
+
+    /// This location's options that carry over to `dest`, when it names the
+    /// same provider (and, for Azure, the same account): endpoint,
+    /// credentials, network settings. Empty otherwise.
+    #[must_use]
+    pub fn inheritable_options_for(&self, dest: &str) -> BTreeMap<String, String> {
+        let LocationKind::Remote { scheme, .. } = &self.kind else {
+            return BTreeMap::new();
+        };
+        if !self.is_remote() || scheme_of(dest) != Some(*scheme) {
+            return BTreeMap::new();
+        }
+        if *scheme == Scheme::Azure {
+            // An account named in the destination URI must be this store's:
+            // its key or SAS would otherwise be sent to, or the write land
+            // in, the wrong account.
+            let dest_account = parse_uri(dest).ok().and_then(|p| p.account);
+            if let Some(account) = dest_account
+                && self.options.get("azure_storage_account_name") != Some(account.as_str())
+            {
+                return BTreeMap::new();
+            }
+        }
+        self.inheritable_options()
+    }
+
+    /// This location's options that carry over to another location of the
+    /// same provider: endpoint, credentials, network settings. The bucket or
+    /// container does not, and neither does the region of a bucket on the
+    /// provider's own service, which another bucket may not share.
+    #[must_use]
+    pub fn inheritable_options(&self) -> BTreeMap<String, String> {
+        // A virtual-hosted endpoint names its bucket (`https://b.s3.…`), so
+        // inheriting it would send every request to this store's bucket.
+        let virtual_hosted = self
+            .options
+            .0
+            .get("aws_virtual_hosted_style_request")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+        let endpoint_keys = ["aws_endpoint", "aws_endpoint_url_s3"];
+        let custom_endpoint = !virtual_hosted
+            && endpoint_keys
+                .iter()
+                .any(|k| self.options.0.contains_key(*k));
+        self.options
+            .0
+            .iter()
+            .filter(|(k, _)| {
+                let k = k.as_str();
+                !matches!(k, "aws_bucket" | "google_bucket" | "azure_container_name")
+                    && !(k == "aws_region" && !custom_endpoint)
+                    && !(virtual_hosted
+                        && (endpoint_keys.contains(&k) || k == "aws_virtual_hosted_style_request"))
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The bucket-rooted store and the path of this location's root in it,
+    /// for addressing `R` itself as one object (a COPY source or target).
+    #[must_use]
+    pub fn object_handle(&self) -> (Arc<dyn ObjectStore>, ObjPath) {
+        match &self.bucket_root {
+            Some(bucket) => (Arc::clone(bucket), ObjPath::from(self.prefix())),
+            None => (self.meta_store(), ObjPath::from("")),
+        }
+    }
+
+    /// uni's store handle rooted at `R`.
+    #[must_use]
+    pub fn meta_store(&self) -> Arc<dyn ObjectStore> {
+        Arc::clone(&self.meta)
+    }
+
+    /// A handle rooted at the bucket (remote and `file://` only).
+    #[must_use]
+    pub fn bucket_root(&self) -> Option<Arc<dyn ObjectStore>> {
+        self.bucket_root.clone()
+    }
+
+    /// The local directory behind `R`, when there is one (plain paths and
+    /// `file://`). Enables fsync and the compaction lock.
+    #[must_use]
+    pub fn fs_root(&self) -> Option<&std::path::Path> {
+        self.fs_root.as_deref()
+    }
+
+    /// URI (or path) Lance opens tables under.
+    #[must_use]
+    pub fn table_uri(&self, layout: StoreLayout) -> String {
+        match (&self.kind, layout) {
+            (LocationKind::Local { dir }, _) => dir.join(TABLES_DIR).display().to_string(),
+            (_, StoreLayout::Standard) => join_uri(&self.root_uri, TABLES_DIR),
+            (_, StoreLayout::Flat) => self.root_uri.clone(),
+        }
+    }
+
+    /// uni's store handle rooted at the table root.
+    ///
+    /// # Errors
+    /// A local table directory that cannot be created.
+    pub fn table_store(&self, layout: StoreLayout) -> Result<Arc<dyn ObjectStore>> {
+        match (&self.kind, layout) {
+            (LocationKind::Local { dir }, _) => {
+                let tables = dir.join(TABLES_DIR);
+                std::fs::create_dir_all(&tables)?;
+                Ok(Arc::new(LocalFileSystem::new_with_prefix(&tables)?))
+            }
+            (_, layout) => {
+                // A `file://` table root is a directory the lock and fsync
+                // paths open files in directly.
+                if let Some(dir) = self.table_fs_root(layout) {
+                    std::fs::create_dir_all(dir)?;
+                }
+                Ok(match layout {
+                    StoreLayout::Standard => prefixed(self.meta_store(), TABLES_DIR),
+                    StoreLayout::Flat => self.meta_store(),
+                })
+            }
+        }
+    }
+
+    /// The local directory behind the table root, when there is one.
+    #[must_use]
+    pub fn table_fs_root(&self, layout: StoreLayout) -> Option<PathBuf> {
+        let root = self.fs_root.as_ref()?;
+        Some(match (&self.kind, layout) {
+            (LocationKind::Local { .. }, _) | (_, StoreLayout::Standard) => root.join(TABLES_DIR),
+            (_, StoreLayout::Flat) => root.clone(),
+        })
+    }
+
+    /// Storage options for Lance: the same map uni's client was built from,
+    /// plus Lance's own retry knob. `None` for local directories.
+    #[must_use]
+    pub fn lance_storage_options(&self) -> Option<HashMap<String, String>> {
+        self.is_remote().then(|| {
+            self.options
+                .0
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+    }
+
+    /// Inspects the store to decide its layout. Writes nothing.
+    ///
+    /// # Errors
+    /// The store cannot be listed or read.
+    pub async fn probe_layout(&self) -> Result<LayoutProbe> {
+        if get_optional(&self.meta, IN_PROGRESS_MARKER)
+            .await?
+            .is_some()
+        {
+            bail!(
+                "{} holds an unfinished backup: BACKUP was interrupted while copying into it. \
+                 Delete it and back up again.",
+                self.root_uri
+            );
+        }
+        if let Some(bytes) = get_optional(&self.meta, LAYOUT_MARKER_PATH).await? {
+            let marker: LayoutMarker = serde_json::from_slice(&bytes)
+                .map_err(|e| anyhow!("Invalid {LAYOUT_MARKER_PATH} in {}: {e}", self.root_uri))?;
+            return Ok(LayoutProbe::Recorded(marker.layout));
+        }
+        let top = self
+            .meta
+            .list_with_delimiter(None)
+            .await
+            .map_err(|e| anyhow!("List the store at {}: {e}", self.root_uri))?;
+        let dirs: Vec<String> = top
+            .common_prefixes
+            .iter()
+            .filter_map(|p| p.filename().map(str::to_string))
+            .collect();
+        let tables_at_root = dirs.iter().any(|d| d.ends_with(".lance"));
+        let has_storage = dirs.iter().any(|d| d == TABLES_DIR);
+        let catalog = self
+            .meta
+            .list_with_delimiter(Some(&ObjPath::from("catalog")))
+            .await
+            .map(|r| !r.objects.is_empty() || !r.common_prefixes.is_empty())
+            .or_else(|e| match e {
+                object_store::Error::NotFound { .. } => Ok(false),
+                e => Err(anyhow!("List the catalog at {}: {e}", self.root_uri)),
+            })?;
+
+        if !self.prefix().is_empty()
+            && !catalog
+            && tables_at_root
+            && let Some(bucket) = &self.bucket_root
+        {
+            let mut root_files = Vec::new();
+            for f in ["catalog/latest", "catalog/schema.json"] {
+                if get_optional(bucket, f).await?.is_some() {
+                    root_files.push(f.to_string());
+                }
+            }
+            if !root_files.is_empty() {
+                return Ok(LayoutProbe::LegacyPrefixed { root_files });
+            }
+        }
+        // An old flat store keeps its schema at the root (`schema.json`),
+        // with no `catalog/` until it first saves one there.
+        let legacy_schema =
+            tables_at_root && !catalog && get_optional(&self.meta, "schema.json").await?.is_some();
+        if tables_at_root && !catalog && !legacy_schema {
+            // No catalog here (nor, above, at the bucket root): opening would
+            // read an empty store over tables it cannot interpret.
+            bail!(
+                "{} holds tables but no catalog: its catalog/ is missing. Restore it (from \
+                 where the store was written, or a backup) before opening",
+                self.root_uri
+            );
+        }
+        if !self.prefix().is_empty()
+            && !catalog
+            && !has_storage
+            && let Some(bucket) = &self.bucket_root
+        {
+            // Nothing under the prefix, and a catalog or WAL at the bucket
+            // root: a store written by uni-db ≤ 5.3.0 under this prefix that
+            // never flushed, or a separate store at the bucket root (which
+            // is valid). Not refused, since the two cannot be told apart.
+            let root_wal = bucket
+                .list_with_delimiter(Some(&ObjPath::from("wal")))
+                .await
+                .is_ok_and(|r| !r.objects.is_empty());
+            if root_wal || get_optional(bucket, "catalog/schema.json").await?.is_some() {
+                tracing::warn!(
+                    store = %self.root_uri,
+                    "the bucket root holds a catalog or WAL: if a store written by uni-db \
+                     ≤ 5.3.0 under this prefix never flushed, its commits are there, not \
+                     under the prefix; this open starts the prefix empty"
+                );
+            }
+        }
+        if has_storage {
+            return Ok(LayoutProbe::Inferred(StoreLayout::Standard));
+        }
+        let root_latest = get_optional(&self.meta, "catalog/latest").await?.is_some();
+        if tables_at_root || root_latest {
+            return Ok(LayoutProbe::Inferred(StoreLayout::Flat));
+        }
+        Ok(LayoutProbe::Inferred(StoreLayout::Standard))
+    }
+
+    /// Records `layout` in [`LAYOUT_MARKER_PATH`] if no marker exists.
+    ///
+    /// # Errors
+    /// The marker cannot be written.
+    pub async fn write_layout_marker(&self, layout: StoreLayout) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(&LayoutMarker { version: 2, layout })?;
+        let path = ObjPath::from(LAYOUT_MARKER_PATH);
+        let opts: PutOptions = PutMode::Create.into();
+        match self.meta.put_opts(&path, bytes.clone().into(), opts).await {
+            Ok(_) | Err(object_store::Error::AlreadyExists { .. }) => Ok(()),
+            Err(object_store::Error::NotImplemented { .. })
+            | Err(object_store::Error::NotSupported { .. }) => {
+                if get_optional(&self.meta, LAYOUT_MARKER_PATH)
+                    .await?
+                    .is_none()
+                {
+                    self.meta.put(&path, bytes.into()).await?;
+                }
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(
+                "Write {LAYOUT_MARKER_PATH} in {}: {e}",
+                self.root_uri
+            )),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LayoutMarker {
+    version: u32,
+    layout: StoreLayout,
+}
+
+/// The object at `path`, or `None` when there is none.
+async fn get_optional(store: &Arc<dyn ObjectStore>, path: &str) -> Result<Option<bytes::Bytes>> {
+    match store.get(&ObjPath::from(path)).await {
+        Ok(r) => Ok(Some(r.bytes().await?)),
+        Err(object_store::Error::NotFound { .. }) => Ok(None),
+        Err(e) => Err(anyhow!("Read {path}: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::path::Path;
+    use object_store::{ObjectStoreExt, PutPayload};
+
+    fn net() -> ObjectStoreConfig {
+        ObjectStoreConfig::default()
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn spec(uri: &str) -> LocationSpec {
+        LocationSpec {
+            uri: uri.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Static keys and a region keep resolution off the network.
+    fn quiet_env() -> BTreeMap<String, String> {
+        env(&[
+            ("AWS_ACCESS_KEY_ID", "AKIDENV"),
+            ("AWS_SECRET_ACCESS_KEY", "envsecret"),
+            ("AWS_REGION", "eu-west-1"),
+        ])
+    }
+
+    async fn resolve(spec: &LocationSpec, env: &BTreeMap<String, String>) -> StoreLocation {
+        StoreLocation::resolve(spec, env, &net())
+            .await
+            .unwrap_or_else(|e| panic!("resolve {:?}: {e:#}", spec.uri))
+    }
+
+    fn remote(loc: &StoreLocation) -> (Scheme, String, String) {
+        match loc.kind() {
+            LocationKind::Remote {
+                scheme,
+                bucket,
+                prefix,
+            } => (*scheme, bucket.clone(), prefix.clone()),
+            other => panic!("expected remote, got {other:?}"),
+        }
+    }
+
+    // ---- L1: parsing -----------------------------------------------------
+
+    #[tokio::test]
+    async fn s3_uri_forms_parse_to_bucket_and_prefix() {
+        let e = quiet_env();
+        for (uri, bucket, prefix, root) in [
+            ("s3://b", "b", "", "s3://b"),
+            ("s3://b/", "b", "", "s3://b"),
+            ("s3://b/p", "b", "p", "s3://b/p"),
+            ("s3://b/p/q/", "b", "p/q", "s3://b/p/q"),
+            ("s3a://b/p", "b", "p", "s3://b/p"),
+        ] {
+            let loc = resolve(&spec(uri), &e).await;
+            assert_eq!(
+                remote(&loc),
+                (Scheme::S3, bucket.to_string(), prefix.to_string()),
+                "{uri}"
+            );
+            assert_eq!(loc.root_uri(), root, "{uri}");
+            assert!(loc.is_remote());
+        }
+    }
+
+    #[tokio::test]
+    async fn gcs_and_azure_uris_parse() {
+        let e = env(&[("AZURE_STORAGE_ACCOUNT_NAME", "acct")]);
+        let loc = resolve(&spec("gs://g/p"), &e).await;
+        assert_eq!(remote(&loc), (Scheme::Gcs, "g".into(), "p".into()));
+        let loc = resolve(&spec("gcs://g/p"), &e).await;
+        assert_eq!(remote(&loc), (Scheme::Gcs, "g".into(), "p".into()));
+        assert_eq!(loc.root_uri(), "gs://g/p");
+
+        let loc = resolve(&spec("az://cont/p"), &e).await;
+        assert_eq!(remote(&loc), (Scheme::Azure, "cont".into(), "p".into()));
+        assert_eq!(
+            loc.options().get("azure_storage_account_name"),
+            Some("acct")
+        );
+
+        let loc = resolve(&spec("abfss://cont@acct2.dfs.core.windows.net/p/q"), &e).await;
+        assert_eq!(remote(&loc), (Scheme::Azure, "cont".into(), "p/q".into()));
+        assert_eq!(
+            loc.options().get("azure_storage_account_name"),
+            Some("acct2")
+        );
+        assert_eq!(loc.root_uri(), "az://cont/p/q");
+    }
+
+    /// The `az://account/container` form of uni-db ≤ 5.3.0 is not read as
+    /// such: the host is the container. With a configured container it
+    /// disagrees with, the open fails rather than write somewhere else.
+    #[tokio::test]
+    async fn the_legacy_azure_account_container_form_is_not_reinterpreted() {
+        let cfg = CloudStorageConfig::Azure {
+            container: "cont".into(),
+            account: "acct".into(),
+            access_key: None,
+            sas_token: None,
+        };
+        let s = LocationSpec {
+            uri: "az://acct/cont/p".into(),
+            cloud: Some(cfg),
+            ..Default::default()
+        };
+        assert!(
+            StoreLocation::resolve(&s, &env(&[]), &ObjectStoreConfig::default())
+                .await
+                .is_err(),
+            "the container in the URL disagrees with the configured one"
+        );
+    }
+
+    #[tokio::test]
+    async fn percent_encoded_prefix_is_decoded_once() {
+        let loc = resolve(&spec("s3://b/a%20b/c"), &quiet_env()).await;
+        assert_eq!(remote(&loc).2, "a b/c");
+    }
+
+    #[tokio::test]
+    async fn file_uri_is_a_remote_style_local_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = format!("file://{}/store", dir.path().display());
+        let loc = resolve(&spec(&uri), &env(&[])).await;
+        let (scheme, _, prefix) = remote(&loc);
+        assert_eq!(scheme, Scheme::File);
+        assert!(prefix.ends_with("store"), "{prefix}");
+        assert!(!loc.is_remote());
+        assert_eq!(loc.fs_root(), Some(dir.path().join("store").as_path()));
+        assert!(loc.lance_storage_options().is_none());
+    }
+
+    #[tokio::test]
+    async fn plain_path_is_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let loc = resolve(&spec(&dir.path().display().to_string()), &env(&[])).await;
+        assert_eq!(
+            loc.kind(),
+            &LocationKind::Local {
+                dir: dir.path().to_path_buf()
+            }
+        );
+        assert_eq!(loc.fs_root(), Some(dir.path()));
+        assert_eq!(
+            loc.table_uri(StoreLayout::Standard),
+            dir.path().join("storage").display().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_schemes_are_rejected() {
+        for uri in ["memory://x", "http://host/x", "ftp://h/x", "adl://c/p"] {
+            let err = StoreLocation::resolve(&spec(uri), &env(&[]), &net())
+                .await
+                .expect_err(uri);
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("Unsupported") && msg.contains("s3://"),
+                "{uri}: {msg}"
+            );
+        }
+    }
+
+    // ---- L2: precedence --------------------------------------------------
+
+    #[tokio::test]
+    async fn precedence_env_url_config_options() {
+        let e = env(&[
+            ("AWS_REGION", "env-region"),
+            ("AWS_ENDPOINT_URL", "http://env:1"),
+            ("AWS_ACCESS_KEY_ID", "AKIDENV"),
+            ("AWS_SECRET_ACCESS_KEY", "envsecret"),
+            ("AWS_BUCKET", "envbucket"),
+        ]);
+        // Env alone.
+        let loc = resolve(&spec("s3://urlbucket/p"), &e).await;
+        let o = loc.options();
+        assert_eq!(o.get("aws_region"), Some("env-region"));
+        assert_eq!(o.get("aws_endpoint"), Some("http://env:1"));
+        assert_eq!(o.get("aws_bucket"), Some("urlbucket"), "URL beats env");
+
+        // Typed config beats env; a None field leaves env in place.
+        let cfg = CloudStorageConfig::S3 {
+            bucket: "urlbucket".into(),
+            region: Some("cfg-region".into()),
+            endpoint: None,
+            access_key_id: None,
+            secret_access_key: None,
+            session_token: None,
+            virtual_hosted_style: false,
+        };
+        let mut s = spec("s3://urlbucket/p");
+        s.cloud = Some(cfg);
+        let loc = resolve(&s, &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("cfg-region"));
+        assert_eq!(loc.options().get("aws_endpoint"), Some("http://env:1"));
+        assert_eq!(loc.options().get("aws_access_key_id"), Some("AKIDENV"));
+
+        // Raw options beat everything, and accept aliases.
+        s.options = BTreeMap::from([("region".to_string(), "opt-region".to_string())]);
+        let loc = resolve(&s, &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("opt-region"));
+    }
+
+    #[tokio::test]
+    async fn bucket_mismatch_between_url_and_config_errors() {
+        let cfg = CloudStorageConfig::S3 {
+            bucket: "other".into(),
+            region: Some("r".into()),
+            endpoint: None,
+            access_key_id: None,
+            secret_access_key: None,
+            session_token: None,
+            virtual_hosted_style: false,
+        };
+        let s = LocationSpec {
+            uri: "s3://b/p".into(),
+            cloud: Some(cfg),
+            ..Default::default()
+        };
+        let err = StoreLocation::resolve(&s, &quiet_env(), &net())
+            .await
+            .expect_err("mismatch");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("names bucket 'b'") && msg.contains("names bucket 'other'"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_http_is_derived_from_an_http_endpoint_unless_set() {
+        let mut s = spec("s3://b");
+        s.options = BTreeMap::from([("aws_endpoint".into(), "http://localhost:4566".into())]);
+        let loc = resolve(&s, &quiet_env()).await;
+        assert_eq!(loc.options().get("allow_http"), Some("true"));
+
+        s.options.insert("allow_http".into(), "false".into());
+        let loc = resolve(&s, &quiet_env()).await;
+        assert_eq!(loc.options().get("allow_http"), Some("false"));
+
+        s.options = BTreeMap::from([("aws_endpoint".into(), "https://s3.example".into())]);
+        let loc = resolve(&s, &quiet_env()).await;
+        assert_eq!(loc.options().get("allow_http"), None);
+    }
+
+    #[tokio::test]
+    async fn explicit_endpoint_also_overrides_the_s3_specific_env_endpoint() {
+        let mut e = quiet_env();
+        e.insert("AWS_ENDPOINT_URL_S3".into(), "http://env-s3:1".into());
+        // Env alone: the S3-specific variable wins, as the AWS SDKs do.
+        let loc = resolve(&spec("s3://b"), &e).await;
+        assert_eq!(
+            loc.options().get("aws_endpoint_url_s3"),
+            Some("http://env-s3:1")
+        );
+        // An endpoint set above env replaces both keys.
+        let mut s = spec("s3://b");
+        s.options = BTreeMap::from([("endpoint".into(), "http://opt:2".into())]);
+        let loc = resolve(&s, &e).await;
+        assert_eq!(loc.options().get("aws_endpoint"), Some("http://opt:2"));
+        assert_eq!(
+            loc.options().get("aws_endpoint_url_s3"),
+            Some("http://opt:2")
+        );
+    }
+
+    #[tokio::test]
+    async fn region_defaults_when_an_endpoint_is_set() {
+        let mut s = spec("s3://b");
+        s.options = BTreeMap::from([("aws_endpoint".into(), "http://minio:9000".into())]);
+        let loc = resolve(&s, &env(&[])).await;
+        assert_eq!(loc.options().get("aws_region"), Some("us-east-1"));
+    }
+
+    #[tokio::test]
+    async fn explicit_credentials_keep_the_environment_session_token_for_both_clients() {
+        // Lance merges any environment key the map lacks, so dropping an
+        // inherited token on uni's side alone would split the two clients:
+        // the catalog would sign without it and the tables with it.
+        let mut e = quiet_env();
+        e.insert("AWS_SESSION_TOKEN".into(), "env-token".into());
+        let mut s = spec("s3://b");
+        s.options = BTreeMap::from([
+            ("aws_access_key_id".into(), "AKIDOPT".into()),
+            ("aws_secret_access_key".into(), "optsecret".into()),
+        ]);
+        let loc = resolve(&s, &e).await;
+        assert_eq!(loc.options().get("aws_access_key_id"), Some("AKIDOPT"));
+        assert_eq!(loc.options().get("aws_session_token"), Some("env-token"));
+        let lance = loc.lance_storage_options().unwrap();
+        assert_eq!(
+            lance.get("aws_session_token").map(String::as_str),
+            Some("env-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn azure_storage_account_names_the_account() {
+        let loc = resolve(
+            &spec("az://cont/p"),
+            &env(&[("AZURE_STORAGE_ACCOUNT", "acct")]),
+        )
+        .await;
+        assert_eq!(
+            loc.options().get("azure_storage_account_name"),
+            Some("acct")
+        );
+    }
+
+    /// A container named like the account is a container: `az://acct/cont/p`
+    /// is container `acct`, prefix `cont/p`, whatever account is configured.
+    #[tokio::test]
+    async fn an_azure_host_is_always_the_container() {
+        let loc = resolve(
+            &spec("az://acct/cont/p"),
+            &env(&[("AZURE_STORAGE_ACCOUNT_NAME", "acct")]),
+        )
+        .await;
+        assert_eq!(
+            remote(&loc),
+            (Scheme::Azure, "acct".into(), "cont/p".into())
+        );
+    }
+
+    /// A literal `%` in the prefix is the same key for both clients: uni's
+    /// `PrefixStore` escapes it, and so does the root URI Lance decodes once.
+    #[tokio::test]
+    async fn a_literal_percent_in_the_prefix_is_one_key_for_both_clients() {
+        let mut sp = spec("s3://b/a%2520b");
+        sp.options
+            .insert("aws_endpoint".into(), "http://127.0.0.1:1".into());
+        sp.options.insert("aws_access_key_id".into(), "k".into());
+        sp.options
+            .insert("aws_secret_access_key".into(), "s".into());
+        let loc = resolve(&sp, &env(&[])).await;
+        assert_eq!(remote(&loc).2, "a%20b", "the decoded prefix");
+        // uni's key for the prefix, and the path Lance decodes once to it.
+        let uni_key = object_store::path::Path::from("a%20b");
+        assert_eq!(uni_key.as_ref(), "a%2520b");
+        assert_eq!(loc.root_uri(), "s3://b/a%2520b");
+    }
+
+    /// Lance's retry options, given raw, set uni's client's retries too.
+    #[test]
+    fn raw_client_retry_options_reach_both_clients() {
+        let net = ObjectStoreConfig::default();
+        let options = BTreeMap::from([
+            ("client_max_retries".to_string(), "7".to_string()),
+            ("client_retry_timeout".to_string(), "42".to_string()),
+        ]);
+        let retry = retry_config(&net, &options);
+        assert_eq!(retry.max_retries, 7);
+        assert_eq!(retry.retry_timeout, std::time::Duration::from_secs(42));
+        let retry = retry_config(&net, &BTreeMap::new());
+        assert_eq!(retry.max_retries, net.max_retries as usize);
+    }
+
+    #[test]
+    fn proxy_urls_are_redacted() {
+        let o = StorageOptions(BTreeMap::from([(
+            "proxy_url".into(),
+            "http://user:proxysecret@proxy:3128".into(),
+        )]));
+        assert!(!format!("{o:?}").contains("proxysecret"));
+    }
+
+    #[tokio::test]
+    async fn timeouts_and_retries_are_lowered_unless_set() {
+        let n = ObjectStoreConfig {
+            connect_timeout: std::time::Duration::from_secs(7),
+            read_timeout: std::time::Duration::from_secs(20),
+            write_timeout: std::time::Duration::from_secs(40),
+            max_retries: 2,
+            ..Default::default()
+        };
+        let loc = StoreLocation::resolve(&spec("s3://b"), &quiet_env(), &n)
+            .await
+            .unwrap();
+        assert_eq!(loc.options().get("connect_timeout"), Some("7s"));
+        assert_eq!(loc.options().get("timeout"), Some("40s"));
+        let lance = loc.lance_storage_options().unwrap();
+        assert_eq!(
+            lance.get("client_max_retries").map(String::as_str),
+            Some("2")
+        );
+
+        let mut s = spec("s3://b");
+        s.options = BTreeMap::from([("timeout".into(), "5s".into())]);
+        let loc = StoreLocation::resolve(&s, &quiet_env(), &n).await.unwrap();
+        assert_eq!(loc.options().get("timeout"), Some("5s"));
+    }
+
+    #[tokio::test]
+    async fn gcs_and_azure_env_keys_are_picked_up() {
+        let e = env(&[
+            ("SERVICE_ACCOUNT", "/sa.json"),
+            ("AZURE_STORAGE_ACCOUNT_NAME", "acct"),
+            ("AZURE_STORAGE_ACCOUNT_KEY", "YXprZXk="),
+            ("IDENTITY_ENDPOINT", "http://msi"),
+        ]);
+        // The GCS client reads the credential file at build time, so a
+        // missing file proves the variable reached it.
+        for (vars, path) in [
+            (e.clone(), "/sa.json"),
+            (
+                env(&[("GOOGLE_APPLICATION_CREDENTIALS", "/adc.json")]),
+                "/adc.json",
+            ),
+        ] {
+            let err = StoreLocation::resolve(&spec("gs://g"), &vars, &net())
+                .await
+                .expect_err("no credential file");
+            assert!(format!("{err:#}").contains(path), "{err:#}");
+        }
+        let loc = resolve(&spec("az://c"), &e).await;
+        assert_eq!(
+            loc.options().get("azure_storage_account_key"),
+            Some("YXprZXk=")
+        );
+        assert_eq!(loc.options().get("azure_msi_endpoint"), Some("http://msi"));
+    }
+
+    #[tokio::test]
+    async fn unknown_options_are_forwarded_to_lance_only() {
+        let mut s = spec("s3://b");
+        s.options = BTreeMap::from([("use_opendal".into(), "false".into())]);
+        let loc = resolve(&s, &quiet_env()).await;
+        let lance = loc.lance_storage_options().unwrap();
+        assert_eq!(lance.get("use_opendal").map(String::as_str), Some("false"));
+    }
+
+    // ---- L3: one map for both clients -----------------------------------
+
+    #[tokio::test]
+    async fn lance_gets_the_same_options_as_uni() {
+        for uri in ["s3://b/p", "gs://g/p", "az://c/p"] {
+            let e = {
+                let mut e = quiet_env();
+                e.insert("AZURE_STORAGE_ACCOUNT_NAME".into(), "acct".into());
+                e
+            };
+            let loc = resolve(&spec(uri), &e).await;
+            let lance = loc.lance_storage_options().unwrap();
+            for (k, v) in loc.options().as_map() {
+                assert_eq!(lance.get(k), Some(v), "{uri}: {k}");
+            }
+        }
+    }
+
+    // ---- L4: secrets never print ----------------------------------------
+
+    #[tokio::test]
+    async fn debug_never_prints_secrets() {
+        let cfg = CloudStorageConfig::S3 {
+            bucket: "b".into(),
+            region: Some("r".into()),
+            endpoint: None,
+            access_key_id: Some("AKIDSECRETID".into()),
+            secret_access_key: Some("verysecretvalue".into()),
+            session_token: Some("sessiontokenvalue".into()),
+            virtual_hosted_style: false,
+        };
+        let s = LocationSpec {
+            uri: "s3://b".into(),
+            cloud: Some(cfg.clone()),
+            options: BTreeMap::from([("aws_secret_access_key".into(), "optsecretvalue".into())]),
+        };
+        let loc = resolve(&s, &env(&[])).await;
+        for text in [format!("{cfg:?}"), format!("{s:?}"), format!("{loc:?}")] {
+            for secret in ["verysecretvalue", "sessiontokenvalue", "optsecretvalue"] {
+                assert!(!text.contains(secret), "{text}");
+            }
+        }
+        assert!(format!("{loc:?}").contains("aws_region"));
+    }
+
+    // ---- L6: the root store is prefixed ----------------------------------
+
+    #[tokio::test]
+    async fn meta_and_table_stores_stay_under_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = format!("file://{}/bucket/p", dir.path().display());
+        let loc = resolve(&spec(&uri), &env(&[])).await;
+        let meta = loc.meta_store();
+        meta.put(
+            &Path::from("catalog/schema.json"),
+            PutPayload::from_static(b"{}"),
+        )
+        .await
+        .unwrap();
+        let tables = loc.table_store(StoreLayout::Standard).unwrap();
+        tables
+            .put(&Path::from("catalog/latest"), PutPayload::from_static(b"x"))
+            .await
+            .unwrap();
+        assert!(dir.path().join("bucket/p/catalog/schema.json").is_file());
+        assert!(dir.path().join("bucket/p/storage/catalog/latest").is_file());
+        // A listing through the prefixed handle is relative to it.
+        use futures::TryStreamExt;
+        let listed: Vec<_> = meta
+            .list(Some(&Path::from("catalog")))
+            .map_ok(|m| m.location.to_string())
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(listed, vec!["catalog/schema.json".to_string()]);
+        assert_eq!(
+            loc.table_uri(StoreLayout::Standard),
+            format!("file://{}/bucket/p/storage", dir.path().display())
+        );
+        assert_eq!(
+            loc.table_uri(StoreLayout::Flat),
+            format!("file://{}/bucket/p", dir.path().display())
+        );
+    }
+
+    // ---- L7: URI joins ---------------------------------------------------
+
+    #[test]
+    fn join_uri_normalizes_slashes() {
+        assert_eq!(join_uri("s3://b/p", "indexes/x"), "s3://b/p/indexes/x");
+        assert_eq!(join_uri("s3://b/p/", "indexes/x"), "s3://b/p/indexes/x");
+        assert_eq!(join_uri("s3://b/p/", "/indexes/x/"), "s3://b/p/indexes/x");
+        assert_eq!(join_uri("/tmp/db", ""), "/tmp/db");
+        assert_eq!(join_uri("s3://b", "t.lance"), "s3://b/t.lance");
+    }
+
+    // ---- layout probing --------------------------------------------------
+
+    async fn file_loc(dir: &std::path::Path, rel: &str) -> StoreLocation {
+        resolve(&spec(&format!("file://{}/{rel}", dir.display())), &env(&[])).await
+    }
+
+    fn touch(path: std::path::PathBuf) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_new_store_is_standard() {
+        let dir = tempfile::tempdir().unwrap();
+        let loc = file_loc(dir.path(), "a").await;
+        assert_eq!(
+            loc.probe_layout().await.unwrap(),
+            LayoutProbe::Inferred(StoreLayout::Standard)
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_recognizes_a_flat_store() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path().join("a/catalog/latest"));
+        touch(dir.path().join("a/vertices.lance/_versions/1.manifest"));
+        let loc = file_loc(dir.path(), "a").await;
+        assert_eq!(
+            loc.probe_layout().await.unwrap(),
+            LayoutProbe::Inferred(StoreLayout::Flat)
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_prefers_the_recorded_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path().join("a/vertices.lance/_versions/1.manifest"));
+        let loc = file_loc(dir.path(), "a").await;
+        loc.write_layout_marker(StoreLayout::Standard)
+            .await
+            .unwrap();
+        // A second write keeps the first marker.
+        loc.write_layout_marker(StoreLayout::Flat).await.unwrap();
+        assert_eq!(
+            loc.probe_layout().await.unwrap(),
+            LayoutProbe::Recorded(StoreLayout::Standard)
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_detects_a_legacy_prefixed_store() {
+        let dir = tempfile::tempdir().unwrap();
+        // ≤ 5.3.0: tables under the prefix, metadata at the bucket root.
+        touch(
+            dir.path()
+                .join("bucket/a/vertices.lance/_versions/1.manifest"),
+        );
+        touch(dir.path().join("bucket/catalog/schema.json"));
+        touch(dir.path().join("bucket/catalog/latest"));
+        let bucketed = |rel: &str| LocationSpec {
+            uri: format!("file://{}/bucket/{rel}", dir.path().display()),
+            options: BTreeMap::from([(
+                FILE_BUCKET_ROOT_OPTION.to_string(),
+                dir.path().join("bucket").display().to_string(),
+            )]),
+            ..Default::default()
+        };
+        let loc = resolve(&bucketed("a"), &env(&[])).await;
+        assert_eq!(remote(&loc).2, "a");
+        match loc.probe_layout().await.unwrap() {
+            LayoutProbe::LegacyPrefixed { root_files } => {
+                assert!(
+                    root_files.iter().any(|f| f == "catalog/latest"),
+                    "{root_files:?}"
+                );
+            }
+            other => panic!("expected legacy, got {other:?}"),
+        }
+        // A sibling that is itself fresh is not affected by the root files.
+        let fresh = resolve(&bucketed("b"), &env(&[])).await;
+        assert_eq!(
+            fresh.probe_layout().await.unwrap(),
+            LayoutProbe::Inferred(StoreLayout::Standard)
+        );
+    }
+
+    /// Tables under a store's root with no catalog anywhere are refused, not
+    /// opened as an empty store.
+    #[tokio::test]
+    async fn tables_without_a_catalog_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(
+            dir.path()
+                .join("bucket/a/vertices.lance/_versions/1.manifest"),
+        );
+        let loc = resolve(
+            &LocationSpec {
+                uri: format!("file://{}/bucket/a", dir.path().display()),
+                options: BTreeMap::from([(
+                    FILE_BUCKET_ROOT_OPTION.to_string(),
+                    dir.path().join("bucket").display().to_string(),
+                )]),
+                ..Default::default()
+            },
+            &env(&[]),
+        )
+        .await;
+        let err = loc
+            .probe_layout()
+            .await
+            .expect_err("an empty store over tables");
+        assert!(format!("{err:#}").contains("no catalog"), "{err:#}");
+    }
+
+    /// An old flat store, whose schema is at its root (`schema.json`) and
+    /// which has no `catalog/` yet, opens flat.
+    #[tokio::test]
+    async fn an_old_flat_store_with_a_root_schema_opens_flat() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path().join("bucket/a/schema.json"));
+        touch(
+            dir.path()
+                .join("bucket/a/vertices.lance/_versions/1.manifest"),
+        );
+        let loc = resolve(
+            &LocationSpec {
+                uri: format!("file://{}/bucket/a", dir.path().display()),
+                options: BTreeMap::from([(
+                    FILE_BUCKET_ROOT_OPTION.to_string(),
+                    dir.path().join("bucket").display().to_string(),
+                )]),
+                ..Default::default()
+            },
+            &env(&[]),
+        )
+        .await;
+        assert_eq!(
+            loc.probe_layout().await.unwrap(),
+            LayoutProbe::Inferred(StoreLayout::Flat)
+        );
+    }
+
+    #[tokio::test]
+    async fn bucket_root_store_is_never_legacy_prefixed() {
+        // Everything at the root, as a ≤ 5.3.0 bucket-root store has it.
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path().join("catalog/latest"));
+        touch(dir.path().join("catalog/schema.json"));
+        touch(dir.path().join("vertices.lance/_versions/1.manifest"));
+        let s = LocationSpec {
+            uri: format!("file://{}", dir.path().display()),
+            options: BTreeMap::from([(
+                FILE_BUCKET_ROOT_OPTION.to_string(),
+                dir.path().display().to_string(),
+            )]),
+            ..Default::default()
+        };
+        let loc = resolve(&s, &env(&[])).await;
+        assert_eq!(remote(&loc).2, "");
+        assert_eq!(
+            loc.probe_layout().await.unwrap(),
+            LayoutProbe::Inferred(StoreLayout::Flat)
+        );
+    }
+
+    // ---- AWS named profiles ----------------------------------------------
+
+    fn profile_files(dir: &std::path::Path) -> std::path::PathBuf {
+        let config = dir.join("config");
+        std::fs::write(
+            &config,
+            "[profile uni-test]\n\
+             region = eu-central-1\n\
+             endpoint_url = http://127.0.0.1:1\n\
+             aws_access_key_id = AKIDPROFILE\n\
+             aws_secret_access_key = profilesecret\n",
+        )
+        .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn a_named_profile_supplies_region_endpoint_and_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let e = env(&[
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("eu-central-1"));
+        assert_eq!(
+            loc.options().get("aws_endpoint"),
+            Some("http://127.0.0.1:1")
+        );
+        let creds = loc
+            .aws_credentials()
+            .expect("the profile's credentials")
+            .get_credential()
+            .await
+            .unwrap();
+        assert_eq!(creds.key_id, "AKIDPROFILE");
+        assert_eq!(creds.secret_key, "profilesecret");
+        // The secret is not in the option map, so Debug cannot print it.
+        assert!(!format!("{loc:?}").contains("profilesecret"));
+    }
+
+    /// A profile's `services` section names S3's endpoint ahead of its
+    /// profile-wide `endpoint_url`.
+    #[tokio::test]
+    async fn a_profile_service_endpoint_beats_its_global_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "[profile uni-svc]\n\
+             region = eu-west-1\n\
+             endpoint_url = http://127.0.0.1:1\n\
+             services = local\n\
+             aws_access_key_id = AKID\n\
+             aws_secret_access_key = s\n\
+             [services local]\n\
+             s3 =\n  endpoint_url = http://127.0.0.1:2\n",
+        )
+        .unwrap();
+        let e = env(&[
+            ("AWS_PROFILE", "uni-svc"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(
+            loc.options().get("aws_endpoint"),
+            Some("http://127.0.0.1:2")
+        );
+    }
+
+    /// A virtual-hosted endpoint names its bucket; a BACKUP to another bucket
+    /// does not inherit it.
+    #[tokio::test]
+    async fn a_virtual_hosted_endpoint_is_not_inherited() {
+        let e = env(&[]);
+        let mut sp = spec("s3://src/p");
+        sp.options.insert(
+            "aws_endpoint".into(),
+            "https://src.s3.us-west-2.amazonaws.com".into(),
+        );
+        sp.options
+            .insert("aws_virtual_hosted_style_request".into(), "true".into());
+        sp.options.insert("aws_region".into(), "us-west-2".into());
+        sp.options.insert("aws_access_key_id".into(), "AKID".into());
+        sp.options
+            .insert("aws_secret_access_key".into(), "s".into());
+        let loc = resolve(&sp, &e).await;
+        let inherited = loc.inheritable_options_for("s3://backups/x");
+        assert!(!inherited.contains_key("aws_endpoint"), "{inherited:?}");
+        assert!(!inherited.contains_key("aws_virtual_hosted_style_request"));
+        assert_eq!(
+            inherited.get("aws_access_key_id").map(String::as_str),
+            Some("AKID")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_settings_beat_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let mut e = env(&[
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_REGION", "us-west-2"),
+        ]);
+        let mut s = spec("s3://b/p");
+        s.options = BTreeMap::from([("aws_endpoint".into(), "http://opt:9".into())]);
+        let loc = resolve(&s, &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("us-west-2"));
+        assert_eq!(loc.options().get("aws_endpoint"), Some("http://opt:9"));
+        // Static keys from a higher layer: the profile's credentials are not used.
+        e.insert("AWS_ACCESS_KEY_ID".into(), "AKIDENV".into());
+        e.insert("AWS_SECRET_ACCESS_KEY".into(), "envsecret".into());
+        let loc = resolve(&s, &e).await;
+        assert!(loc.aws_credentials().is_none());
+        assert_eq!(loc.options().get("aws_access_key_id"), Some("AKIDENV"));
+    }
+
+    #[tokio::test]
+    async fn an_undefined_profile_does_not_fail_the_open() {
+        // `AWS_PROFILE=default` with no AWS files is common in containers;
+        // the SDKs and Lance carry on with the rest of the chain.
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let e = env(&[
+            ("AWS_PROFILE", "default"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+            ("AWS_REGION", "us-east-1"),
+            ("AWS_ACCESS_KEY_ID", "AKIDENV"),
+            ("AWS_SECRET_ACCESS_KEY", "envsecret"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert!(loc.aws_credentials().is_none());
+        assert_eq!(loc.options().get("aws_access_key_id"), Some("AKIDENV"));
+    }
+
+    #[tokio::test]
+    async fn a_profile_without_credentials_installs_no_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "[profile region-only]\nregion = ap-south-1\n").unwrap();
+        let e = env(&[
+            ("AWS_PROFILE", "region-only"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("ap-south-1"));
+        // The rest of the credential chain (IMDS, ECS, web identity) applies.
+        assert!(loc.aws_credentials().is_none());
+    }
+
+    #[tokio::test]
+    async fn environment_region_and_endpoint_beat_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let e = env(&[
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+            ("AWS_DEFAULT_REGION", "sa-east-1"),
+            ("AWS_ENDPOINT_URL_S3", "http://env-s3:2"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("sa-east-1"));
+        assert_eq!(
+            loc.options().get("aws_endpoint_url_s3"),
+            Some("http://env-s3:2")
+        );
+        assert_eq!(loc.options().get("aws_endpoint"), None);
+    }
+
+    #[tokio::test]
+    async fn a_profile_file_path_may_start_with_a_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        let aws = dir.path().join(".aws");
+        std::fs::create_dir_all(&aws).unwrap();
+        let config = profile_files(&aws);
+        let _ = config;
+        let e = env(&[
+            ("HOME", dir.path().to_str().unwrap()),
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", "~/.aws/config"),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("eu-central-1"));
+    }
+
+    #[tokio::test]
+    async fn profile_credentials_are_cached_until_shortly_before_expiry() {
+        use aws_credential_types::Credentials;
+        use aws_credential_types::provider::{ProvideCredentials, future};
+        use object_store::CredentialProvider;
+        #[derive(Debug)]
+        struct Counting(std::sync::atomic::AtomicUsize, Option<std::time::Duration>);
+        impl ProvideCredentials for Counting {
+            fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+            where
+                Self: 'a,
+            {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let expiry = self.1.map(|d| std::time::SystemTime::now() + d);
+                future::ProvideCredentials::ready(Ok(Credentials::new(
+                    "AKID", "secret", None, expiry, "test",
+                )))
+            }
+        }
+        for (ttl, fetches) in [
+            (None, 1),
+            (Some(std::time::Duration::from_secs(3600)), 1),
+            (Some(std::time::Duration::from_secs(30)), 2),
+        ] {
+            let counting = Arc::new(Counting(Default::default(), ttl));
+            let creds = ProfileCredentials {
+                provider: aws_credential_types::provider::SharedCredentialsProvider::new(
+                    Arc::clone(&counting) as Arc<dyn ProvideCredentials>,
+                ),
+                cached: tokio::sync::Mutex::new(None),
+            };
+            creds.get_credential().await.unwrap();
+            creds.get_credential().await.unwrap();
+            assert_eq!(
+                counting.0.load(std::sync::atomic::Ordering::SeqCst),
+                fetches,
+                "ttl {ttl:?}"
+            );
+        }
+    }
+
+    // ---- inheriting a store's settings ------------------------------------
+
+    #[tokio::test]
+    async fn another_azure_account_inherits_nothing() {
+        let e = env(&[("AZURE_STORAGE_ACCOUNT_NAME", "src")]);
+        let mut s = spec("az://cont/p");
+        s.options = BTreeMap::from([("azure_storage_account_key".into(), "c3JjLWtleQ==".into())]);
+        let loc = resolve(&s, &e).await;
+        assert!(
+            loc.inheritable_options_for("abfss://bk@otheracct.dfs.core.windows.net/x")
+                .is_empty(),
+            "the source account's key would be used for another account"
+        );
+        let same = loc.inheritable_options_for("abfss://bk@src.dfs.core.windows.net/x");
+        assert_eq!(
+            same.get("azure_storage_account_key").map(String::as_str),
+            Some("c3JjLWtleQ==")
+        );
+        assert!(!same.contains_key("azure_container_name"));
+        // A different provider inherits nothing either.
+        assert!(loc.inheritable_options_for("s3://b/x").is_empty());
+    }
+}

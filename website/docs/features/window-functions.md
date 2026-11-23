@@ -14,7 +14,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -23,8 +22,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -45,7 +42,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -54,8 +50,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -76,7 +70,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -85,8 +78,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -107,7 +98,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -116,8 +106,6 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -141,8 +129,3 @@ Uni supports Cypher window queries with `OVER (...)` clauses for both manual win
 ## When To Use
 
 Use window functions when you need per-partition analytics within the same query result.
-
-## Current Limitation
-
-!!! warning
-    Queries that mix manual window functions (like `ROW_NUMBER`) and aggregate window functions (like `SUM OVER`) in the same query are not yet supported.

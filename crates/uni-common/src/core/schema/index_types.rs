@@ -627,17 +627,97 @@ fn default_true() -> bool {
     true
 }
 
+/// A full-text index over the string values of a `JSON` property.
+///
+/// The index is built on a derived text column, [`Self::derived_column`],
+/// which a flush fills with [`json_fts_text`] of the property's value: the
+/// document's string values, one per line, under `paths` when it names any.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JsonFtsIndexConfig {
     pub name: String,
     pub label: String,
     pub column: String,
+    /// Dotted key paths (`title`, `meta.author`; a leading `$.` is ignored)
+    /// whose string values are indexed. Empty indexes the whole document.
     #[serde(default)]
     pub paths: Vec<String>,
     #[serde(default)]
     pub with_positions: bool,
     #[serde(default)]
     pub metadata: IndexMetadata,
+}
+
+/// Name prefix of a JSON full-text index's derived text column.
+pub const JSON_FTS_COLUMN_PREFIX: &str = "__jfts_";
+
+/// The derived text column a JSON full-text index on `column` searches.
+pub fn json_fts_derived_column(column: &str) -> String {
+    format!("{JSON_FTS_COLUMN_PREFIX}{column}")
+}
+
+impl JsonFtsIndexConfig {
+    /// The derived text column this index is built on.
+    pub fn derived_column(&self) -> String {
+        json_fts_derived_column(&self.column)
+    }
+
+    /// Whether a `CONTAINS` on `path` inside the document (`None` for the
+    /// value itself) only ever matches text the derived column holds.
+    pub fn covers_path(&self, path: Option<&str>) -> bool {
+        if self.paths.is_empty() {
+            return true;
+        }
+        let Some(path) = path else {
+            return false;
+        };
+        self.paths.iter().any(|p| {
+            let p = normalize_json_path(p);
+            path == p || path.starts_with(&format!("{p}."))
+        })
+    }
+}
+
+fn normalize_json_path(path: &str) -> &str {
+    path.strip_prefix("$.").unwrap_or(path)
+}
+
+/// The text a JSON full-text index holds for `value`: every string value in
+/// it (map values and list elements, recursively; keys and non-string scalars
+/// are not text), one per line. With `paths`, only the values under those
+/// dotted paths. `None` when there is none.
+pub fn json_fts_text(value: &crate::Value, paths: &[String]) -> Option<String> {
+    fn collect<'a>(value: &'a crate::Value, out: &mut Vec<&'a str>) {
+        match value {
+            crate::Value::String(s) => out.push(s),
+            crate::Value::List(items) => items.iter().for_each(|v| collect(v, out)),
+            crate::Value::Map(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for k in keys {
+                    collect(&map[k], out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if paths.is_empty() {
+        collect(value, &mut out);
+    } else {
+        for path in paths {
+            let mut at = Some(value);
+            for key in normalize_json_path(path).split('.') {
+                at = match at {
+                    Some(crate::Value::Map(map)) => map.get(key),
+                    _ => None,
+                };
+            }
+            if let Some(v) = at {
+                collect(v, &mut out);
+            }
+        }
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

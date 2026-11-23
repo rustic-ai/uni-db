@@ -59,7 +59,7 @@ fn signature() -> &'static ProcedureSignature {
             arg(
                 "threshold",
                 ArgType::Primitive(DataType::Float64),
-                "Optional maximum distance threshold (post-filter).",
+                "Optional minimum score threshold, on the scale of `score` (post-filter).",
             ),
             arg(
                 "options",

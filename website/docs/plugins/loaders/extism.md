@@ -38,7 +38,7 @@ the plugin's declared capabilities with the host's grants and adds only the host
 functions whose `required_capability` is in that effective set to the plugin's
 import table. A host function that is always available (no `required_capability`)
 is added unconditionally; one gated behind an ungranted capability is left out,
-so the plugin's call to it is unresolvable.
+so a plugin that imports it fails to load with an `unknown import` error.
 
 ## Authoring
 
@@ -151,11 +151,15 @@ columns match the declared signature and rows match the invocation's row count,
 so the plugin can compute the result row-by-row over the batch. See the full
 `src/lib.rs` for the column extraction and the haversine math.
 
-!!! note "Aggregates and procedures"
+!!! note "Aggregates, procedures and algorithms"
     The geo example is a scalar. Aggregate and procedure surfaces are declared
     with `"kind": "aggregate"` / `"kind": "procedure"` entries in the `register`
-    manifest and a matching `invoke_<qname>` export. The `register` and
-    `LoadOutcome` shapes already account for all three.
+    manifest. Their exports use the qname with dots replaced by underscores
+    (`<q>`): an aggregate exports `agg_<q>_new`, `agg_<q>_update`,
+    `agg_<q>_merge` and `agg_<q>_evaluate`; a procedure exports
+    `proc_<q>_invoke`; a graph algorithm exports `algo_<q>_invoke` (see
+    [Graph Algorithms](../graph-algorithms.md)). The `register` and
+    `LoadOutcome` shapes account for all of them.
 
 ### Building
 
@@ -180,7 +184,8 @@ registry.
     `load_wasm_extism` is sync on `Uni` and awaitable on `AsyncUni`. It takes
     the raw wasm bytes and an optional list of capability grants, and returns a
     dict describing what was registered. It is compiled behind the
-    `extism-plugins` cargo feature.
+    `extism-plugins` cargo feature, which the published wheels omit; build the
+    bindings with `maturin develop --features extism-plugins` to get it.
 
     ```python
     from uni_db import Uni
@@ -200,8 +205,8 @@ registry.
 
     The returned dict has the same shape as `load_wasm_component`:
     `plugin_id`, `version`, `scalars_registered`, `aggregates_registered`,
-    `procedures_registered`, `effective_capabilities`, and
-    `denied_capabilities`. Pass `grants=["Network", ...]` to grant
+    `procedures_registered`, `algorithms_registered`, `effective_capabilities`,
+    and `denied_capabilities`. Pass `grants=["Network", ...]` to grant
     capability-gated host functions; only grants that also appear in the
     plugin's manifest end up in `effective_capabilities`, the rest of the
     manifest's requests land in `denied_capabilities`.
@@ -214,8 +219,9 @@ registry.
 
 === "Rust"
 
-    The host API takes an `ExtismLoader`, the wasm bytes, the host grant list,
-    and a `CapabilitySet` gating which surfaces the plugin may register. It
+    The host API takes an `ExtismLoader`, the wasm bytes, a host-grant
+    `CapabilitySet` (which host functions are linked), and a `CapabilitySet`
+    gating which surfaces the plugin may register. It
     returns a `LoadOutcome`.
 
     ```rust
@@ -226,7 +232,7 @@ registry.
 
     let loader = ExtismLoader::new();
     let caps = CapabilitySet::from_iter_of([Capability::ScalarFn]);
-    let host_grants: Vec<String> = vec![]; // no capability-gated host fns
+    let host_grants = CapabilitySet::new(); // no capability-gated host fns
 
     let outcome = db.load_wasm_extism(&loader, &bytes, &host_grants, &caps)?;
 
@@ -241,22 +247,27 @@ registry.
     ```
 
     `LoadOutcome` carries `plugin_id`, `version`, `effective_capabilities`,
-    `denied_capabilities`, `scalars_registered`, `aggregates_registered`, and
-    `procedures_registered`. `effective_capabilities` is the intersection of the
+    `denied_capabilities`, `scalars_registered`, `aggregates_registered`,
+    `procedures_registered`, and `algorithms_registered`. `effective_capabilities` is the intersection of the
     manifest's declared capabilities with `host_grants`; anything declared but
     not granted appears in `denied_capabilities`.
 
-    Capability-gated host functions must be registered on the loader with
-    `ExtismLoader::register_host_function` before loading. This v1 host wrapper
-    covers surface-grant plugins (scalar / aggregate / procedure) out of the
-    box.
+    Capability-gated host functions must be registered on the loader before
+    loading. `uni_plugin_extism::register_default_host_svc(&mut loader)` adds
+    `uni_http_get` / `uni_http_post` (`Network`), `uni_kms_sign` /
+    `uni_kms_verify` (`Kms`), `uni_secret_acquire` (`Secret`) and
+    `uni_graph_call` (`GraphCompute`); back them with `with_http`, `with_kms`,
+    `with_secret_store` and `with_graph`; without a backing service a granted
+    call fails with a "no … configured" error. The Python method registers
+    these functions and a GraphCompute registry, but no HTTP, KMS or secret
+    service.
 
 Once loaded, the registered qname is callable from Cypher and Locy exactly like
 any other plugin function. The host encodes the call's arguments as an Arrow IPC
 `RecordBatch`, invokes the plugin's `invoke_<qname>` export, and decodes the
 returned Arrow IPC batch — for the geo example, invoking
 `ai.example.geo.haversine` with Paris and London coordinates returns
-≈343.557 km.
+≈343.556 km.
 
 ## WASM Component Model vs Extism
 
@@ -268,7 +279,7 @@ they differ in interface shape, build target, and how capabilities are enforced.
 | Interface | Raw host-fn ABI (call by bytes) | Typed WIT worlds |
 | Build target | `wasm32-unknown-unknown` | `wasm32-wasip2` |
 | Tooling | `extism-pdk`, `crate-type = ["cdylib"]` | WIT bindings + component build |
-| Capability gating | Load-time host-fn filter (net/fs/query/kms/secret wired) | `declared ∩ granted`, reported (host-net + host-trace-context wired; host-fs not yet) |
+| Capability gating | Load-time host-fn filter (HTTP / KMS / secret / GraphCompute wired) | `declared ∩ granted`, reported (host-net, host-graph / host-arena and host-trace-context wired; host-fs not yet) |
 | Wire format | Arrow IPC | Arrow IPC |
 | Output | Byte-identical across both ABIs | Byte-identical across both ABIs |
 

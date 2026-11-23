@@ -29,11 +29,19 @@ async fn when_compiling_locy_program(world: &mut LocyWorld, step: &cucumber::ghe
             let oracle = |name: &str| {
                 uni_query::query::df_graph::locy_fold::locy_monotonicity_verdict(&plugins, name)
             };
-            let compile_result = uni_locy::compile_with_oracle(
+            let direction = |name: &str| {
+                uni_query::query::df_graph::locy_fold::locy_direction_verdict(&plugins, name)
+            };
+            let compile_result = uni_locy::compile_with_oracles_and_config(
                 &ast,
                 &std::collections::HashMap::new(),
                 &[],
+                &uni_locy::LocyConfig {
+                    neural_predicates_preview: false,
+                    ..Default::default()
+                },
                 &oracle,
+                &direction,
             )
             .map_err(|e| UniError::Query {
                 message: format!("LocyCompileError: {e}"),

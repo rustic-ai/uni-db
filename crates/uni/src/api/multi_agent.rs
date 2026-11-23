@@ -9,17 +9,29 @@
 
 use uni_common::Result;
 
-/// Write lease strategy for multi-agent access.
+/// Write lease strategy: how a writable handle keeps a store to itself.
 ///
-/// Determines how write access is coordinated across multiple database instances.
+/// Read-only handles take no lease and may open alongside the writer. A
+/// second writable open of a held store waits
+/// `UniConfig::writer_lease.acquire_grace`, then fails with
+/// `UniError::StoreLocked`. A handle whose lease is lost, or that was
+/// closed, refuses writes with `UniError::WriterFenced`.
 #[non_exhaustive]
 pub enum WriteLease {
-    /// Local single-process lock (default behavior — no external coordination).
+    /// The default. A store in a local directory is held by an OS lock on
+    /// `writer.lock`; an object store by a lease object at
+    /// `catalog/writer_lease.json`, renewed in the background and taken over
+    /// once released or expired. An object store without conditional writes
+    /// is refused.
     Local,
-    /// DynamoDB-based distributed lease. Stores config but is not yet implemented.
+    /// DynamoDB-based distributed lease. Not implemented: the open fails.
     DynamoDB { table: String },
-    /// Custom lease provider via trait object.
+    /// A custom provider: `acquire` before the first write, `heartbeat` every
+    /// `UniConfig::writer_lease.renew_interval` (a failed heartbeat stops
+    /// writes), `release` when the handle closes.
     Custom(Box<dyn WriteLeaseProvider>),
+    /// No lease or lock: one writer by convention. Logs a warning.
+    Unenforced,
 }
 
 /// Guard representing an acquired write lease.
@@ -54,6 +66,7 @@ impl std::fmt::Debug for WriteLease {
                 write!(f, "WriteLease::DynamoDB {{ table: {} }}", table)
             }
             WriteLease::Custom(_) => write!(f, "WriteLease::Custom(...)"),
+            WriteLease::Unenforced => write!(f, "WriteLease::Unenforced"),
         }
     }
 }

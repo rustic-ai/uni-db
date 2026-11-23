@@ -450,6 +450,10 @@ impl IndexRebuildManager {
         // commit anything after it. While a restore runs this waits, and the
         // queued tasks run afterwards against the restored store.
         let _permit = self.storage.index_build_permit().await;
+        // A handle that may no longer write builds nothing.
+        if self.storage.write_fence().check().is_err() {
+            return;
+        }
         // Find and claim a pending task
         let task_to_process = {
             let mut tasks = self.tasks.write();
@@ -627,8 +631,12 @@ impl IndexRebuildManager {
             "injected index rebuild failure"
         )));
         let idx_mgr = IndexManager::new(self.storage.base_path(), self.schema_manager.clone())
-            .with_backend(self.storage.backend_arc());
-        idx_mgr.rebuild_indexes_for_label(label).await
+            .with_backend(self.storage.head_backend_arc())
+            .with_read_cut(std::sync::Arc::clone(self.storage.read_cut()));
+        idx_mgr.rebuild_indexes_for_label(label).await?;
+        // Every reader reads the rebuilt indexes before the catalog records
+        // them built.
+        self.storage.publish_cut().await
     }
 
     /// Execute the actual index rebuild for a label (stub when lance-backend is disabled).

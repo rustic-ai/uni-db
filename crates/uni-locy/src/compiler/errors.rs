@@ -340,6 +340,17 @@ pub enum LocyCompileError {
     CalibrateInvalidHoldout { model_name: String, holdout: f64 },
 
     #[error(
+        "CALIBRATE on model '{model_name}': its FEATURES supply one value per INPUT \
+         binding by position, but it declares {inputs} INPUT binding(s) and \
+         {features} FEATURES expression(s)"
+    )]
+    CalibrateFeatureArity {
+        model_name: String,
+        inputs: usize,
+        features: usize,
+    },
+
+    #[error(
         "CALIBRATE '{model_name}' parsed but neural_predicates_preview is \
          disabled; set LocyConfig::neural_predicates_preview = true to enable"
     )]

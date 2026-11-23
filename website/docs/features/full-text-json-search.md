@@ -22,7 +22,6 @@ Schemaless search does not accept a pushed-down property filter.
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -36,8 +35,6 @@ Schemaless search does not accept a pushed-down property filter.
     ).await?;
 
     println!("{:?}", rows);
-    # Ok(())
-    # }
     ```
 
 === "Python"
@@ -72,6 +69,24 @@ RETURN node.title, score
 ORDER BY score DESC
 ```
 
+The search string takes the full-text query syntax: words are OR'd, and `AND`, `OR`, `NOT word` or `-word`, `"quoted phrases"` and parentheses are interpreted (see [Indexing: Full-Text Query Syntax](../concepts/indexing.md#full-text-query-syntax)):
+
+```cypher
+CALL uni.fts.query('Article', 'content', '"query planner" AND (cost OR statistics) -draft', 20)
+YIELD node, score
+RETURN node.title, score
+```
+
+On a `JSON` column with a JSON full-text index, `uni.fts.query` searches the document's string values:
+
+```cypher
+CREATE JSON FULLTEXT INDEX article_doc FOR (a:Article) ON doc
+
+CALL uni.fts.query('Article', 'doc', 'graph -vector', 10)
+YIELD node, score
+RETURN node.title, score
+```
+
 **Parameters:**
 
 - `label` - Node label to search
@@ -90,7 +105,7 @@ ORDER BY score DESC
 
 ### Auto-Build on Index Creation
 
-When you run `CREATE FULLTEXT INDEX`, Uni automatically builds the FTS index over existing data. There is no need to call `rebuild_indexes()` manually — the index is ready to query immediately after creation.
+When you run `CREATE FULLTEXT INDEX`, Uni automatically builds the FTS index over existing data. There is no need to call `db.indexes().rebuild()` manually — the index is ready to query immediately after creation.
 
 ```cypher
 // This both creates AND builds the index in one step

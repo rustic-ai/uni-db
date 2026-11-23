@@ -2118,6 +2118,7 @@ fn build_schema_command(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     match inner.as_rule() {
         Rule::create_vector_index => build_create_vector_index(inner),
         Rule::create_fulltext_index => build_create_fulltext_index(inner),
+        Rule::create_inverted_index => build_create_inverted_index(inner),
         Rule::create_scalar_index => build_create_scalar_index(inner),
         Rule::create_json_index => build_create_json_index(inner),
         Rule::drop_index => build_drop_index(inner),
@@ -2202,6 +2203,31 @@ fn build_create_vector_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseErr
     let options = parse_options(&mut inner)?;
 
     Ok(SchemaCommand::CreateVectorIndex(CreateVectorIndex {
+        name,
+        label,
+        property,
+        options,
+        if_not_exists,
+    }))
+}
+
+fn build_create_inverted_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
+    let mut inner = pair.into_inner().peekable();
+    inner.next(); // CREATE
+    inner.next(); // INVERTED
+    inner.next(); // INDEX
+
+    let name = ident(&inner.next().unwrap());
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
+    inner.next(); // FOR
+
+    let label = parse_label_binding(&mut inner);
+    inner.next(); // ON
+
+    let property = extract_property_name(inner.next().unwrap());
+    let options = parse_options(&mut inner)?;
+
+    Ok(SchemaCommand::CreateInvertedIndex(CreateInvertedIndex {
         name,
         label,
         property,
@@ -2762,8 +2788,9 @@ fn build_backup_command(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // TO
     let path_pair = inner.next().unwrap();
     let path = build_string_literal(path_pair)?;
+    let options = parse_with_options(&mut inner)?;
 
-    Ok(SchemaCommand::Backup { path })
+    Ok(SchemaCommand::Backup { path, options })
 }
 
 /// Parse WITH options clause if present.

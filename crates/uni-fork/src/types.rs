@@ -9,13 +9,23 @@
 //! `added` rows exist in `b` only, `deleted` exist in `a` only, and
 //! `changed` is a per-row before/after on rows with matching identity.
 //!
-//! **Identity** is `UniId` for vertices and `(src_uid, dst_uid, type)`
-//! for edges. Both are content-addressed (vertex UID = SHA3-256 of
-//! `(label, ext_id, properties)`; edge UID is the tuple of endpoint
-//! UIDs plus the edge type), so the diff is correct across two
-//! unrelated forks that happen to have rolled the same VIDs. The
-//! per-side VID is preserved on `DiffVertex` as informational; pairing
-//! never depends on it.
+//! **Identity** is `UniId` for vertices and an edge-content UID for
+//! edges. Both are content-addressed (vertex UID = SHA3-256 of
+//! `(label, ext_id, properties)`; edge UID hashes the endpoint UIDs, the
+//! edge type and the properties), so the diff is correct across two
+//! unrelated forks that happen to have rolled the same VIDs.
+//!
+//! Because the UID covers the properties, an edited row has a different
+//! UID on each side. Two more pairings recover it as one `changed` row:
+//!
+//! - **By `(label, ext_id)`**, always: an added and a deleted vertex with
+//!   the same label and `ext_id` are one vertex edited.
+//! - **By id, under shared lineage only**: when one side is the other's
+//!   ancestor (a fork's parent chain, or primary against any fork), ids
+//!   the descendant inherited at its fork point are the same rows on both
+//!   sides, so an added and a deleted vertex with the same inherited VID
+//!   (or edge with the same inherited EID) pair too. Ids are never paired
+//!   across unrelated views, which allocate them independently.
 //!
 //! Phase 6a (the initial MVP) keyed diffs by VID. Phase 6b lifted
 //! identity to UID so siblings-off-a-shared-parent and totally
@@ -31,7 +41,7 @@ use std::fmt;
 
 use uni_common::Properties;
 use uni_common::Value;
-use uni_common::core::id::{UniId, Vid};
+use uni_common::core::id::{Eid, UniId, Vid};
 
 /// The full delta from one fork view to another.
 #[derive(Debug, Clone, Default)]
@@ -70,11 +80,10 @@ pub struct VertexDiff {
     pub added: Vec<DiffVertex>,
     /// Rows present in `a` but not `b`.
     pub deleted: Vec<DiffVertex>,
-    /// **Reserved; always empty.** Identity is content-addressed (the UID
-    /// folds in the properties), so two rows with matching identity have
-    /// identical properties by construction — a property change surfaces as
-    /// a paired `deleted` + `added` instead. Kept for forward compatibility
-    /// with a future stable-id diff. (L12)
+    /// Vertices present on both sides with different properties: an added
+    /// and a deleted row sharing `(label, ext_id)`, or, under shared
+    /// lineage, the same inherited VID. A row paired here appears in
+    /// neither `added` nor `deleted`.
     pub changed: Vec<VertexPropertyChange>,
 }
 
@@ -109,9 +118,11 @@ pub struct EdgeDiff {
     pub added: Vec<DiffEdge>,
     /// Edges present in `a` but not `b`.
     pub deleted: Vec<DiffEdge>,
-    /// **Reserved; always empty.** The edge UID folds in the properties, so
-    /// a property change surfaces as a paired `deleted` + `added`, not here.
-    /// Kept for forward compatibility. (L12)
+    /// Edges present on both sides with different properties. Filled only
+    /// under shared lineage, where an added and a deleted edge with the same
+    /// inherited EID are one edge edited. Edges between unrelated views have
+    /// no stable identity beyond their content, so an edit there is a
+    /// `deleted` + `added` pair.
     pub changed: Vec<EdgePropertyChange>,
 }
 
@@ -144,8 +155,9 @@ impl EdgeDiff {
 pub struct DiffVertex {
     /// The vertex's label.
     pub label: String,
-    /// Content-addressed identity (`compute_vertex_uid(label, None,
-    /// properties)`). This is the bucketing key during diff.
+    /// Content-addressed identity (`compute_vertex_uid(label, ext_id,
+    /// properties)`, with the stored `ext_id` folded in). This is the
+    /// bucketing key during diff.
     pub uid: UniId,
     /// Informational: which VID this row carried on the side it was
     /// scanned from. `None` if the per-side scan returned a node
@@ -160,8 +172,17 @@ pub struct DiffVertex {
 pub struct VertexPropertyChange {
     /// The vertex's label.
     pub label: String,
-    /// UID of the vertex — the pairing key across sides.
+    /// Content UID of the vertex on the `a` (before) side.
     pub uid: UniId,
+    /// Content UID of the vertex on the `b` (after) side. Differs from
+    /// [`Self::uid`] whenever a property changed, since the UID covers them.
+    pub after_uid: UniId,
+    /// The vertex's `ext_id`, when it has one on both sides (always the
+    /// case for a pair made by `ext_id`).
+    pub ext_id: Option<String>,
+    /// The vertex's VID when it is the same on both sides (always the case
+    /// for a pair made by id under shared lineage), else `None`.
+    pub vid: Option<Vid>,
     /// One entry per property whose value differs between sides.
     pub changes: Vec<PropertyChange>,
 }
@@ -170,7 +191,10 @@ impl VertexPropertyChange {
     fn invert(self) -> Self {
         Self {
             label: self.label,
-            uid: self.uid,
+            uid: self.after_uid,
+            after_uid: self.uid,
+            ext_id: self.ext_id,
+            vid: self.vid,
             changes: self
                 .changes
                 .into_iter()
@@ -201,14 +225,24 @@ pub struct DiffEdge {
 }
 
 /// A change to one edge's properties.
+///
+/// Edges pair by EID, and only under shared lineage (see
+/// [`EdgeDiff::changed`]).
 #[derive(Debug, Clone)]
 pub struct EdgePropertyChange {
     /// The edge type.
     pub edge_type: String,
-    /// Source vertex UID.
+    /// The edge's EID, the same on both sides.
+    pub eid: Eid,
+    /// Source vertex UID on the `a` (before) side.
     pub src_uid: UniId,
-    /// Destination vertex UID.
+    /// Destination vertex UID on the `a` (before) side.
     pub dst_uid: UniId,
+    /// Source vertex UID on the `b` (after) side; differs from
+    /// [`Self::src_uid`] when the source vertex was edited too.
+    pub after_src_uid: UniId,
+    /// Destination vertex UID on the `b` (after) side.
+    pub after_dst_uid: UniId,
     /// One entry per property whose value differs between sides.
     pub changes: Vec<PropertyChange>,
 }
@@ -217,8 +251,11 @@ impl EdgePropertyChange {
     fn invert(self) -> Self {
         Self {
             edge_type: self.edge_type,
-            src_uid: self.src_uid,
-            dst_uid: self.dst_uid,
+            eid: self.eid,
+            src_uid: self.after_src_uid,
+            dst_uid: self.after_dst_uid,
+            after_src_uid: self.src_uid,
+            after_dst_uid: self.dst_uid,
             changes: self
                 .changes
                 .into_iter()

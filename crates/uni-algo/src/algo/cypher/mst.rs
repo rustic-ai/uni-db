@@ -21,8 +21,8 @@ impl GraphAlgoAdapter for MstAdapter {
 
     fn yields() -> Vec<(&'static str, ValueType)> {
         vec![
-            ("source", ValueType::Node),
-            ("target", ValueType::Node),
+            ("source", ValueType::Int),
+            ("target", ValueType::Int),
             ("weight", ValueType::Float),
         ]
     }

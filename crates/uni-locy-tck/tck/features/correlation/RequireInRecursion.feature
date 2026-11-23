@@ -168,3 +168,88 @@ Feature: REQUIRE — a definitional threshold inside recursion (issue #265)
     Then evaluation should succeed
     And the command result 0 should be a Query with 1 rows
     And the command result 0 should be a Query containing row where name = 'B'
+
+  # ── The registry decides a fold's direction ──────────────────────────
+  #
+  # `MAX`, `MIN` and `COUNT` declare a direction through the aggregate
+  # registry, as `MMAX`, `MMIN` and `MCOUNT` do. A lower bound over a
+  # non-decreasing fold and an upper bound over a non-increasing one are
+  # admitted in recursion; the reverse pairings are refused.
+
+  Scenario: a recursive REQUIRE lower bound over MAX is admitted
+    Given having executed:
+      """
+      CREATE (a:Entity {name: 'A', designated: true})
+      CREATE (b:Entity {name: 'B', designated: false})
+      CREATE (c:Entity {name: 'C', designated: false})
+      CREATE (a)-[:OWNS {pct: 60.0}]->(b)
+      CREATE (b)-[:OWNS {pct: 11.0}]->(c)
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE blocked AS
+        MATCH (e:Entity)
+        WHERE e.designated = true
+        YIELD KEY e, 100.0 AS agg
+
+      CREATE RULE blocked AS
+        MATCH (o:Entity)-[s:OWNS]->(e:Entity)
+        WHERE o IS blocked
+        FOLD agg = MAX(s.pct)
+        REQUIRE agg >= 50.0
+        YIELD KEY e, agg
+
+      QUERY blocked RETURN e.name AS name
+      """
+    Then evaluation should succeed
+    And the command result 0 should be a Query with 2 rows
+    And the command result 0 should be a Query containing row where name = 'A'
+    And the command result 0 should be a Query containing row where name = 'B'
+
+  Scenario: a recursive REQUIRE upper bound over MIN is admitted
+    Given having executed:
+      """
+      CREATE (a:Entity {name: 'A', designated: true})
+      CREATE (b:Entity {name: 'B', designated: false})
+      CREATE (c:Entity {name: 'C', designated: false})
+      CREATE (a)-[:OWNS {pct: 11.0}]->(b)
+      CREATE (b)-[:OWNS {pct: 60.0}]->(c)
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE blocked AS
+        MATCH (e:Entity)
+        WHERE e.designated = true
+        YIELD KEY e, 0.0 AS agg
+
+      CREATE RULE blocked AS
+        MATCH (o:Entity)-[s:OWNS]->(e:Entity)
+        WHERE o IS blocked
+        FOLD agg = MIN(s.pct)
+        REQUIRE agg <= 20.0
+        YIELD KEY e, agg
+
+      QUERY blocked RETURN e.name AS name
+      """
+    Then evaluation should succeed
+    And the command result 0 should be a Query with 2 rows
+    And the command result 0 should be a Query containing row where name = 'A'
+    And the command result 0 should be a Query containing row where name = 'B'
+
+  Scenario: a recursive REQUIRE lower bound over MIN is refused
+    When compiling the following Locy program:
+      """
+      CREATE RULE blocked AS
+        MATCH (e:Entity)
+        WHERE e.designated = true
+        YIELD KEY e, 100.0 AS agg
+
+      CREATE RULE blocked AS
+        MATCH (o:Entity)-[s:OWNS]->(e:Entity)
+        WHERE o IS blocked
+        FOLD agg = MIN(s.pct)
+        REQUIRE agg >= 50.0
+        YIELD KEY e, agg
+      """
+    Then the program should fail to compile
+    And the compile error should mention 'non-increasing'

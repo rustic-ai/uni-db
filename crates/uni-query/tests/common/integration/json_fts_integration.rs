@@ -84,7 +84,10 @@ fn test_pushdown_contains_predicate_on_fts_column() {
         "Expected 1 FTS predicate"
     );
     assert_eq!(strategy.json_fts_predicates[0].0, "_doc");
-    assert_eq!(strategy.json_fts_predicates[0].1, "graph");
+    assert_eq!(
+        strategy.json_fts_predicates[0].1,
+        uni_cypher::ast::Expr::Literal(uni_cypher::ast::CypherLiteral::String("graph".into()))
+    );
     assert!(strategy.json_fts_predicates[0].2.is_none()); // No path filter
 }
 

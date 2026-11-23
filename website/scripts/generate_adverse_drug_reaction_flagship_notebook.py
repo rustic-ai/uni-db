@@ -123,7 +123,7 @@ def _build_notebook() -> dict[str, Any]:
             [
                 "## 1) Setup + Schema",
                 "",
-                "Open a temporary `Uni` and declare a Hetionet-shaped schema: `Drug`, `Gene`, `Pathway`, `AdverseEvent`, `Report`, plus the four edge types we'll traverse (`TARGETS`, `IN_PATHWAY`, `CAUSES`, `OF_DRUG`, `REPORTS_EVENT`).",
+                "Open a temporary `Uni` and declare a Hetionet-shaped schema: `Drug`, `Gene`, `Pathway`, `AdverseEvent`, `Report`, plus the five edge types (`TARGETS`, `IN_PATHWAY`, `CAUSES`, `OF_DRUG`, `REPORTS_EVENT`).",
             ],
         )
     )
@@ -402,7 +402,7 @@ def _build_notebook() -> dict[str, Any]:
                 "One Locy program:",
                 "",
                 "- `scored_reports`: classifier per Report.",
-                "- `mechanistic_path`: 6-hop traversal `Drug → Gene → Pathway ← Gene ← OtherDrug → AdverseEvent`. For each (drug, AE) pair we find every chain of evidence: a pathway the drug touches (via a bound gene) that's also touched by another drug already known to cause that AE.",
+                "- `mechanistic_path`: 5-hop traversal `Drug → Gene → Pathway ← Gene ← OtherDrug → AdverseEvent`. For each (drug, AE) pair we find every chain of evidence: a pathway the drug touches (via a bound gene) that's also touched by another drug already known to cause that AE.",
                 "- `mechanism_plausibility`: per (drug, AE) pair, `FOLD MNOR(mechanism_confidence(d2.drug_id))` over the bridging drugs — each bridging-drug path contributes its own confidence (a real per-tuple neural call, not a constant). MNOR composes them as a probabilistic OR: \"plausible if ANY shared-mechanism path is plausible\", with multiple independent paths reinforcing the score.",
                 "",
                 "This is exactly the Vilar et al. (2014) shared-target / shared-pathway DDI / ADR heuristic, evaluated against real Hetionet edges.",
@@ -827,7 +827,7 @@ def _build_notebook() -> dict[str, Any]:
             key,
             len(cells),
             [
-                "## 11) Cleanup",
+                "## 12) Cleanup",
             ],
         )
     )

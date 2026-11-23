@@ -253,6 +253,9 @@ async fn test_snapshot_manager_has_any_manifests() -> Result<()> {
         edges: HashMap::new(),
         writer_features: Vec::new(),
         unpublished_bulk_versions: Vec::new(),
+        next_vid: None,
+        next_eid: None,
+        tables: Default::default(),
     };
 
     snapshot_mgr.save_snapshot(&manifest).await?;
@@ -260,5 +263,94 @@ async fn test_snapshot_manager_has_any_manifests() -> Result<()> {
     let has_manifests_after = snapshot_mgr.has_any_manifests().await?;
     assert!(has_manifests_after, "Should have manifests after save");
 
+    Ok(())
+}
+
+/// A lost `latest` pointer is recovered from the NEWEST manifest.
+///
+/// Recovery used to take the last snapshot id in listing order, but snapshot
+/// ids are random UUIDs, so that picked an arbitrary manifest and could roll
+/// the version counter back below versions already in the tables. The ids are
+/// rewritten here so the lexically last one is the oldest manifest, which makes
+/// the old behaviour fail deterministically.
+#[tokio::test]
+async fn test_lost_latest_pointer_recovers_from_the_newest_manifest() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().to_str().unwrap();
+    {
+        let db = quiesced(path).build().await?;
+        for name in ["Alice", "Bob", "Carol"] {
+            let tx = db.session().tx().await?;
+            tx.execute(&format!("CREATE (n:Person {{name: '{name}'}})"))
+                .await?;
+            tx.commit().await?;
+            db.flush().await?;
+        }
+        db.shutdown().await?;
+    }
+
+    let manifests_dir = dir.path().join("storage/catalog/manifests");
+    let mut manifests: Vec<(u64, std::path::PathBuf, serde_json::Value)> =
+        std::fs::read_dir(&manifests_dir)?
+            .flatten()
+            .map(|e| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap();
+                (v["version_high_water_mark"].as_u64().unwrap(), e.path(), v)
+            })
+            .collect();
+    assert!(manifests.len() >= 3, "{} manifests", manifests.len());
+    manifests.sort_by_key(|(hwm, _, _)| *hwm);
+    let newest_hwm = manifests.last().unwrap().0;
+    // Oldest gets the lexically largest id, newest the smallest.
+    let count = manifests.len();
+    // Timestamps reversed too, so neither the id nor the creation time alone
+    // picks the newest manifest.
+    let mut stamps: Vec<serde_json::Value> = manifests
+        .iter()
+        .map(|(_, _, v)| v["created_at"].clone())
+        .collect();
+    stamps.reverse();
+    for (i, (_, file, mut v)) in manifests.into_iter().enumerate() {
+        let id = format!("{:08}", count - i);
+        v["snapshot_id"] = serde_json::json!(id);
+        v["created_at"] = stamps[i].clone();
+        v["parent_snapshot"] = serde_json::Value::Null;
+        std::fs::remove_file(&file)?;
+        std::fs::write(
+            manifests_dir.join(format!("{id}.json")),
+            serde_json::to_vec(&v)?,
+        )?;
+    }
+    std::fs::remove_file(dir.path().join("storage/catalog/latest"))?;
+
+    let db = quiesced(path).build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (n:Person {name: 'Dave'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+    let rows = db
+        .session()
+        .query("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+        .await?;
+    let names: Vec<String> = rows
+        .rows()
+        .iter()
+        .map(|r| r.get::<String>("name"))
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(names, ["Alice", "Bob", "Carol", "Dave"]);
+    db.shutdown().await?;
+
+    // The manifest the reopened store published continues past the newest
+    // version recovered, rather than restarting below it.
+    let latest_id = std::fs::read_to_string(dir.path().join("storage/catalog/latest"))?;
+    let latest: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        manifests_dir.join(format!("{}.json", latest_id.trim())),
+    )?)?;
+    let hwm = latest["version_high_water_mark"].as_u64().unwrap();
+    assert!(
+        hwm > newest_hwm,
+        "recovered below the newest manifest: published {hwm}, newest was {newest_hwm}"
+    );
     Ok(())
 }

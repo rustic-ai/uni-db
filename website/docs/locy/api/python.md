@@ -7,7 +7,7 @@ All Locy operations go through a **Session** (sync) or **AsyncSession** (async),
 ```python
 import uni_db
 
-db = uni_db.Uni.open("./my-graph")   # or Uni.temporary() for in-memory
+db = uni_db.Uni.open("./my-graph")   # or Uni.temporary() for a throwaway database
 session = db.session()
 ```
 
@@ -95,9 +95,12 @@ Builder methods:
 | `.params(dict)` | Add multiple parameters |
 | `.timeout(seconds)` | Set evaluation timeout |
 | `.max_iterations(n)` | Set recursion iteration cap |
+| `.max_memory(bytes)` | Set the evaluation's memory limit |
 | `.with_config(dict)` | Set full `LocyConfig` options |
 | `.cancellation_token(token)` | Attach a cancellation token; cancelling it aborts the evaluation with `UniCancelledError` |
 | `.run()` | Execute and return `LocyResult` |
+| `.explain()` | Compile and return `LocyExplainOutput` without evaluating |
+| `.profile()` | Execute and return `(LocyResult, LocyProfileOutput)` |
 
 ## Compile-Only Check
 
@@ -119,7 +122,7 @@ print(compiled.num_strata, compiled.num_rules, compiled.rule_names)
 | `command_results` | `list` | One result object per command: `QueryCommandResult`, `AssumeCommandResult`, `DeriveCommandResult`, `CypherCommandResult`, `ExplainCommandResult`, `AbduceCommandResult` |
 | `warnings` | `list[dict]` | Runtime warnings (e.g., `SharedProbabilisticDependency`) |
 | `approximate_groups` | `dict[str, list[str]]` | Rule/key groups that fell back to approximate probability mode |
-| `derived_fact_set` | `DerivedFactSet` | Opaque fact set for `tx.apply()` materialization: every write of a session-level program (DERIVE output and Cypher writes), in program order |
+| `derived_fact_set` | `DerivedFactSet \| None` | Opaque fact set for `tx.apply()` materialization: every write of a session-level program (DERIVE output and Cypher writes), in program order. `None` when there is nothing to apply, and always from `tx.locy(...)` |
 
 Helper methods:
 

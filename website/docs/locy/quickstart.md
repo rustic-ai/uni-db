@@ -7,13 +7,11 @@ This walkthrough shows non-recursive and recursive reasoning, then explains one 
 ```rust
 use uni_db::Uni;
 
-# async fn run() -> Result<(), uni_db::UniError> {
 let db = Uni::in_memory().build().await?;
 let session = db.session();
 
 let tx = session.tx().await?;
-tx.execute("CREATE (:Node {name: 'A'})-[:EDGE]->(:Node {name: 'B'})").await?;
-tx.execute("MATCH (b:Node {name:'B'}), (c:Node {name:'C'}) CREATE (b)-[:EDGE]->(c)").await?;
+tx.execute("CREATE (:Node {name: 'A'})-[:EDGE]->(:Node {name: 'B'})-[:EDGE]->(:Node {name: 'C'})").await?;
 tx.commit().await?;
 
 let program = r#"
@@ -31,8 +29,6 @@ QUERY reachable WHERE a.name = 'A' RETURN b.name AS target
 
 let result = session.locy(program).await?;
 println!("rows = {:?}", result.rows());
-# Ok(())
-# }
 ```
 
 ## Python Example

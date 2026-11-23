@@ -406,7 +406,7 @@ pub fn eval_similar_to_pure(v1: &Value, v2: &Value) -> Result<Value> {
 ///
 /// `None` when `v` is not one (a flat vector, a scalar list, an empty list);
 /// `Some(Err)` when an item is a list with a non-numeric element.
-fn as_multivector(v: &Value) -> Option<Result<Vec<Vec<f32>>, SimilarToError>> {
+pub fn as_multivector(v: &Value) -> Option<Result<Vec<Vec<f32>>, SimilarToError>> {
     let Value::List(items) = v else {
         return None;
     };

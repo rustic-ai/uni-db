@@ -3,13 +3,12 @@
 This document provides a comprehensive reference for all Uni configuration options, environment variables, and tuning parameters.
 
 
-!!! warning "The Rust and Python builders are not the same API"
-    `hybrid(local, remote)` and `cloud_config(cfg)` exist **only on the Python
-    builder** (`bindings/uni-db/src/builders.rs`). The Rust builder has a single
-    `remote_storage(remote_url, CloudStorageConfig)` that does both. Two
-    same-named builders with divergent method sets across the FFI boundary is an
-    easy thing to mis-copy, so check which language a snippet is in before
-    reusing it.
+!!! note "Storage methods in Rust and Python"
+    The Rust builder's `hybrid(remote_url)`, `cloud_storage(cfg)` and
+    `storage_options(map)` are `hybrid(local_path, remote_url)`,
+    `cloud_config(dict)` and `storage_options(dict)` on the Python builder.
+    Python's `hybrid` repeats the local path, which must be the path the
+    builder was opened at.
 
 
 ## Configuration Overview
@@ -18,7 +17,7 @@ This document provides a comprehensive reference for all Uni configuration optio
 
 Uni can be configured through:
 1. **Rust API** — `UniConfig` (available)
-2. **Environment Variables** — Selected operational overrides are supported (for example `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`); a general `UNI_*` mapping is not implemented
+2. **Environment Variables** — Selected operational overrides are supported (for example `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT`); a general `UNI_*` mapping is not implemented
 3. **Configuration File** — Planned (`uni.toml` or JSON)
 
 ```
@@ -108,6 +107,9 @@ pub struct UniConfig {
     /// Object store resilience configuration
     pub object_store: ObjectStoreConfig,
 
+    /// Single-writer lease and lock timing (see "Writer lease" below).
+    pub writer_lease: WriterLeaseConfig,
+
     /// Maximum iterations for recursive CTE evaluation (default: 1000)
     pub max_recursive_cte_iterations: usize,
 
@@ -150,11 +152,16 @@ pub struct UniConfig {
     /// `async_flush_enabled` is true (default: 2).
     pub max_pending_flushes: usize,
 
-    /// Per-stream async flush timeout (default: 60s; UNI_FLUSH_STREAM_TIMEOUT_SECS override).
+    /// Per-stream async flush timeout (default: 60s; UNI_FLUSH_STREAM_TIMEOUT override).
     pub flush_stream_timeout: Duration,
 
     /// Maximum time without progress draining async flushes (default: 900s).
     pub flush_drain_timeout: Duration,
+
+    /// How often a read-only handle looks for a newer published manifest
+    /// (default `None`: every query for a local store, 1s for an object
+    /// store; zero checks at every query).
+    pub read_cut_refresh: Option<Duration>,
 
     /// Commit stream broadcast capacity (default: 256).
     pub commit_channel_capacity: usize,
@@ -214,7 +221,7 @@ pub struct UniConfig {
 | `auto_flush_interval` | duration | 5s | Time-based flush interval (None to disable) |
 | `auto_flush_min_mutations` | count | 1 | Minimum mutations for time-based flush |
 | `wal_enabled` | bool | true | Enable write-ahead logging |
-| `flush_drain_timeout` | duration | 120s | Max time `flush()` waits for in-flight async flushes to drain. Exceeding it is an **error**, never a silent partial flush |
+| `flush_drain_timeout` | duration | 900s | Max time `flush()` waits for in-flight async flushes to drain. Exceeding it is an **error**, never a silent partial flush |
 | `query_timeout` | duration | 30s | Default query execution timeout. An exact (`Flat`) scan over ~1M vectors runs past this — raise it for brute-force vector work |
 | `commit_timeout` | duration | 5s | Max wall time a commit may take before `CommitTimeout` abort |
 | `max_query_memory` | bytes | 1 GB | Maximum memory per query |
@@ -315,10 +322,10 @@ Between `soft_limit` and `hard_limit` a write waits up to
 (1.6 s at the defaults), re-checking every 100 ms and resuming as soon as
 compaction brings the count below `soft_limit`. At `hard_limit` and above,
 writes stop until a compaction lowers the count. Background compaction and a
-full manual compaction (`CALL uni.admin.compact()` or `Uni::compact`) both
+full manual compaction (`CALL uni.admin.compact()`) both
 lower it the same way: by the number of generations counted when the pass
 *started*, so generations flushed while it ran stay counted. A scoped
-`compact_label` / `compact_edge_type` does not change the count, because it
+compaction (`db.compaction().compact(name)`) does not change the count, because it
 does not fold every generation. A statement's `timeout` ends either
 wait with a `Timeout` error; the transaction's bulk inserts
 (`bulk_insert_vertices`, `bulk_insert_edges`) are bounded by
@@ -331,7 +338,7 @@ does not wait at all and a write at `hard_limit` fails at once with
 `UniError::WriteStalled { l1_runs, hard_limit }` (Python:
 `UniWriteStalledError`, with `l1_runs` and `hard_limit` attributes). The
 error is not retriable as is: run `CALL uni.admin.compact()` through
-`session.run()` (or `Uni::compact`), which lowers the count and resumes writes, or re-enable
+`session.run()`, which lowers the count and resumes writes, or re-enable
 compaction.
 
 From Python both nested configs are set through the `config()` dict, as
@@ -501,76 +508,87 @@ Index tuning is **not** controlled by `UniConfig`. Cypher DDL currently selects 
 
 ## Environment Variables
 
-Uni does not currently read any `UNI_*` variables. Environment variables in use today:
+Apart from `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT`, Uni reads no `UNI_*` variables. Environment variables in use today:
 
 | Variable | Used For |
 |----------|----------|
 | `RUST_LOG` | Log level filter |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL` | `CloudStorageConfig::s3_from_env` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | `CloudStorageConfig::gcs_from_env` |
-| `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_SAS_TOKEN` | `CloudStorageConfig::azure_from_env` |
+| `AWS_*` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, …) | Every S3 store's client, below the typed configuration and storage options |
+| `GOOGLE_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `SERVICE_ACCOUNT` | Every GCS store's client |
+| `AZURE_*` (`AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY`, …), `IDENTITY_ENDPOINT` | Every Azure store's client |
 
 ---
 
 ## Cloud Storage Configuration
 
-Uni supports cloud storage backends for bulk data storage while keeping metadata and WAL local for low latency.
+A store lives in a local directory or in an object store. In hybrid mode the WAL and ID allocator stay in a local directory and everything else goes to the object store. [Storage & Cloud Durability](../features/storage-cloud.md) covers the layout, and stores written before 6.0.
 
 ### Supported Backends
 
-| Backend | URL Scheme | Status |
-|---------|------------|--------|
-| Local filesystem | `/path` or `file://` | Fully supported |
-| Amazon S3 | `s3://bucket/path` | Supported |
-| Google Cloud Storage | `gs://bucket/path` | Supported |
-| Azure Blob Storage | `az://account/container` | Supported |
-| S3-compatible (MinIO) | `s3://` with custom endpoint | Supported |
+| Backend | URI | Status |
+|---------|-----|--------|
+| Local filesystem | `/path` or `file:///path` | Fully supported |
+| Amazon S3 | `s3://bucket/prefix` (also `s3a://`) | Supported |
+| S3-compatible (MinIO, R2, LocalStack) | `s3://` with an endpoint | Supported |
+| Google Cloud Storage | `gs://bucket/prefix` (also `gcs://`) | Supported |
+| Azure Blob Storage | `az://container/prefix`, `abfss://container@account.dfs.core.windows.net/prefix` | Supported |
+
+### Builder methods
+
+| Method | Effect |
+|---|---|
+| `Uni::open(uri)` | Local directory, or a remote-only store for an object-store URI |
+| `.cloud_storage(CloudStorageConfig)` | Typed endpoint, credentials and region. Unset fields fall back to the environment |
+| `.storage_option(key, value)` / `.storage_options(map)` | Raw `object_store` options for both storage clients. These win over everything else |
+| `.hybrid(remote_uri)` | Hybrid mode: data at `remote_uri`, WAL and ID allocator in the opened directory |
+| `.set_aside_stale_wal()` | Hybrid mode: move a WAL from an earlier writer of the store to `wal_set_aside/` instead of failing with `StaleWal` |
+| `.remote_storage(uri, config)` | Deprecated. Same as `.hybrid(uri).cloud_storage(config)` |
+
+Python mirrors these as `cloud_config(dict)`, `storage_options(dict)` and `hybrid(local_path, remote_uri)`. The CLI takes `--path <uri>` and `--storage-option KEY=VALUE`.
+
+Precedence, lowest first: environment, URI, typed configuration, storage options. A bucket in the URI that differs from the configuration's fails the open.
 
 ### Hybrid Mode
-
-Hybrid mode stores bulk data in cloud storage while keeping WAL and metadata local:
 
 ```rust
 use uni_db::Uni;
 
-let db = Uni::open("./local_meta")
-    .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
+let db = Uni::open("./local_wal")
+    .hybrid("s3://my-bucket/graph-data")
     .build()
     .await?;
 ```
 
-**Benefits:**
-- Low-latency writes via local WAL
-- Scalable storage via cloud object store
-- Cost-effective for large datasets
+Commits are durable in the local WAL and reach the object store at the next flush (`auto_flush_interval`, default 5 s). The store has one host at a time: a second host's writable open fails with `StoreLocked`. `shutdown()` flushes, so a clean close leaves every commit in the object store.
+
+A host that crashed with unflushed commits and comes back after another host has opened the store fails with `StaleWal`, since replaying its WAL would corrupt the newer data. `.set_aside_stale_wal()` moves that WAL to `wal_set_aside/` and opens. See [Hybrid mode](../features/storage-cloud.md#hybrid-mode).
 
 ### S3 Configuration
 
 ```rust
-use uni_db::Uni;
-use uni_common::CloudStorageConfig;
+use uni_db::{CloudStorageConfig, Uni};
 
-// Using environment variables (recommended)
-let config = CloudStorageConfig::s3_from_env("my-bucket");
+// From the environment (recommended): no configuration needed.
+let db = Uni::open("s3://my-bucket/data").build().await?;
 
-// Or explicit configuration
+// Or explicit configuration; `None` fields fall back to the environment.
 let config = CloudStorageConfig::S3 {
     bucket: "my-bucket".to_string(),
     region: Some("us-west-2".to_string()),
-    endpoint: None,  // Use AWS default
-    access_key_id: None,  // Use env/IAM
+    endpoint: None,           // AWS default
+    access_key_id: None,      // environment / IAM
     secret_access_key: None,
     session_token: None,
     virtual_hosted_style: true,
 };
 
-let db = Uni::open("./local")
-    .remote_storage("s3://my-bucket/data", config)
+let db = Uni::open("s3://my-bucket/data")
+    .cloud_storage(config)
     .build()
     .await?;
 ```
 
-**For S3-compatible services (MinIO, LocalStack):**
+**For S3-compatible services (MinIO, LocalStack, R2):**
 
 ```rust
 let config = CloudStorageConfig::S3 {
@@ -584,13 +602,15 @@ let config = CloudStorageConfig::S3 {
 };
 ```
 
+The writer lease and the ID allocator use conditional writes. On a service without them, a writable open is refused with `LeaseUnsupported`; set the `aws_conditional_put` storage option to the mechanism the service supports.
+
 ### GCS Configuration
 
 ```rust
-use uni_common::CloudStorageConfig;
+use uni_db::CloudStorageConfig;
 
-// Using environment variable (GOOGLE_APPLICATION_CREDENTIALS)
-let config = CloudStorageConfig::gcs_from_env("my-gcs-bucket");
+// From the environment (GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SERVICE_ACCOUNT, ...)
+let db = Uni::open("gs://my-gcs-bucket/data").build().await?;
 
 // Or explicit configuration
 let config = CloudStorageConfig::Gcs {
@@ -598,15 +618,21 @@ let config = CloudStorageConfig::Gcs {
     service_account_path: Some("/path/to/service-account.json".to_string()),
     service_account_key: None,
 };
+
+// fake-gcs-server or another emulator
+let db = Uni::open("gs://my-gcs-bucket/data")
+    .storage_option("google_base_url", "http://localhost:4443")
+    .build()
+    .await?;
 ```
 
 ### Azure Configuration
 
 ```rust
-use uni_common::CloudStorageConfig;
+use uni_db::CloudStorageConfig;
 
-// Using environment variables
-let config = CloudStorageConfig::azure_from_env("my-container");
+// From the environment; returns an error if no account is set
+let config = CloudStorageConfig::azure_from_env("my-container")?;
 
 // Or explicit configuration
 let config = CloudStorageConfig::Azure {
@@ -615,15 +641,45 @@ let config = CloudStorageConfig::Azure {
     access_key: Some("account-key".to_string()),
     sas_token: None,
 };
+let db = Uni::open("az://my-container/data")
+    .cloud_storage(config)
+    .build()
+    .await?;
+
+// Azurite
+let db = Uni::open("az://my-container/data")
+    .storage_option("azure_storage_use_emulator", "true")
+    .build()
+    .await?;
 ```
+
+Managed identity, workload identity and client-secret credentials are configured with their `object_store` keys (`azure_msi_endpoint`, `azure_federated_token_file`, `azure_storage_client_id`, `azure_storage_client_secret`, `azure_storage_tenant_id`), either as storage options or through the environment.
+
+### Writer lease (`UniConfig::writer_lease`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ttl` | 30 s | Object-store lease lifetime without renewal. A crashed writer blocks others this long plus `clock_skew` (about 35 s at the defaults). |
+| `renew_interval` | 10 s | Lease renewal and `WriteLeaseProvider::heartbeat` period. Must be above zero and below `ttl`. |
+| `acquire_grace` | 5 s | How long a writable open waits for a held store before `StoreLocked`. |
+| `clock_skew` | 5 s | Allowance added before a takeover, and subtracted from a holder's own deadline. |
+
+`renew_interval` must be below `ttl` for every store, and `clock_skew + renew_interval` below `ttl` for an object store's lease (the open fails otherwise). Local stores use an OS lock, so of the timings only `acquire_grace` affects them. In Python these are `config({"writer_lease": {"acquire_grace": 0.5, ...}})`, in seconds.
+
+### Read cut (`UniConfig::read_cut_refresh`)
+
+Reads see the table versions the latest manifest names (its read cut), not each table's newest version, so a flush becomes visible all at once when its manifest is published. A writable handle moves its cut as it publishes. A read-only handle re-reads `catalog/latest` at the start of a query, at most once per `read_cut_refresh` (by default at every query for a store in a local directory, where it is a file read, and once a second for an object store; zero re-reads it every query), and until then keeps reading the manifest it last saw. In Python: `config({"read_cut_refresh": 0.5})`, in seconds.
 
 ### Cloud Storage with BACKUP/COPY
 
-BACKUP and COPY commands support cloud URLs:
+BACKUP and COPY commands support cloud URLs. A URL with the same scheme as a database on an object store inherits its endpoint, credentials and network settings, but not its bucket, nor its region unless the endpoint is custom (an Azure URL naming another account inherits nothing). Inherited credentials go only to the inherited endpoint: when the destination resolves to another endpoint (one named in its options or its environment), they are dropped and the destination's own are used. Other URLs, and URLs from a local database, are configured from the environment. `BACKUP TO <url> WITH {…}` takes raw object-store options for the destination (string, number or boolean values), applied over the inherited ones. Local paths and `file://` URIs are checked against the file sandbox.
 
 ```cypher
 // Backup to S3
 BACKUP TO 's3://backup-bucket/uni-backup-2024'
+
+// Backup to another S3-compatible service
+BACKUP TO 's3://backup-bucket/uni-backup' WITH {aws_endpoint: 'http://localhost:9000', aws_allow_http: 'true'}
 
 // Import from S3
 COPY Person FROM 's3://data-bucket/people.parquet'
@@ -801,7 +857,7 @@ let config = UniConfig {
     auto_flush_threshold: 100_000,
     auto_flush_interval: None,  // Disable time-based flush during batch
     cache_size: 10 * 1024 * 1024 * 1024,  // 10 GB
-    parallelism: num_cpus::get(),
+    parallelism: std::thread::available_parallelism().map_or(1, |n| n.get()),
     execution_batch_size: Some(8192),
     ..Default::default()
 };
@@ -848,7 +904,6 @@ For cloud storage backends where minimizing API calls matters:
 ```rust
 use std::time::Duration;
 use uni_db::{Uni, UniConfig};
-use uni_common::CloudStorageConfig;
 
 let config = UniConfig {
     // Larger batches = fewer PUT operations
@@ -858,10 +913,9 @@ let config = UniConfig {
     ..Default::default()
 };
 
-let cloud = CloudStorageConfig::s3_from_env("my-bucket");
-
-let db = Uni::open("./local-cache")
-    .remote_storage("s3://my-bucket/data", cloud)
+// The remote side is configured from the environment.
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/data")
     .config(config)
     .build()
     .await?;

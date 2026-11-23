@@ -154,3 +154,28 @@ async fn test_ddl_validation() -> Result<()> {
 
     Ok(())
 }
+
+/// `uni.schema.constraints()` yields `target` as `SHOW CONSTRAINTS` writes it.
+#[tokio::test]
+async fn schema_constraints_yield_their_target() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+    db.session()
+        .run(
+            r#"CALL uni.schema.createLabel('Product', {
+                "properties": { "sku": { "type": "STRING" } },
+                "constraints": [ { "type": "UNIQUE", "properties": ["sku"] } ]
+            })"#,
+        )
+        .await?;
+    let result = db
+        .session()
+        .query("CALL uni.schema.constraints() YIELD label, target RETURN label, target")
+        .await?;
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.rows()[0].get::<String>("label")?, "Product");
+    assert_eq!(result.rows()[0].get::<String>("target")?, "(:Product)");
+
+    let shown = db.session().query("SHOW CONSTRAINTS").await?;
+    assert_eq!(shown.rows()[0].get::<String>("target")?, "(:Product)");
+    Ok(())
+}

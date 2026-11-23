@@ -1,14 +1,14 @@
 # Plugin Concepts
 
-Uni's extensibility is a single registry-backed plugin framework. Whether you are adding a scalar function, a custom aggregate, a Locy aggregate, a procedure, a storage backend, an index kind, a CRDT, or an auth provider, the path is the same: you implement one of the framework's *surface traits*, describe your extension with a `PluginManifest`, register it through a `PluginRegistrar`, and the engine resolves it at call time from a shared `PluginRegistry`.
+Uni's extensibility is a single registry-backed plugin framework. Whether you are adding a scalar function, a custom aggregate, a Locy aggregate, a procedure, a label-storage provider, an index kind, a CRDT, or an auth provider, the path is the same: you implement one of the framework's *surface traits*, describe your extension with a `PluginManifest`, register it through a `PluginRegistrar`, and the engine resolves it at call time from a shared `PluginRegistry`.
 
 The whole model fits in two axes and one lifecycle:
 
-- **Surfaces** — *what* you extend. There are 23 capability surfaces (scalar functions, aggregates, index kinds, storage backends, triggers, …). Picking a surface means picking which trait you implement.
+- **Surfaces** — *what* you extend. There are 22 extension surfaces (scalar functions, aggregates, index kinds, label storage, triggers, …), each gated by a capability. Picking a surface means picking which trait you implement.
 - **Loaders** — *how* you author and sandbox the code. The same surface can be authored in native Rust, in WebAssembly (Component Model or Extism), in Rhai, or in Python via PyO3. The loader decides the language, the boundary, and the sandbox — not what the extension does.
 - **Declare → register → resolve** — the lifecycle every plugin follows regardless of surface or loader. A manifest *declares* identity, surfaces, and capabilities; a registrar *registers* the surfaces (gated by trust); the planner and executor *resolve* them by name at query time.
 
-Built-in functionality is dogfooded through this exact path — the vector index is one index-kind provider among many, the Lance backend is one storage registration, and Locy's `MNOR`/`MPROD` aggregates are ordinary `LocyAggregate` registrations. If the framework can't express a built-in, the framework is wrong.
+Built-in functionality is dogfooded through this exact path — the vector index is one index-kind provider among many, and Locy's `MNOR`/`MPROD` aggregates are ordinary `LocyAggregate` registrations. If the framework can't express a built-in, the framework is wrong.
 
 This page is the mental model. For hands-on authoring see [Authoring](authoring.md); for loader specifics see [Loaders](loaders/index.md); for the security boundary see [Trust & Capabilities](trust-and-capabilities.md).
 
@@ -16,7 +16,7 @@ This page is the mental model. For hands-on authoring see [Authoring](authoring.
 
 ## Surfaces
 
-A **surface** is a single extension point — one trait in `crates/uni-plugin/src/traits/`. There are 23 of them, each `Send + Sync + 'static` and each speaking Arrow at its boundary. They group into three layers by *when* they run.
+A **surface** is a single extension point — one trait in `crates/uni-plugin/src/traits/`. There are 22 of them (the `SurfaceKind` variants), each `Send + Sync + 'static` and each speaking Arrow at its boundary. They group into three layers by *when* they run.
 
 | Layer | Surface | Trait | Built-ins shipped |
 |---|---|---|---|
@@ -29,7 +29,7 @@ A **surface** is a single extension point — one trait in `crates/uni-plugin/sr
 | | Locy generator | `LocyGenerator` | — |
 | | Optimizer rule | `OptimizerRuleProvider` | pushdown negotiation |
 | | Index kind | `IndexKindProvider` | vector index |
-| **Engine** | Label storage | `LabelStorageProvider` | Lance backend |
+| **Engine** | Label storage | `Storage` | — (`MemoryStorage` reference implementation for the conformance suite; Lance storage is native, not a registration) |
 | | Algorithm | `AlgorithmProvider` + `AlgorithmHost` | 42 graph algorithms (43 qnames — `algo.pageRank` and `algo.pagerank` both resolve to PageRank) |
 | | CRDT kind | `CrdtKindProvider` + `CrdtState` | 5 (LWW / OR-Set / G-Counter / MV-Register / RGA) |
 | | Logical type | `LogicalTypeProvider` | 5 (uri / geo.point / email / ipv4 / ipv6) |
@@ -46,9 +46,13 @@ A **surface** is a single extension point — one trait in `crates/uni-plugin/sr
 The authoritative count is the **22** registrable surfaces asserted in
 `uni_plugin::surfaces` (`assert_eq!(kinds.len(), 22)`). `OperatorProvider`,
 `StorageBackend`, `PregelProgramProvider` and `Connector` were removed in 3.0.
-Registering a surface requires holding its capability. (Neural predicates register through the `LocyPredicate` surface; rerankers are *not* a plugin surface — they are a separate subsystem.)
+Registering a surface requires holding its capability. Capabilities are a
+separate, larger enum: `uni_plugin::Capability` has 26 extension-surface variants
+(for example `Procedure` is split into `Procedure`, `ProcedureWrites`,
+`ProcedureSchema` and `ProcedureDbms`, and `GraphCompute` gates the kernels guest
+algorithms drive) plus host-import and quota variants. (Neural predicates register through the `LocyPredicate` surface; rerankers are *not* a plugin surface — they are a separate subsystem.)
 
-**Rust-only vs. loader-portable.** Only the native Rust loader can author all 22 surfaces today. The sandboxed and scripted loaders (WASM Component Model, Extism, Rhai, PyO3) author exactly three: **scalar function, aggregate, and procedure**. The remaining nineteen surfaces are deep in-process contracts — `&Expr` trees, async streams, trait objects — that are Rust-only in v1. So "what can a Python plugin do?" has a crisp answer: scalar fns, aggregates, and procedures.
+**Rust-only vs. loader-portable.** Only the native Rust loader can author all 22 surfaces today. The sandboxed and scripted loaders (WASM Component Model, Extism, Rhai, PyO3) author four: **scalar function, aggregate, procedure, and graph algorithm** (algorithms drive the GraphCompute kernels; see [Graph Algorithms](graph-algorithms.md)). The remaining eighteen surfaces are deep in-process contracts — `&Expr` trees, async streams, trait objects — that are Rust-only in v1. So "what can a Python plugin do?" has a crisp answer: scalar fns, aggregates, procedures, and graph algorithms.
 
 ### Locy aggregates
 
@@ -99,7 +103,7 @@ The ABI range is a semver `VersionReq` (`^1`, `>=1, <99`, …) keyed off the hos
 
 ## The capability model
 
-A capability is permission to do one thing — register a particular surface, or call a particular host service (filesystem, network, host query), or consume a bounded resource. The governing rule is one line:
+A capability is permission to do one thing — register a particular surface, or call a particular host service (network, KMS, secrets, GraphCompute), or consume a bounded resource. The governing rule is one line:
 
 > **effective = declared ∩ granted**
 
@@ -108,7 +112,7 @@ The manifest *declares* the capabilities the plugin wants; the host *grants* a s
 How that absence takes effect differs by loader:
 
 - **Extism filters host functions at load.** Only the host functions for *granted* capabilities are linked into the plugin; an ungranted host function is never installed.
-- **WASM Component Model** records the effective set and surfaces it as `effective_capabilities` / `denied_capabilities`. Alongside the always-available `host-log` and `host-trace-context`, the capability-gated `host-net` (HTTP GET/POST, added to the linker only when `Network` is granted) is wired today; `host-fs` is not yet exposed on the Component Model. Extism wires a wider set — `host_net_http_get`, `host_fs_read`, `host_query_run`, `host_kms_sign`, `host_secrets_acquire` — each filtered in by its granting capability.
+- **WASM Component Model** records the effective set and surfaces it as `effective_capabilities` / `denied_capabilities`. Alongside the always-available `host-log` and `host-trace-context`, the capability-gated `host-net` (HTTP GET/POST, added to the linker only when `Network` is granted) and `host-graph` / `host-arena` (added only when `GraphCompute` is granted) are wired today; `host-fs` is not yet exposed on the Component Model. Extism wires `uni_http_get` / `uni_http_post` (`Network`), `uni_kms_sign` / `uni_kms_verify` (`Kms`), `uni_secret_acquire` (`Secret`) and `uni_graph_call` (`GraphCompute`), each filtered in by its granting capability. Neither ABI has filesystem or host-query functions today.
 
 Either way, a registrar call that needs a capability outside the effective set fails the whole `register()` — partial registration is never observable, and the load outcome surfaces a `denied_capabilities` list.
 

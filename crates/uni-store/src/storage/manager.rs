@@ -35,7 +35,7 @@ use object_store::ObjectStore;
 #[cfg(feature = "lance-backend")]
 use object_store::local::LocalFileSystem;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -137,8 +137,28 @@ impl Drop for CompactionMerge {
     }
 }
 
+/// Where a [`StorageManager`]'s store lives, beyond its table root: what a
+/// backup of the whole store needs.
+#[derive(Clone)]
+pub struct StoreOrigin {
+    /// The resolved location.
+    pub location: Arc<crate::location::StoreLocation>,
+    /// How tables are placed under it.
+    pub layout: crate::location::StoreLayout,
+    /// A hybrid store's local directory, holding its WAL and ID allocator.
+    pub local: Option<Arc<dyn ObjectStore>>,
+}
+
 pub struct StorageManager {
     base_uri: String,
+    /// Set when the manager was built from a [`StoreLocation`](crate::location::StoreLocation).
+    origin: Option<StoreOrigin>,
+    /// Whether this handle may still write; shared with every clone and
+    /// checked before commits, flush publishes and compaction.
+    write_fence: Arc<crate::lease::WriteFence>,
+    /// Local directory behind `base_uri`, when there is one: a plain path or
+    /// a `file://` URI. Enables fsync and the compaction lock.
+    fs_root: Option<std::path::PathBuf>,
     store: Arc<dyn ObjectStore>,
     schema_manager: Arc<SchemaManager>,
     snapshot_manager: Arc<SnapshotManager>,
@@ -244,6 +264,30 @@ pub struct StorageManager {
     /// compaction merged when the view was made; see
     /// [`Self::history_is_whole`]. Always `true` for a live manager.
     history_whole: bool,
+    /// The table versions reads see; see [`crate::storage::read_cut`]. Shared
+    /// by every view of the primary store; a fork has its own, never
+    /// published, so it reads its branches' newest versions.
+    read_cut: Arc<crate::storage::read_cut::ReadCut>,
+    /// The backend at each table's newest version: what `backend` wraps when
+    /// it reads at the cut. A path that reads in order to rewrite (compaction,
+    /// index builds, schema evolution, restore, the writer) reads here, so it
+    /// keeps the rows a flush has committed but not yet published.
+    head: Arc<dyn StorageBackend>,
+    /// Holds that keep flushes from truncating the WAL (a BACKUP copying it):
+    /// a flush skips the truncation while one is held, and a later flush
+    /// truncates.
+    wal_holds: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Keeps the WAL from being truncated while held; see
+/// [`StorageManager::hold_wal_truncation`].
+#[must_use = "the WAL is truncated again as soon as the hold is dropped"]
+pub struct WalTruncationHold(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for WalTruncationHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// RAII counter increment for `StorageManager.flush_in_progress`.
@@ -254,6 +298,43 @@ pub struct StorageManager {
 /// gate skips while this counter is non-zero, so the counter must
 /// reflect "flush has started, has not completed" — including any
 /// async stream phase running on a spawned task.
+/// The label or edge type whose user indexes live in `name`, a table name
+/// or an index dataset's key: `vertices_{label}`, `deltas_{type}_{dir}`,
+/// `adjacency_{type}_{dir}`, `indexes/{label}/{property}_inverted|_sparse`.
+fn indexed_entity_of(name: &str) -> Option<String> {
+    if let Some(rest) = name.strip_prefix("indexes/") {
+        let entity = rest.split('/').next()?;
+        return (entity != "uni_id_to_vid").then(|| entity.to_string());
+    }
+    if let Some(label) = name.strip_prefix("vertices_") {
+        return Some(label.to_string());
+    }
+    for prefix in ["deltas_", "adjacency_"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let (entity, _dir) = rest.rsplit_once('_')?;
+            return Some(entity.to_string());
+        }
+    }
+    None
+}
+
+/// See [`StorageManager::catalog_publisher`].
+#[derive(Debug)]
+struct CutPublisher(std::sync::Weak<StorageManager>);
+
+impl uni_common::core::write_gate::CatalogPublisher for CutPublisher {
+    fn before_save(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            match self.0.upgrade() {
+                Some(storage) => storage.publish_loose(false).await,
+                None => Ok(()),
+            }
+        })
+    }
+}
+
 pub struct FlushInProgressGuard {
     storage: Arc<StorageManager>,
 }
@@ -375,6 +456,7 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
     schema: Arc<arrow_schema::Schema>,
     batches: Vec<arrow_array::RecordBatch>,
     mode: lance::dataset::WriteMode,
+    cut: &crate::storage::index_datasets::DatasetCut,
 ) -> anyhow::Result<lance::Dataset> {
     // The attempt future is boxed, which is load-bearing rather than stylistic.
     // Unboxed, each retry layer nests Lance's anonymous write future
@@ -396,9 +478,16 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
                 uri,
                 crate::backend::lance_directory::write_params(mode),
             );
+            let ticket = cut.begin()?;
+            let mut read = None;
             let destination = match crate::backend::lance_directory::open_dataset_uri(uri).await {
                 Ok(dataset) => {
                     params.data_storage_version = None;
+                    let version = dataset.version().version;
+                    if let Some(ticket) = &ticket {
+                        ticket.check_read(version)?;
+                    }
+                    read = Some(version);
                     lance::dataset::WriteDestination::Dataset(Arc::new(dataset))
                 }
                 Err(error) => {
@@ -413,10 +502,12 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
                     lance::dataset::WriteDestination::Uri(uri)
                 }
             };
-            Ok(lance::dataset::InsertBuilder::new(destination)
+            let written = lance::dataset::InsertBuilder::new(destination)
                 .with_params(&params)
                 .execute_stream(Box::new(reader))
-                .await?)
+                .await?;
+            crate::storage::index_datasets::finish_commit(ticket, read, written.version().version)?;
+            Ok(written)
         })
     })
     .await
@@ -843,6 +934,55 @@ fn label_backfill_marker_path(label: &str) -> object_store::path::Path {
     object_store::path::Path::from(format!("{LABEL_BACKFILL_MARKER_DIR}/{name}"))
 }
 
+/// Whether storage option `key` carries a credential (an access key, secret,
+/// token, SAS, password or service account), for any provider. Errs towards
+/// dropping: an option dropped by mistake is resolved again from the
+/// destination's own environment.
+fn is_credential_option(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "key",
+        "secret",
+        "token",
+        "sas",
+        "password",
+        "credential",
+        "service_account",
+    ]
+    .iter()
+    .any(|part| key.contains(part))
+}
+
+/// Whether storage option `key` says where requests go.
+fn is_endpoint_option(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("endpoint") || key.ends_with("_url") || key.contains("_url_")
+}
+
+/// `aws_endpoint` and `aws_endpoint_url_s3` name one endpoint.
+fn canonical_endpoint_key(key: &str) -> String {
+    match key {
+        "aws_endpoint_url_s3" => "aws_endpoint".to_string(),
+        k => k.to_string(),
+    }
+}
+
+/// Whether `endpoint` (lowercased, no trailing `/`) is AWS's own S3 service,
+/// virtual-hosted or not, which an unset endpoint also reaches.
+fn is_provider_endpoint(endpoint: &str) -> bool {
+    // `https://x.amazonaws.com@evil.example` goes to evil.example.
+    if endpoint.contains('@') {
+        return false;
+    }
+    let host = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest)
+        .split(['/', ':', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    host == "amazonaws.com" || host.ends_with(".amazonaws.com")
+}
+
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -852,18 +992,66 @@ impl StorageManager {
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
-        let resilient_store: Arc<dyn ObjectStore> = Arc::new(ResilientObjectStore::new(
+        Self::new_with_backend_retrying(
+            base_uri,
             store,
-            config.object_store.clone(),
-        ));
+            backend,
+            schema_manager,
+            config,
+            false,
+            true,
+        )
+        .await
+    }
+
+    /// [`Self::new_with_backend`]; `client_retries` says `store` is an
+    /// object-store client that retries on its own, so the resilience layer
+    /// adds timeouts and a circuit breaker but no retries of its own.
+    async fn new_with_backend_retrying(
+        base_uri: &str,
+        store: Arc<dyn ObjectStore>,
+        backend: Arc<dyn StorageBackend>,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        client_retries: bool,
+        recover: bool,
+    ) -> Result<Self> {
+        let resilient_store: Arc<dyn ObjectStore> = Arc::new(if client_retries {
+            ResilientObjectStore::without_retries(store, config.object_store.clone())
+        } else {
+            ResilientObjectStore::new(store, config.object_store.clone())
+        });
 
         let snapshot_manager = Arc::new(SnapshotManager::new(resilient_store.clone()));
 
         // Perform crash recovery for all known table patterns
-        Self::recover_all_staging_tables(backend.as_ref(), &schema_manager).await?;
+        // Writes: a read-only handle leaves it to the writer.
+        if recover {
+            Self::recover_all_staging_tables(backend.as_ref(), &schema_manager).await?;
+        }
 
+        // Every table and index URI is `base_uri` joined with a relative
+        // name, so a trailing `/` would put `//` in all of them.
+        let base_uri = match base_uri.trim_end_matches('/') {
+            "" => base_uri,
+            trimmed => trimmed,
+        };
+        let read_cut = Arc::new(crate::storage::read_cut::ReadCut::new());
+        backend.attach_read_cut(Arc::clone(&read_cut));
+        let head = Arc::clone(&backend);
+        let backend: Arc<dyn StorageBackend> =
+            Arc::new(crate::backend::read_cut_view::ReadCutBackend::new(
+                Arc::clone(&head),
+                Arc::clone(&read_cut),
+            ));
         let mut sm = Self {
+            read_cut,
+            head,
+            wal_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requires_adjacency_revalidation: false,
+            fs_root: (!base_uri.contains("://")).then(|| std::path::PathBuf::from(base_uri)),
+            origin: None,
+            write_fence: crate::lease::WriteFence::new(),
             base_uri: base_uri.to_string(),
             store: resilient_store,
             schema_manager,
@@ -889,6 +1077,10 @@ impl StorageManager {
             history_whole: true,
             excluded_versions: Arc::from(Vec::new()),
         };
+
+        sm.snapshot_manager
+            .set_write_fence(Arc::clone(&sm.write_fence));
+        sm.snapshot_manager.set_read_cut(Arc::clone(&sm.read_cut));
 
         // How far earlier processes' semantic compaction merged history, so a
         // session pinned below it is refused rather than served merged rows.
@@ -931,14 +1123,199 @@ impl StorageManager {
     }
 
     /// Create a new StorageManager with custom configuration.
+    ///
+    /// `base_uri` is the table root itself: a local path, or an object-store
+    /// URI resolved against the environment.
     #[cfg(feature = "lance-backend")]
     pub async fn new_with_config(
         base_uri: &str,
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
-        let store = Self::build_store_from_uri(base_uri)?;
+        if base_uri.contains("://") {
+            let location = crate::location::StoreLocation::resolve_from_env(
+                &crate::location::LocationSpec {
+                    uri: base_uri.to_string(),
+                    ..Default::default()
+                },
+                &config.object_store,
+            )
+            .await?;
+            return Self::new_with_location(
+                &location,
+                crate::location::StoreLayout::Flat,
+                schema_manager,
+                config,
+            )
+            .await;
+        }
+        std::fs::create_dir_all(base_uri)?;
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(base_uri)?);
         Self::new_with_store_and_config(base_uri, store, schema_manager, config).await
+    }
+
+    /// Create a StorageManager over the table root of a resolved location.
+    ///
+    /// Tables, indexes and snapshot manifests live at
+    /// [`StoreLocation::table_uri`](crate::location::StoreLocation::table_uri);
+    /// both uni's client and Lance's are configured from the location's one
+    /// option map.
+    #[cfg(feature = "lance-backend")]
+    pub async fn new_with_location(
+        location: &crate::location::StoreLocation,
+        layout: crate::location::StoreLayout,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+    ) -> Result<Self> {
+        Self::new_with_location_opts(location, layout, schema_manager, config, false).await
+    }
+
+    /// [`Self::new_with_location`]; a `read_only` manager writes nothing at
+    /// construction (crash recovery of staging tables is the writer's).
+    #[cfg(feature = "lance-backend")]
+    pub async fn new_with_location_opts(
+        location: &crate::location::StoreLocation,
+        layout: crate::location::StoreLayout,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        read_only: bool,
+    ) -> Result<Self> {
+        let base_uri = location.table_uri(layout);
+        let store = location.table_store(layout)?;
+        // A remote store's client retries with the configured settings
+        // (`StoreLocation` builds it with them), so its resilience layer does
+        // not retry again.
+        let mut sm = Self::new_with_store_options_retrying(
+            &base_uri,
+            store,
+            schema_manager,
+            config,
+            location.lance_storage_options(),
+            location.is_remote(),
+            !read_only,
+        )
+        .await?;
+        sm.fs_root = location.table_fs_root(layout);
+        sm.origin = Some(StoreOrigin {
+            location: Arc::new(location.clone()),
+            layout,
+            local: None,
+        });
+        Ok(sm)
+    }
+
+    /// Whether this handle may still write.
+    pub fn write_fence(&self) -> &Arc<crate::lease::WriteFence> {
+        &self.write_fence
+    }
+
+    /// Shares `fence` with this manager and its snapshot catalog: once it
+    /// trips, commits, flush publishes and compaction refuse.
+    pub fn set_write_fence(&mut self, fence: Arc<crate::lease::WriteFence>) {
+        self.snapshot_manager.set_write_fence(Arc::clone(&fence));
+        self.write_fence = fence;
+    }
+
+    /// Records a hybrid store's local directory (its WAL and ID allocator).
+    pub fn set_local_store(&mut self, local: Arc<dyn ObjectStore>) {
+        if let Some(origin) = &mut self.origin {
+            origin.local = Some(local);
+        }
+    }
+
+    /// Where this store lives, when it was opened from a resolved location.
+    pub fn origin(&self) -> Option<&StoreOrigin> {
+        self.origin.as_ref()
+    }
+
+    /// Resolves another URI (a BACKUP or COPY target) against this store:
+    /// when it uses the same object-store provider, it inherits this store's
+    /// endpoint and credentials, so a store configured explicitly can reach
+    /// its own bucket. The environment and the URI still apply as usual.
+    ///
+    /// # Errors
+    /// See [`StoreLocation::resolve`](crate::location::StoreLocation::resolve).
+    pub async fn resolve_foreign_location(
+        &self,
+        uri: &str,
+    ) -> Result<crate::location::StoreLocation> {
+        self.resolve_foreign_location_with(uri, &BTreeMap::new())
+            .await
+    }
+
+    /// [`Self::resolve_foreign_location`] with `extra` raw object-store
+    /// options for `uri`, over the inherited ones (`BACKUP … WITH {…}`).
+    ///
+    /// Inherited credentials go only with the inherited endpoint: when this
+    /// store uses its provider's own service and `uri` resolves to another
+    /// endpoint (one the environment names), they are not sent there.
+    ///
+    /// # Errors
+    /// The URI cannot be resolved.
+    pub async fn resolve_foreign_location_with(
+        &self,
+        uri: &str,
+        extra: &BTreeMap<String, String>,
+    ) -> Result<crate::location::StoreLocation> {
+        let inherited = self
+            .origin
+            .as_ref()
+            .map(|o| o.location.inheritable_options_for(uri))
+            .unwrap_or_default();
+        let resolve = |inherited: &BTreeMap<String, String>| {
+            let mut options = inherited.clone();
+            options.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+            crate::location::LocationSpec {
+                uri: uri.to_string(),
+                cloud: None,
+                options,
+            }
+        };
+        let location = crate::location::StoreLocation::resolve_from_env(
+            &resolve(&inherited),
+            &self.config.object_store,
+        )
+        .await?;
+        // Credentials go only where they came from: when the destination
+        // reaches another endpoint than this store's (one named in `extra`,
+        // one its environment resolves, or the provider's own where this
+        // store used a custom virtual-hosted one), inherited credentials are
+        // dropped and the destination's own (from `extra` or its environment)
+        // are used.
+        // Every option that says where requests go (S3, STS, Azure, GCS,
+        // metadata endpoints), with AWS's own S3 endpoints as unset.
+        let endpoint_of = |options: &crate::location::StorageOptions| {
+            options
+                .iter()
+                .filter(|(k, _)| is_endpoint_option(k))
+                .map(|(k, v)| {
+                    let v = v.trim_end_matches('/').to_ascii_lowercase();
+                    let v = (!is_provider_endpoint(&v)).then_some(v);
+                    (canonical_endpoint_key(k), v)
+                })
+                .filter(|(_, v)| v.is_some())
+                .collect::<BTreeMap<_, _>>()
+        };
+        let source_endpoint = self
+            .origin
+            .as_ref()
+            .map(|o| endpoint_of(o.location.options()))
+            .unwrap_or_default();
+        if !inherited.is_empty()
+            && endpoint_of(location.options()) != source_endpoint
+            && inherited.keys().any(|k| is_credential_option(k))
+        {
+            let without: BTreeMap<String, String> = inherited
+                .into_iter()
+                .filter(|(k, _)| !is_credential_option(k))
+                .collect();
+            return crate::location::StoreLocation::resolve_from_env(
+                &resolve(&without),
+                &self.config.object_store,
+            )
+            .await;
+        }
+        Ok(location)
     }
 
     /// Create a new StorageManager using an already-constructed object store.
@@ -962,9 +1339,35 @@ impl StorageManager {
         config: UniConfig,
         lancedb_storage_options: Option<HashMap<String, String>>,
     ) -> Result<Self> {
+        Self::new_with_store_options_retrying(
+            base_uri,
+            store,
+            schema_manager,
+            config,
+            lancedb_storage_options,
+            false,
+            true,
+        )
+        .await
+    }
+
+    #[cfg(feature = "lance-backend")]
+    async fn new_with_store_options_retrying(
+        base_uri: &str,
+        store: Arc<dyn ObjectStore>,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        lancedb_storage_options: Option<HashMap<String, String>>,
+        client_retries: bool,
+        recover: bool,
+    ) -> Result<Self> {
         let cache_sizes = crate::backend::lance_directory::LanceCacheSizes {
             index_bytes: config.lance_index_cache_bytes,
             metadata_bytes: config.lance_metadata_cache_bytes,
+        };
+        let base_uri = match base_uri.trim_end_matches('/') {
+            "" => base_uri,
+            trimmed => trimmed,
         };
         let backend = Arc::new(
             LanceDbBackend::connect_with_cache_sizes(
@@ -974,7 +1377,16 @@ impl StorageManager {
             )
             .await?,
         );
-        Self::new_with_backend(base_uri, store, backend, schema_manager, config).await
+        Self::new_with_backend_retrying(
+            base_uri,
+            store,
+            backend,
+            schema_manager,
+            config,
+            client_retries,
+            recover,
+        )
+        .await
     }
 
     /// Recover all staging tables for known table patterns.
@@ -1019,31 +1431,318 @@ impl StorageManager {
         Ok(())
     }
 
-    #[cfg(feature = "lance-backend")]
-    fn build_store_from_uri(base_uri: &str) -> Result<Arc<dyn ObjectStore>> {
-        if base_uri.contains("://") {
-            let parsed = url::Url::parse(base_uri).map_err(|e| anyhow!("Invalid base URI: {e}"))?;
-            let (store, _path) = object_store::parse_url(&parsed)
-                .map_err(|e| anyhow!("Failed to parse object store URL: {e}"))?;
-            Ok(Arc::from(store))
+    /// Filesystem root backing this manager's table store, when it is a local
+    /// directory (a plain path or a `file://` URI). Used to fsync WAL segments
+    /// after PUT — `object_store::LocalFileSystem` does not fsync on its own —
+    /// and for the compaction lock. `None` for object stores.
+    pub fn local_fs_root(&self) -> Option<std::path::PathBuf> {
+        self.fs_root.clone()
+    }
+
+    /// Takes the latest manifest's read cut, before an open's recoveries.
+    ///
+    /// Reads see what the manifest names. A writable handle also starts
+    /// recording its commits, so a manifest a recovery saves names every
+    /// table: the manifest's tables, or for a manifest an older binary wrote
+    /// (or none) every table at its newest version. Foreign commits are not
+    /// checked until [`Self::reconcile_read_cut`].
+    ///
+    /// # Errors
+    /// The manifest or a table version could not be read.
+    pub async fn begin_read_cut(&self, writable: bool) -> Result<()> {
+        let latest = self.snapshot_manager.load_latest_snapshot().await?;
+        match latest {
+            Some(manifest) if !manifest.tables.is_empty() => {
+                self.read_cut.adopt(&manifest.snapshot_id, manifest.tables);
+            }
+            _ if writable => self.read_cut.hold(self.head_versions().await?),
+            _ => {}
+        }
+        if writable {
+            self.read_cut.start_recording(Arc::clone(&self.write_fence));
         } else {
-            // If local path, ensure it exists.
-            std::fs::create_dir_all(base_uri)?;
-            Ok(Arc::new(LocalFileSystem::new_with_prefix(base_uri)?))
+            // Tripped for a read-only handle: it commits nothing.
+            self.read_cut.set_fence(Arc::clone(&self.write_fence));
+        }
+        Ok(())
+    }
+
+    /// The newest version of every table and index dataset.
+    async fn head_versions(&self) -> Result<std::collections::BTreeMap<String, u64>> {
+        let mut versions = std::collections::BTreeMap::new();
+        for table in self.head.table_names().await? {
+            if let Some(version) = self.head.get_table_version(&table).await? {
+                versions.insert(table, version);
+            }
+        }
+        versions.extend(crate::storage::index_datasets::head_versions(self).await?);
+        Ok(versions)
+    }
+
+    /// After a writable open's recoveries, before WAL replay: rolls every
+    /// table back to the version `resume` (the manifest the store resumes
+    /// from) names, and empties every table it does not name. What is undone
+    /// was never published: a crashed flush's commits, which the WAL replays,
+    /// or a stale writer's. Then starts checking commits for foreign
+    /// versions.
+    ///
+    /// A manifest an older binary wrote names no tables: nothing is undone,
+    /// and the handle holds every table at its newest version.
+    ///
+    /// # Errors
+    /// A table could not be read or rolled back.
+    ///
+    /// Returns the labels and edge types whose tables or index datasets it
+    /// rolled back: their user indexes may have been recorded built over a
+    /// version that is gone, so the caller rebuilds them
+    /// ([`Self::mark_indexes_stale`]).
+    pub async fn reconcile_read_cut(
+        &self,
+        resume: Option<&SnapshotManifest>,
+    ) -> Result<Vec<String>> {
+        // A recovery above completed commits (a bulk load's publish, a
+        // restore's rewind) without always saving a manifest that names
+        // them; they are this store's now, so publish them before anything
+        // above the cut is discarded.
+        let published;
+        let resume = if self.read_cut.has_publishable_loose()
+            && resume.is_some_and(|m| !m.tables.is_empty())
+            && let Some(id) = self.snapshot_manager.publish_successor().await?
+        {
+            published = self.snapshot_manager.load_snapshot(&id).await?;
+            Some(&published)
+        } else {
+            resume
+        };
+        let Some(manifest) = resume.filter(|m| !m.tables.is_empty()) else {
+            self.read_cut.hold(self.head_versions().await?);
+            self.read_cut.start_checking();
+            return Ok(Vec::new());
+        };
+        let target = &manifest.tables;
+        let mut undone = Vec::new();
+        let mut affected = std::collections::BTreeSet::new();
+        for table in self.head.table_names().await? {
+            let Some(version) = self.head.get_table_version(&table).await? else {
+                continue;
+            };
+            match target.get(&table) {
+                Some(&named) if version > named => {
+                    self.head.rollback_table(&table, named).await?;
+                    undone.push(format!("{table} v{} to v{named}", version));
+                    affected.extend(indexed_entity_of(&table));
+                }
+                Some(_) => {}
+                None => {
+                    if self.head.count_rows(&table, None).await? > 0 {
+                        let schema = self
+                            .head
+                            .get_table_schema(&table)
+                            .await?
+                            .ok_or_else(|| anyhow!("table '{table}' has no schema"))?;
+                        self.head
+                            .replace_table_atomic(&table, Vec::new(), schema)
+                            .await?;
+                        undone.push(format!("{table} (named by no manifest)"));
+                        affected.extend(indexed_entity_of(&table));
+                    }
+                }
+            }
+        }
+        let datasets = crate::storage::index_datasets::reconcile(self, target).await?;
+        for key in &datasets {
+            affected.extend(indexed_entity_of(key));
+        }
+        undone.extend(datasets);
+        if !undone.is_empty() {
+            tracing::warn!(
+                snapshot = %manifest.snapshot_id,
+                undone = ?undone,
+                "discarded table versions no manifest names: a crashed flush's commits \
+                 (replayed from the WAL) or a stale writer's"
+            );
+        }
+        self.read_cut.adopt(&manifest.snapshot_id, target.clone());
+        self.read_cut.hold(self.head_versions().await?);
+        self.read_cut.start_checking();
+        Ok(affected.into_iter().collect())
+    }
+
+    /// Marks every user index on `entities` (labels or edge types) `Stale`, so
+    /// the rebuild worker rebuilds it, and saves the catalog; returns the
+    /// entities that have one. A no-op on a fork, whose catalog is never
+    /// saved.
+    ///
+    /// # Errors
+    /// The catalog could not be updated or saved.
+    pub async fn mark_indexes_stale(&self, entities: &[String]) -> Result<Vec<String>> {
+        if entities.is_empty() || self.fork_scope.is_some() {
+            return Ok(Vec::new());
+        }
+        let schema = self.schema_manager.schema();
+        let stale: Vec<(String, String)> = schema
+            .indexes
+            .iter()
+            .filter(|idx| entities.iter().any(|e| e == idx.label()))
+            .map(|idx| (idx.name().to_string(), idx.label().to_string()))
+            .collect();
+        for (name, _) in &stale {
+            self.schema_manager.update_index_metadata(name, |m| {
+                m.status = uni_common::core::schema::IndexStatus::Stale;
+            })?;
+        }
+        if !stale.is_empty() {
+            self.schema_manager.save().await?;
+        }
+        let mut labels: Vec<String> = stale.into_iter().map(|(_, l)| l).collect();
+        labels.sort();
+        labels.dedup();
+        Ok(labels)
+    }
+
+    /// For a read-only handle, at most once per
+    /// [`UniConfig::read_cut_refresh`]: re-reads `catalog/latest` and reads at
+    /// the manifest it names from now on. A writable handle moves its own cut
+    /// as it publishes, and a fork reads its branches. A failed read keeps
+    /// the cut and is logged.
+    pub async fn refresh_read_cut(&self) {
+        let every = self
+            .config
+            .read_cut_refresh
+            .unwrap_or(if self.fs_root.is_some() {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(1)
+            });
+        if self.read_cut.is_recording()
+            || self.fork_scope.is_some()
+            || self.pinned_snapshot.is_some()
+            || !self.read_cut.refresh_due(every)
+        {
+            return;
+        }
+        let refreshed = async {
+            let Some(id) = self.snapshot_manager.latest_snapshot_id().await? else {
+                return Ok(());
+            };
+            if self.read_cut.published_id().as_deref() != Some(id.as_str()) {
+                let manifest = self.snapshot_manager.load_snapshot(&id).await?;
+                self.read_cut.publish(&id, manifest.tables);
+            }
+            anyhow::Ok(())
+        };
+        if let Err(e) = refreshed.await {
+            tracing::warn!(error = %e, "could not refresh the read cut");
         }
     }
 
-    /// Filesystem root backing this manager's object store, when the store
-    /// is a local filesystem (the non-`://` branch of
-    /// `build_store_from_uri`). Used to fsync WAL segments after PUT —
-    /// `object_store::LocalFileSystem` does not fsync on its own. `None`
-    /// for remote/URL-based stores.
-    pub fn local_fs_root(&self) -> Option<std::path::PathBuf> {
-        if self.base_uri.contains("://") {
-            None
-        } else {
-            Some(std::path::PathBuf::from(&self.base_uri))
+    /// Publishes this handle's loose commits -- compaction, index builds,
+    /// schema widening -- for every reader: a successor of the latest
+    /// manifest names them. This handle reads them as soon as they land;
+    /// other handles once they are published. Waits for the flushes open
+    /// now, whose rows a loose commit on one of their tables contains.
+    ///
+    /// A no-op for a handle that records no commits, or has none loose.
+    ///
+    /// # Errors
+    /// The manifest could not be saved or published.
+    pub async fn publish_cut(&self) -> Result<()> {
+        self.publish_loose(true).await
+    }
+
+    /// [`Self::publish_cut`]; `wait` says whether to wait for the flushes open
+    /// now first. A catalog save does not: it may run under a lock such a
+    /// flush needs to finish.
+    async fn publish_loose(&self, wait: bool) -> Result<()> {
+        // Inside a flush its commits are the flush's, published with it; a
+        // wait for open units would wait for itself.
+        if !self.read_cut.is_recording()
+            || !self.read_cut.has_loose()
+            || crate::storage::read_cut::in_any_unit()
+            || self.fork_scope.is_some()
+        {
+            return Ok(());
         }
+        let _one = self.read_cut.publishing().await;
+        if wait {
+            self.read_cut.wait_for_open_units().await;
+        }
+        // Nothing a manifest would name that the published one does not
+        // (every loose commit waits on an open flush).
+        if !self.read_cut.has_publishable_loose() {
+            return Ok(());
+        }
+        self.snapshot_manager.publish_successor().await?;
+        Ok(())
+    }
+
+    /// What the catalog runs before each save: publishes this handle's loose
+    /// commits, so a catalog that names an index or a column is never ahead of
+    /// what other handles, and the next open, read.
+    #[must_use]
+    pub fn catalog_publisher(
+        self: &Arc<Self>,
+    ) -> Arc<dyn uni_common::core::write_gate::CatalogPublisher> {
+        Arc::new(CutPublisher(Arc::downgrade(self)))
+    }
+
+    /// The lowest `(vid, eid)` no row in the store's tables has reached: one
+    /// above the largest VID (vertex rows and edge endpoints) and EID on the
+    /// main branch. Soft-deleted rows count, since their ids stay taken.
+    ///
+    /// Used at open when neither the ID allocator file nor the snapshot
+    /// manifest says where allocation may resume. A full column scan, so
+    /// only for that case.
+    ///
+    /// # Errors
+    /// A table exists but cannot be scanned.
+    pub async fn scan_id_floor(&self) -> Result<(u64, u64)> {
+        use arrow_array::UInt64Array;
+        use futures::TryStreamExt;
+        const EPHEMERAL: u64 = 1 << 63;
+        /// One above the largest real id in `column` of `table`, streamed.
+        async fn floor_of(
+            backend: &dyn StorageBackend,
+            table: &str,
+            columns: &[&str],
+        ) -> Result<Vec<u64>> {
+            let mut floors = vec![0u64; columns.len()];
+            if !backend.table_exists(table).await? {
+                return Ok(floors);
+            }
+            let request = ScanRequest::all(table)
+                .with_columns(columns.iter().map(|c| (*c).to_string()).collect());
+            let mut stream = backend.scan_stream(request).await?;
+            while let Some(batch) = stream.try_next().await? {
+                for (i, column) in columns.iter().enumerate() {
+                    let Some(array) = batch
+                        .column_by_name(column)
+                        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+                    else {
+                        continue;
+                    };
+                    for v in array.iter().flatten() {
+                        if v & EPHEMERAL == 0 {
+                            floors[i] = floors[i].max(v.saturating_add(1));
+                        }
+                    }
+                }
+            }
+            Ok(floors)
+        }
+        let vertices = floor_of(
+            self.head.as_ref(),
+            table_names::main_vertex_table_name(),
+            &["_vid"],
+        )
+        .await?;
+        let edges = floor_of(
+            self.head.as_ref(),
+            table_names::main_edge_table_name(),
+            &["_eid", "src_vid", "dst_vid"],
+        )
+        .await?;
+        Ok((vertices[0].max(edges[1]).max(edges[2]), edges[0]))
     }
 
     pub fn pinned(&self, snapshot: SnapshotManifest) -> Self {
@@ -1062,6 +1761,9 @@ impl StorageManager {
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
+            fs_root: self.fs_root.clone(),
+            origin: self.origin.clone(),
+            write_fence: Arc::clone(&self.write_fence),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1083,6 +1785,9 @@ impl StorageManager {
             fork_scope: self.fork_scope.clone(),
             fork_registry: self.fork_registry.clone(),
             backend: self.backend.clone(),
+            read_cut: Arc::clone(&self.read_cut),
+            head: Arc::clone(&self.head),
+            wal_holds: Arc::clone(&self.wal_holds),
             // Its own copy, not the shared lock: a fork/pin must get its OWN
             // label index so its flushes/relabels don't mutate the parent's, nor
             // the parent's reach it (review H1/L2). The clone is copy-on-write
@@ -1173,6 +1878,9 @@ impl StorageManager {
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
+            fs_root: self.fs_root.clone(),
+            origin: self.origin.clone(),
+            write_fence: Arc::clone(&self.write_fence),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1189,6 +1897,9 @@ impl StorageManager {
             fork_scope: self.fork_scope.clone(),
             fork_registry: self.fork_registry.clone(),
             backend: self.backend.clone(),
+            read_cut: Arc::clone(&self.read_cut),
+            head: Arc::clone(&self.head),
+            wal_holds: Arc::clone(&self.wal_holds),
             // Its own copy, not the shared lock: a fork/pin must get its OWN
             // label index so its flushes/relabels don't mutate the parent's, nor
             // the parent's reach it (review H1/L2). The clone is copy-on-write
@@ -1250,9 +1961,13 @@ impl StorageManager {
             self.store.clone(),
             scope.fork_id(),
         ));
+        snapshot_manager.set_write_fence(Arc::clone(&self.write_fence));
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
+            fs_root: self.fs_root.clone(),
+            origin: self.origin.clone(),
+            write_fence: Arc::clone(&self.write_fence),
             store: self.store.clone(),
             schema_manager: merged_schema,
             snapshot_manager,
@@ -1268,6 +1983,14 @@ impl StorageManager {
             pin_guard: None,
             fork_scope: Some(scope),
             fork_registry: self.fork_registry.clone(),
+            // Primary's: a fork writes primary's own datasets too (the shared
+            // UID index, the empty main-branch parent of a table it branches
+            // on first write), and primary must hold those versions or it
+            // takes them for a foreign writer's. Branch commits are not
+            // recorded.
+            read_cut: Arc::clone(&self.read_cut),
+            head: Arc::clone(&branched_backend),
+            wal_holds: Arc::clone(&self.wal_holds),
             backend: branched_backend,
             // Its own copy, not the shared lock: a fork/pin must get its OWN
             // label index so its flushes/relabels don't mutate the parent's, nor
@@ -1358,7 +2081,7 @@ impl StorageManager {
         entity: &str,
         l0: &crate::runtime::l0_visibility::L0Context,
     ) -> anyhow::Result<usize> {
-        let backend = self.backend();
+        let backend = self.head_backend();
         let mut total = l0.entity_count(entity);
         for table in self.property_tables_for(entity) {
             if backend.table_exists(&table).await? {
@@ -1463,7 +2186,7 @@ impl StorageManager {
         if !schema.labels.contains_key(label) {
             return Ok(0);
         }
-        let backend = self.backend();
+        let backend = self.head_backend();
 
         // Every version, bulk-gated ones included: a row copied here keeps
         // its version, so whatever hides it in the main table hides it in the
@@ -1638,6 +2361,7 @@ impl StorageManager {
             retired = vertices.len() - copied,
             "backfilled a newly declared label from the main vertex table"
         );
+        self.publish_cut().await?;
         Ok(copied)
     }
 
@@ -1801,7 +2525,7 @@ impl StorageManager {
         if properties.is_empty() {
             return Ok(());
         }
-        let backend = self.backend();
+        let backend = self.head_backend();
         // Per property: (count, first offender as (id, value)).
         let mut conflicts: Vec<(usize, Option<(String, uni_common::Value)>)> =
             vec![(0, None); properties.len()];
@@ -1995,7 +2719,7 @@ impl StorageManager {
         if properties.is_empty() || self.fork_scope.is_some() {
             return Ok(0);
         }
-        let backend = self.backend();
+        let backend = self.head_backend();
         let convert = |props: &uni_common::Properties| -> Result<Option<uni_common::Properties>> {
             let mut out = props.clone();
             let mut changed = false;
@@ -2172,7 +2896,7 @@ impl StorageManager {
             // relationships were ever flushed.
             let mut existing = Vec::with_capacity(tables.len());
             for table in tables {
-                if self.backend().table_exists(&table).await? {
+                if self.head_backend().table_exists(&table).await? {
                     existing.push(table);
                 }
             }
@@ -2187,7 +2911,7 @@ impl StorageManager {
             .collect();
         let fields = fields.as_slice();
 
-        let backend = self.backend();
+        let backend = self.head_backend();
         for table in &tables {
             backend.evolve_table_schema(table, fields, &[]).await?;
         }
@@ -2214,6 +2938,8 @@ impl StorageManager {
                 }
             }
         }
+        // The widened versions are read before the catalog names the column.
+        self.publish_cut().await?;
 
         // Propagate to live fork branches. `ForkInfo::datasets` is the
         // authoritative per-fork table -> branch map; a fork with no branch for
@@ -2497,13 +3223,13 @@ impl StorageManager {
     /// defect this replaced — `compact_label` used to return
     /// `files_compacted: 1` for a label with no table at all (#172).
     async fn optimize_into(&self, table: &str, stats: &mut CompactionStats) -> Result<()> {
-        if self.backend.table_exists(table).await? {
+        if self.head.table_exists(table).await? {
             let report = self
                 .backend
-                .optimize_table(table, self.config.compaction.version_retention)
+                .optimize_table(table, self.version_retention())
                 .await?;
             stats.absorb(&report);
-            self.backend.invalidate_cache(table);
+            self.head.invalidate_cache(table);
         }
         Ok(())
     }
@@ -2625,6 +3351,7 @@ impl StorageManager {
 
         stats.duration = start.elapsed();
         self.record_run(&stats)?;
+        self.publish_cut().await?;
         Ok(stats)
     }
 
@@ -2647,6 +3374,7 @@ impl StorageManager {
 
         stats.duration = start.elapsed();
         self.record_run(&stats)?;
+        self.publish_cut().await?;
         Ok(stats)
     }
 
@@ -2680,13 +3408,17 @@ impl StorageManager {
 
     /// Waits for this directory's compaction lock, then takes it.
     ///
-    /// Returns `Ok(None)` for a remote store, which has no lock.
+    /// Returns `Ok(None)` for a remote store, which has no lock: its writer
+    /// lease already admits a single writable (and so compacting) handle.
     ///
     /// # Errors
     ///
     /// Returns [`CompactionCancelled`] if cancelled while waiting, or the
     /// lock file's I/O error.
     pub(crate) async fn lock_compaction_dir(&self) -> Result<Option<CompactionDirLock>> {
+        self.write_fence.check()?;
+        // An object store has no directory to lock: its writer lease admits
+        // one compacting handle.
         let Some(root) = self.local_fs_root() else {
             return Ok(None);
         };
@@ -2808,7 +3540,7 @@ impl StorageManager {
 
     async fn update_compaction_status(&self) -> Result<()> {
         let schema = self.schema_manager.schema();
-        let backend = self.backend.as_ref();
+        let backend = self.head.as_ref();
         let mut total_rows: usize = 0;
         let mut oldest_ts: Option<i64> = None;
 
@@ -2922,6 +3654,10 @@ impl StorageManager {
             log::debug!("Background compaction deferred: a bulk load is being published");
             return Ok(CompactionStats::default());
         }
+        if this.write_fence.check().is_err() {
+            log::debug!("Background compaction skipped: this handle can no longer write");
+            return Ok(CompactionStats::default());
+        }
         // Skip, rather than wait, when another handle on this directory is
         // compacting: the next tick retries. See `CompactionDirLock`.
         let _dir_lock = match this.local_fs_root() {
@@ -3014,9 +3750,10 @@ impl StorageManager {
                     at: "compaction::before-optimize",
                 }));
             }
+            // A handle that lost the store stops between tables.
+            this.write_fence.check()?;
             if let Some(report) =
-                Self::try_optimize_table(backend, &table, this.config.compaction.version_retention)
-                    .await
+                Self::try_optimize_table(backend, &table, this.version_retention()).await
             {
                 stats.absorb(&report);
                 backend.invalidate_cache(&table);
@@ -3030,6 +3767,7 @@ impl StorageManager {
             status.l1_runs = status.l1_runs.saturating_sub(runs_at_start);
         }
 
+        this.publish_cut().await?;
         Ok(stats)
     }
 
@@ -3172,6 +3910,52 @@ impl StorageManager {
     /// Get the storage backend as an Arc.
     pub fn backend_arc(&self) -> Arc<dyn StorageBackend> {
         self.backend.clone()
+    }
+
+    /// The backend at each table's newest version, for a path that reads in
+    /// order to write. [`Self::backend`] reads at the read cut, which leaves
+    /// out what a running flush has committed but not yet published: a
+    /// rewrite that read there would drop those rows.
+    pub fn head_backend(&self) -> &dyn StorageBackend {
+        self.head.as_ref()
+    }
+
+    /// [`Self::head_backend`] as an Arc.
+    pub fn head_backend_arc(&self) -> Arc<dyn StorageBackend> {
+        Arc::clone(&self.head)
+    }
+
+    /// Keeps flushes from truncating the WAL until the hold is dropped: a
+    /// BACKUP copying the WAL then gets every commit since the manifest it
+    /// copies, whatever flushes run meanwhile.
+    pub fn hold_wal_truncation(&self) -> WalTruncationHold {
+        self.wal_holds
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        WalTruncationHold(Arc::clone(&self.wal_holds))
+    }
+
+    /// How long a compaction keeps superseded table versions: the configured
+    /// retention, or (about) forever while a BACKUP holds the WAL, since the
+    /// backup copies table versions its manifest names, which a cleanup
+    /// during the copy would delete.
+    #[must_use]
+    pub fn version_retention(&self) -> std::time::Duration {
+        if self.wal_truncation_held() {
+            std::time::Duration::from_secs(100 * 365 * 24 * 3600)
+        } else {
+            self.config.compaction.version_retention
+        }
+    }
+
+    /// Whether a [`Self::hold_wal_truncation`] hold is held.
+    #[must_use]
+    pub fn wal_truncation_held(&self) -> bool {
+        self.wal_holds.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    /// The store's read cut.
+    pub fn read_cut(&self) -> &Arc<crate::storage::read_cut::ReadCut> {
+        &self.read_cut
     }
 
     /// Rebuild the VidLabelsIndex from the main vertex table.
@@ -3486,7 +4270,8 @@ impl StorageManager {
 
     pub fn index_manager(&self) -> IndexManager {
         IndexManager::new(&self.base_uri, self.schema_manager.clone())
-            .with_backend(self.backend_arc())
+            .with_backend(self.head_backend_arc())
+            .with_read_cut(Arc::clone(&self.read_cut))
     }
 
     // ========================================================================
@@ -4539,7 +5324,8 @@ impl StorageManager {
 
     #[cfg(feature = "lance-backend")]
     pub fn uid_index(&self, label: &str) -> Result<UidIndex> {
-        Ok(UidIndex::new(&self.base_uri, label))
+        Ok(UidIndex::new(&self.base_uri, label)
+            .with_read_cut(&self.base_uri, Arc::clone(&self.read_cut)))
     }
 
     #[cfg(feature = "lance-backend")]
@@ -4558,7 +5344,13 @@ impl StorageManager {
             })
             .ok_or_else(|| anyhow!("Inverted index not found for {}.{}", label, property))?;
 
-        InvertedIndex::new(&self.base_uri, config).await
+        InvertedIndex::open(
+            &self.base_uri,
+            config,
+            Some(Arc::clone(&self.read_cut)),
+            true,
+        )
+        .await
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -5205,9 +5997,86 @@ impl StorageManager {
         filter: Option<&str>,
         ctx: Option<&QueryContext>,
     ) -> Result<Vec<(Vid, f32)>> {
+        // Malformed queries are refused before any read; a blank one matches
+        // nothing (see `backend::fts_query`).
+        if crate::backend::fts_query::parse_fts_query(query)?.is_none() {
+            return Ok(Vec::new());
+        }
+        self.fts_search_parsed(label, property, query, k, filter, ctx)
+            .await
+            .map_err(|e| {
+                if format!("{e:#}").contains("position is not found") {
+                    anyhow!(
+                        "full-text phrase query on {label}.{property}: the index was built \
+                         without token positions, which phrases need (an n-gram tokenizer \
+                         stores none). Recreate the FULLTEXT index with a word tokenizer, \
+                         or search the words without quotes."
+                    )
+                } else {
+                    e
+                }
+            })
+    }
+
+    async fn fts_search_parsed(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+        filter: Option<&str>,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Vec<(Vid, f32)>> {
+        // A JSON column is searched through its full-text index's derived
+        // text column; unflushed documents are reduced to the same text.
+        let json_index = self
+            .schema_manager
+            .schema()
+            .indexes
+            .iter()
+            .find_map(|idx| match idx {
+                IndexDefinition::JsonFullText(cfg)
+                    if cfg.label == label && cfg.column == property =>
+                {
+                    Some(cfg.clone())
+                }
+                _ => None,
+            });
+        let derived = json_index.as_ref().map(|cfg| cfg.derived_column());
+        // How the declared index tokenizes the column, for the rows no built
+        // index covers yet (a JSON index's text column uses the standard
+        // analyzer).
+        let analyzer: Option<uni_common::core::schema::TokenizerConfig> = if json_index.is_some() {
+            Some(uni_common::core::schema::TokenizerConfig::Standard)
+        } else {
+            self.schema_manager
+                .schema()
+                .indexes
+                .iter()
+                .find_map(|idx| match idx {
+                    IndexDefinition::FullText(cfg)
+                        if cfg.label == label && cfg.properties.iter().any(|p| p == property) =>
+                    {
+                        Some(cfg.tokenizer.clone())
+                    }
+                    _ => None,
+                })
+        };
+        let source = property;
+        let property = derived.as_deref().unwrap_or(property);
+        let paths: Vec<String> = json_index.map(|cfg| cfg.paths).unwrap_or_default();
+        let is_json = derived.is_some();
+        let text_of = move |value: &uni_common::Value| -> Option<String> {
+            if is_json {
+                uni_common::core::schema::json_fts_text(value, &paths)
+            } else {
+                value.as_str().map(str::to_string)
+            }
+        };
+
         let backend = self.backend.as_ref();
         let name = table_names::vertex_table_name(label);
-        let schemaless = self.is_schemaless_property(label, property);
+        let schemaless = !is_json && self.is_schemaless_property(label, property);
         if schemaless {
             reject_schemaless_filter(label, property, filter)?;
         }
@@ -5218,14 +6087,12 @@ impl StorageManager {
         let unflushed = match ctx {
             Some(qctx) => {
                 let excluded = self.l0_rows_failing_filter(label, filter, qctx).await?;
-                let mut l0 = collect_l0_texts(qctx, label, property)?;
+                let mut l0 = collect_l0_texts_with(qctx, label, source, &text_of)?;
                 // A vertex an unflushed relabel put under the label has no L0
                 // property row; its text is its flushed one.
                 for (vid, props) in self.l0_label_joined_props(label, qctx).await? {
-                    if let Some(value) = props.get(property) {
-                        l0.texts
-                            .entry(vid)
-                            .or_insert_with(|| value.as_str().map(str::to_string));
+                    if let Some(value) = props.get(source) {
+                        l0.texts.entry(vid).or_insert_with(|| text_of(value));
                     }
                 }
                 Some((excluded, l0))
@@ -5281,7 +6148,14 @@ impl StorageManager {
                 .map(|(vid, text)| (vid.as_u64(), text))
                 .collect();
             documents.sort_unstable_by_key(|(vid, _)| *vid);
-            let scored = crate::backend::score_documents(property, query, documents, check).await?;
+            let scored = crate::backend::score_documents(
+                property,
+                query,
+                documents,
+                analyzer.as_ref(),
+                check,
+            )
+            .await?;
             let mut hits: Vec<_> = scored
                 .into_iter()
                 .map(|(vid, score)| (Vid::new(vid), score))
@@ -5331,6 +6205,7 @@ impl StorageManager {
                             fetch,
                             combined_filter.clone(),
                             docs.clone(),
+                            analyzer.as_ref(),
                             counters,
                         )
                         .await?;
@@ -6393,7 +7268,19 @@ struct L0Texts {
 /// # Errors
 /// Returns the query's timeout or cancellation, checked every
 /// [`DeadlineTicker::EVERY`] rows.
+#[cfg(test)]
 fn collect_l0_texts(ctx: &QueryContext, label: &str, property: &str) -> Result<L0Texts> {
+    collect_l0_texts_with(ctx, label, property, &|v| v.as_str().map(str::to_string))
+}
+
+/// [`collect_l0_texts`], with each value's searched text given by `text_of`
+/// (a JSON full-text index's text of a document, for one).
+fn collect_l0_texts_with(
+    ctx: &QueryContext,
+    label: &str,
+    property: &str,
+    text_of: &dyn Fn(&uni_common::Value) -> Option<String>,
+) -> Result<L0Texts> {
     let mut deadline = DeadlineTicker::new(ctx);
     let mut out = L0Texts::default();
     // Whether each relabeled vid still carries the label, newest buffer last.
@@ -6418,7 +7305,7 @@ fn collect_l0_texts(ctx: &QueryContext, label: &str, property: &str) -> Result<L
                 continue;
             };
             let text = match props.get(property) {
-                Some(value) => value.as_str().map(str::to_string),
+                Some(value) => text_of(value),
                 None => continue,
             };
             out.texts.insert(vid, text);
@@ -6774,6 +7661,19 @@ mod label_backfill_tests {
         (schema_manager, sm)
     }
 
+    /// While a backup holds the WAL, compactions keep every table version;
+    /// once it is released, the configured retention applies again.
+    #[tokio::test]
+    async fn a_backup_hold_keeps_every_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_schema, sm) = manager(&dir).await;
+        let configured = sm.version_retention();
+        let hold = sm.hold_wal_truncation();
+        assert!(sm.version_retention() > configured * 1000);
+        drop(hold);
+        assert_eq!(sm.version_retention(), configured);
+    }
+
     fn declare_l(schema_manager: &SchemaManager) {
         schema_manager.add_label("L").unwrap();
         schema_manager
@@ -6975,5 +7875,90 @@ mod label_backfill_tests {
                 .await
                 .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod indexed_entity_tests {
+    use super::indexed_entity_of;
+
+    #[test]
+    fn a_rolled_back_table_or_dataset_names_its_indexed_entity() {
+        assert_eq!(
+            indexed_entity_of("vertices_Person").as_deref(),
+            Some("Person")
+        );
+        assert_eq!(
+            indexed_entity_of("deltas_KNOWS_fwd").as_deref(),
+            Some("KNOWS")
+        );
+        assert_eq!(
+            indexed_entity_of("adjacency_HAS_PART_bwd").as_deref(),
+            Some("HAS_PART")
+        );
+        assert_eq!(
+            indexed_entity_of("indexes/Doc/content_inverted").as_deref(),
+            Some("Doc")
+        );
+        assert_eq!(
+            indexed_entity_of("indexes/uni_id_to_vid/Doc/index.lance"),
+            None
+        );
+        assert_eq!(indexed_entity_of("vertices"), None);
+        assert_eq!(indexed_entity_of("edges"), None);
+    }
+}
+
+#[cfg(test)]
+mod foreign_endpoint_tests {
+    use super::{is_credential_option, is_provider_endpoint};
+
+    /// Every provider's credential options are recognized; locating ones
+    /// are not.
+    #[test]
+    fn credential_options_are_recognized_for_every_provider() {
+        for key in [
+            "aws_access_key_id",
+            "aws_secret_access_key",
+            "aws_session_token",
+            "azure_storage_account_key",
+            "azure_storage_sas_key",
+            "azure_client_secret",
+            "google_service_account",
+            "google_service_account_key",
+            "google_application_credentials",
+        ] {
+            assert!(is_credential_option(key), "{key}");
+        }
+        for key in [
+            "aws_region",
+            "aws_endpoint",
+            "azure_storage_account_name",
+            "google_base_url",
+            "allow_http",
+        ] {
+            assert!(!is_credential_option(key), "{key}");
+        }
+    }
+
+    /// AWS's own S3 endpoints, path-style or virtual-hosted, are the one an
+    /// unset endpoint reaches; any other host is a custom endpoint.
+    #[test]
+    fn provider_endpoints_are_told_from_custom_ones() {
+        assert!(is_provider_endpoint("https://s3.us-east-1.amazonaws.com"));
+        assert!(is_provider_endpoint(
+            "https://bucket.s3.eu-west-1.amazonaws.com"
+        ));
+        assert!(is_provider_endpoint("https://s3.amazonaws.com:443/x"));
+        assert!(!is_provider_endpoint("http://127.0.0.1:9000"));
+        assert!(!is_provider_endpoint("https://bucket.minio.example"));
+        assert!(!is_provider_endpoint("https://amazonaws.com.evil.example"));
+        assert!(!is_provider_endpoint(
+            "https://evil.example?x=.amazonaws.com"
+        ));
+        assert!(!is_provider_endpoint("https://evil.example#.amazonaws.com"));
+        assert!(!is_provider_endpoint(
+            "https://s3.amazonaws.com@evil.example"
+        ));
     }
 }

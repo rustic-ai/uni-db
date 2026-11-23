@@ -210,6 +210,24 @@ create_exception!(
 );
 create_exception!(
     _uni_db,
+    UniStoreLockedError,
+    UniError,
+    "The store is open for writing by another handle (attributes: store, holder)."
+);
+create_exception!(
+    _uni_db,
+    UniStaleWalError,
+    UniError,
+    "The WAL belongs to an earlier writer of the store (attributes: store, wal, segments)."
+);
+create_exception!(
+    _uni_db,
+    UniWriterFencedError,
+    UniError,
+    "This handle can no longer write: its writer lease was lost or it was closed (attribute: reason)."
+);
+create_exception!(
+    _uni_db,
     UniPermissionDeniedError,
     UniError,
     "Permission denied."
@@ -317,6 +335,13 @@ create_exception!(
 );
 create_exception!(
     _uni_db,
+    UniForkTaggedError,
+    UniError,
+    "drop_fork / drop_fork_cascade refused because a fork has tags; nothing \
+     was dropped. Untag it first. Carries `name: str` and `tags: list[str]`."
+);
+create_exception!(
+    _uni_db,
     UniForkSubtreeInUseError,
     UniError,
     "drop_fork_cascade refused because the subtree has live sessions / open txes. \
@@ -389,6 +414,38 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
         LockTimeout { .. } => UniLockTimeoutError::new_err(msg),
         TransactionAlreadyCompleted => UniTransactionAlreadyCompletedError::new_err(msg),
         ReadOnly { .. } => UniReadOnlyError::new_err(msg),
+        StoreLocked { store, holder } => {
+            let err = UniStoreLockedError::new_err(msg);
+            Python::attach(|py| -> PyResult<()> {
+                let val = err.value(py);
+                val.setattr("store", store.as_str())?;
+                val.setattr("holder", holder.as_str())?;
+                Ok(())
+            })
+            .ok();
+            err
+        }
+        StaleWal {
+            store,
+            wal,
+            segments,
+        } => {
+            let err = UniStaleWalError::new_err(msg);
+            Python::attach(|py| -> PyResult<()> {
+                let val = err.value(py);
+                val.setattr("store", store.as_str())?;
+                val.setattr("wal", wal.as_str())?;
+                val.setattr("segments", segments)?;
+                Ok(())
+            })
+            .ok();
+            err
+        }
+        WriterFenced { reason } => {
+            let err = UniWriterFencedError::new_err(msg);
+            Python::attach(|py| err.value(py).setattr("reason", reason.as_str())).ok();
+            err
+        }
         LabelNotFound { .. } => UniLabelNotFoundError::new_err(msg),
         EdgeTypeNotFound { .. } => UniEdgeTypeNotFoundError::new_err(msg),
         PropertyNotFound { .. } => UniPropertyNotFoundError::new_err(msg),
@@ -482,6 +539,11 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
                 Ok(())
             })
         }
+        ForkTagged { name, tags } => fork_err_with(UniForkTaggedError::new_err(msg), |py, val| {
+            val.setattr("name", name)?;
+            val.setattr("tags", pyo3::types::PyList::new(py, &tags)?)?;
+            Ok(())
+        }),
         ForkSubtreeInUse { blockers } => {
             fork_err_with(UniForkSubtreeInUseError::new_err(msg), |py, val| {
                 val.setattr("blockers", pyo3::types::PyList::new(py, &blockers)?)?;
@@ -686,6 +748,9 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         UniLocyIncompleteError,
         // Access control
         UniReadOnlyError,
+        UniStoreLockedError,
+        UniStaleWalError,
+        UniWriterFencedError,
         UniPermissionDeniedError,
         // Storage & I/O
         UniStorageError,
@@ -710,6 +775,7 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         UniForkInUseError,
         UniForkInflightTxError,
         UniForkHasChildrenError,
+        UniForkTaggedError,
         UniForkSubtreeInUseError,
         UniRestoreBlockedByForksError,
         UniForkBudgetExceededError,

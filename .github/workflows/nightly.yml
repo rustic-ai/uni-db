@@ -225,6 +225,20 @@ jobs:
             -E 'test(/^cloud_integration_test::/)'
           cargo nextest run -p uni-db --test integration --run-ignored all \
             -E 'test(/^hybrid_localstack_e2e::/)'
+          # Again with the endpoint and credentials left to the cloud
+          # configuration alone, as a deployment passing them explicitly does.
+          UNI_LOCALSTACK_CONFIG_ONLY=1 cargo nextest run -p uni-db --test integration \
+            --run-ignored all -E 'test(/^hybrid_localstack_e2e::/)'
+
+      # MinIO, Azurite and fake-gcs-server: open, write, flush, reopen, fork
+      # and back up a remote-only store on each.
+      - name: Start object-store emulators
+        run: scripts/ci/start_emulators.sh
+
+      - name: Run emulator smoke tests
+        run: |
+          cargo nextest run -p uni-db --test integration --run-ignored all \
+            -E 'test(/^emulator_smoke::/)'
 
   fuzz:
     if: github.repository == 'rustic-ai/uni-db'

@@ -109,7 +109,7 @@ pub struct L0Buffer {
 | Format | SimpleGraph + HashMap | Row-oriented for inserts |
 | Durability | WAL-backed | Survives crashes |
 | Latency | ~550µs per 1K writes | Memory-speed |
-| Capacity | Configurable (default 128MB) | Auto-flush when full |
+| Capacity | Bounded by `auto_flush_threshold` (default 10,000 mutations) | Auto-flush when reached |
 
 **Write Path:**
 
@@ -195,28 +195,24 @@ When L0 fills up, it flushes to the Delta layer as Lance datasets.
 
 ```rust
 pub struct DeltaDataset {
-    /// Lance dataset for deltas
-    dataset: Arc<Dataset>,
-
     /// Edge type this delta is for
-    edge_type: EdgeTypeId,
+    edge_type: String,
 
-    /// Direction (outgoing or incoming)
-    direction: Direction,
+    /// Direction: "fwd" or "bwd"
+    direction: String,
+
+    /// Lance branch for branched (fork) reads; `None` = primary
+    branch: Option<String>,
 }
 
 pub struct L0Manager {
-    /// Current L0 buffer
-    buffer: Arc<RwLock<L0Buffer>>,
+    /// Active L0 buffer (outer lock swaps it on rotation)
+    current: RwLock<Arc<RwLock<L0Buffer>>>,
 
-    /// Storage backend
-    store: Arc<dyn ObjectStore>,
+    /// Rotated buffers still being flushed; visible to reads until done
+    pending_flush: RwLock<Vec<Arc<RwLock<L0Buffer>>>>,
 
-    /// Schema manager reference
-    schema: Arc<SchemaManager>,
-
-    /// Configuration
-    config: L0ManagerConfig,
+    // ... snapshot pin token, plugin registry, bulk version reservations
 }
 ```
 
@@ -282,7 +278,7 @@ Uni uses a three-tier compaction strategy, each operating at a different level o
 
 #### Tier 1: CSR Overlay Compaction
 
-Automatic in-memory merge of frozen L0 CSR segment overlays into the main CSR after flush. Triggers when `frozen_segments >= 4`. Runs inline during the flush path — no background scheduling needed.
+Automatic in-memory merge of frozen L0 CSR segment overlays into the main CSR after flush. The flush checks the count and, when `frozen_segments >= frozen_segments_compact_threshold` (default 2), spawns the merge as a background task; a flush skips it while the previous one is still running.
 
 #### Tier 2: Semantic Compaction
 
@@ -389,22 +385,22 @@ pub struct ColumnStats {
 
 ### Vertex Datasets
 
-One Lance dataset per vertex label:
+One Lance dataset per vertex label, plus one main `vertices` table that holds every vertex (all labels, and schemaless ones) with its properties as JSONB in `props_json`:
 
 ```
 storage/
-├── vertices/
-│   ├── Paper/                    # :Paper vertices
-│   │   ├── _versions/
-│   │   ├── _indices/
-│   │   │   ├── embedding_hnsw/   # Vector index
-│   │   │   └── year_btree/       # Scalar index
-│   │   └── data/
-│   ├── Author/                   # :Author vertices
-│   │   └── ...
-│   └── Venue/                    # :Venue vertices
-│       └── ...
+├── vertices.lance/               # Main vertex table (all labels)
+├── vertices_Paper.lance/         # :Paper vertices
+│   ├── _versions/
+│   ├── _indices/
+│   │   └── <uuid>/               # One directory per Lance index (vector, scalar, FTS)
+│   ├── _transactions/
+│   └── data/
+├── vertices_Author.lance/        # :Author vertices
+└── vertices_Venue.lance/         # :Venue vertices
 ```
+
+Table names come from `crates/uni-store/src/backend/table_names.rs` (`vertex_table_name`, `main_vertex_table_name`).
 
 **Vertex Schema:**
 
@@ -417,23 +413,22 @@ storage/
 │   ┌───────────────┬──────────────┬────────────────────────────────────────┐│
 │   │ Column        │ Type         │ Description                            ││
 │   ├───────────────┼──────────────┼────────────────────────────────────────┤│
-│   │ _vid          │ UInt64       │ Internal vertex ID (label bits + ID)  ││
-│   │ _uid          │ Binary(32)   │ UniId (32-byte SHA3-256) - optional   ││
+│   │ _vid          │ UInt64       │ Internal vertex ID                     ││
+│   │ _uid          │ FixedSize(32)│ UniId (32-byte SHA3-256) - optional   ││
 │   │ _deleted      │ Bool         │ Tombstone marker (soft delete)        ││
 │   │ _version      │ UInt64       │ Last modified version                 ││
 │   │ ext_id        │ String       │ External ID (extracted from props)    ││
 │   │ _labels       │ List<String> │ Complete label set (multi-label)      ││
-│   │ _created_at   │ Timestamp    │ Creation timestamp                    ││
-│   │ _updated_at   │ Timestamp    │ Last update timestamp                 ││
+│   │ _created_at   │ Timestamp(ns)│ Creation timestamp                    ││
+│   │ _updated_at   │ Timestamp(ns)│ Last update timestamp                 ││
 │   └───────────────┴──────────────┴────────────────────────────────────────┘│
 │                                                                             │
-│   User Properties (schema-defined):                                         │
+│   User Properties (schema-defined, sorted by name):                         │
 │   ┌──────────┬──────────┬────────────────────────────────────────────────┐ │
-│   │ title    │ String   │ Paper title                                    │ │
-│   │ year     │ Int32    │ Publication year                               │ │
 │   │ abstract │ String   │ Paper abstract (nullable)                      │ │
 │   │ embedding│ Vector   │ 768-dimensional embedding                      │ │
-│   │ _doc     │ Json     │ Document mode flexible fields (deprecated)     │ │
+│   │ title    │ String   │ Paper title                                    │ │
+│   │ year     │ Int64    │ Publication year                               │ │
 │   └──────────┴──────────┴────────────────────────────────────────────────┘ │
 │                                                                             │
 │   Schemaless Properties:                                                    │
@@ -449,67 +444,65 @@ storage/
 
 ### Edge Datasets
 
-One Lance dataset per edge type:
+Edges are stored in one main `edges` table (every edge, its properties as JSONB in `props_json`) and, per edge type, two delta tables, one per direction:
 
 ```
 storage/
-├── edges/
-│   ├── CITES/                    # :CITES edges
-│   │   └── ...
-│   ├── AUTHORED_BY/              # :AUTHORED_BY edges
-│   │   └── ...
-│   └── PUBLISHED_IN/
-│       └── ...
+├── edges.lance/                  # Main edge table (all types)
+├── deltas_CITES_fwd.lance/       # :CITES delta log, keyed by source
+├── deltas_CITES_bwd.lance/       # :CITES delta log, keyed by destination
+├── deltas_AUTHORED_BY_fwd.lance/
+├── deltas_AUTHORED_BY_bwd.lance/
+└── ...
 ```
 
-**Edge Schema:**
+**Edge Schemas:**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            EDGE DATASET SCHEMA                               │
+│                            EDGE DATASET SCHEMAS                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│   System Columns:                                                           │
+│   Main `edges` table (storage/main_edge.rs):                                │
 │   ┌───────────────┬──────────────┬────────────────────────────────────────┐│
 │   │ Column        │ Type         │ Description                            ││
 │   ├───────────────┼──────────────┼────────────────────────────────────────┤│
-│   │ _eid          │ UInt64       │ Internal edge ID (type bits + ID)     ││
-│   │ _src_vid      │ UInt64       │ Source vertex VID                      ││
-│   │ _dst_vid      │ UInt64       │ Destination vertex VID                 ││
+│   │ _eid          │ UInt64       │ Internal edge ID                       ││
+│   │ src_vid       │ UInt64       │ Source vertex VID                      ││
+│   │ dst_vid       │ UInt64       │ Destination vertex VID                 ││
+│   │ type          │ Utf8         │ Edge type name                         ││
+│   │ props_json    │ LargeBinary  │ All properties (JSONB)                 ││
 │   │ _deleted      │ Bool         │ Tombstone marker                       ││
 │   │ _version      │ UInt64       │ Last modified version                  ││
-│   │ _created_at   │ Timestamp    │ Creation timestamp                     ││
-│   │ _updated_at   │ Timestamp    │ Last update timestamp                  ││
+│   │ _created_at   │ Timestamp(ns)│ Creation timestamp                     ││
+│   │ _updated_at   │ Timestamp(ns)│ Last update timestamp                  ││
 │   └───────────────┴──────────────┴────────────────────────────────────────┘│
 │                                                                             │
-│   Edge Properties (schema-defined):                                         │
-│   ┌──────────┬──────────┬────────────────────────────────────────────────┐ │
-│   │ weight   │ Float64  │ Edge weight/score                              │ │
-│   │ position │ Int32    │ Author position (for AUTHORED_BY)              │ │
-│   │ timestamp│ Timestamp│ When the edge was created                      │ │
-│   └──────────┴──────────┴────────────────────────────────────────────────┘ │
-│                                                                             │
-│   Schemaless Properties:                                                    │
-│   ┌────────────────┬──────────────┬──────────────────────────────────────┐ │
-│   │ overflow_json  │ LargeBinary  │ JSONB binary for non-schema props   │ │
-│   │                │ (JSONB)      │ - Same as vertex overflow support   │ │
-│   └────────────────┴──────────────┴──────────────────────────────────────┘ │
+│   Delta table `deltas_{type}_{fwd|bwd}` (storage/delta.rs):                 │
+│   ┌───────────────┬──────────────┬────────────────────────────────────────┐│
+│   │ src_vid       │ UInt64       │ Source vertex VID                      ││
+│   │ dst_vid       │ UInt64       │ Destination vertex VID                 ││
+│   │ eid           │ UInt64       │ Edge ID                                ││
+│   │ op            │ UInt8        │ 0 = insert, 1 = delete                 ││
+│   │ _version      │ UInt64       │ Version of the operation               ││
+│   │ _created_at   │ Timestamp(ns)│ Creation timestamp                     ││
+│   │ _updated_at   │ Timestamp(ns)│ Last update timestamp                  ││
+│   │ <properties>  │ (declared)   │ Schema-defined edge properties, sorted ││
+│   │ overflow_json │ LargeBinary  │ JSONB for non-schema properties        ││
+│   └───────────────┴──────────────┴────────────────────────────────────────┘│
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Adjacency Datasets
 
-Optimized for graph traversal (CSR-style):
+Optimized for graph traversal (CSR-style), one table per edge type and direction, written by compaction:
 
 ```
 storage/
-├── adjacency/
-│   ├── CITES_OUT/                # Outgoing CITES edges
-│   │   └── ...
-│   ├── CITES_IN/                 # Incoming CITES edges (reverse)
-│   │   └── ...
-│   └── ...
+├── adjacency_CITES_fwd.lance/    # Outgoing CITES edges
+├── adjacency_CITES_bwd.lance/    # Incoming CITES edges (reverse)
+└── ...
 ```
 
 **Adjacency Schema:**
@@ -570,92 +563,47 @@ Snapshots provide consistent point-in-time views.
 
 ### Manifest Structure
 
+A manifest (`catalog/manifests/{id}.json` under the table root; `catalog/latest` holds the id of the latest) is a `SnapshotManifest`:
+
 ```json
 {
-  "version": 42,
-  "timestamp": "2024-01-15T10:30:00Z",
-  "schema_version": 1,
-
-  "vertex_datasets": {
-    "Paper": {
-      "lance_version": 15,
-      "row_count": 1000000,
-      "size_bytes": 524288000
-    },
-    "Author": {
-      "lance_version": 8,
-      "row_count": 250000,
-      "size_bytes": 62500000
-    }
-  },
-
-  "edge_datasets": {
-    "CITES": {
-      "lance_version": 12,
-      "row_count": 5000000,
-      "size_bytes": 200000000
-    }
-  },
-
-  "adjacency_datasets": {
-    "CITES_OUT": { "lance_version": 12 },
-    "CITES_IN": { "lance_version": 12 }
-  },
-
-  "l1_runs": [
-    { "sequence": 100, "created_at": "2024-01-15T10:25:00Z" },
-    { "sequence": 101, "created_at": "2024-01-15T10:28:00Z" }
-  ],
-
-  "indexes": {
-    "paper_embeddings": {
-      "type": "hnsw",
-      "version": 5,
-      "row_count": 1000000
-    },
-    "paper_year": {
-      "type": "btree",
-      "version": 3
-    }
+  "snapshot_id": "7f3c…",
+  "parent_snapshot": "a91e…",
+  "created_at": "2026-11-21T10:30:00Z",
+  "schema_version": 12,
+  "version_high_water_mark": 4211,
+  "wal_high_water_mark": 98,
+  "vertices": { "Paper": { "version": 7, "count": 1000000, "lance_version": 0 } },
+  "edges": { "CITES": { "version": 3, "count": 5000000, "lance_version": 0 } },
+  "next_vid": 1048576,
+  "next_eid": 5242880,
+  "tables": {
+    "vertices": 41,
+    "vertices_Paper": 38,
+    "edges": 29,
+    "deltas_CITES_fwd": 17,
+    "deltas_CITES_bwd": 17,
+    "indexes/uni_id_to_vid/Paper/index.lance": 12
   }
 }
 ```
 
+`tables` is the **read cut**: the Lance version of every table and index dataset that readers of this manifest read. (`lance_version` in `vertices` / `edges` is always 0 and kept for compatibility.)
+
+### The manifest is the commit point
+
+- **Reads** open each table at the version the latest manifest names, not at its newest. A table the manifest does not name holds nothing a reader can see.
+- **A flush** commits its tables, then publishes a manifest naming them, so it becomes visible all at once. Its table commits are unread until then.
+- **Compaction, index builds and schema widening** commit outside a flush. The handle that made them reads them at once; a successor of the latest manifest publishes them for everyone when each finishes, before each catalog save, and at `shutdown()`. A flush manifest names the published cut, the flush's own commits, and loose commits on tables no other running flush has written. Version cleanup never removes the version the latest manifest names.
+- **A writable open** rolls every table back to the versions the manifest it resumes from names (Lance `restore()`), and empties a table the manifest does not name, before the WAL replays. What it discards was never published: a crashed flush's commits, which the WAL writes again, or a stale writer's.
+- **A foreign commit** (a table version this handle did not write, met while it has no other commit on that table running) trips the writer's fence: it stops writing (`WriterFenced`), and the next writable open discards the version.
+- **Read-only handles** re-read `catalog/latest` at the start of a query, at most once per `UniConfig::read_cut_refresh`.
+- **Rewrites read the newest versions.** A path that reads a table to rewrite it (semantic compaction, index builds, schema evolution, restore, bulk load) reads each table's newest version, so it keeps rows a running flush has committed but not yet published.
+- **Older stores.** A manifest written before 6.0 names no tables; reads see every table's newest version until the first flush records them. Fork branches are read at their newest versions.
+
 ### Snapshot Operations
 
-```rust
-impl StorageManager {
-    /// Create a new snapshot (after flush)
-    pub async fn create_snapshot(&self) -> Result<Snapshot> {
-        let manifest = Manifest {
-            version: self.next_version(),
-            timestamp: Utc::now(),
-            vertex_datasets: self.collect_vertex_versions(),
-            edge_datasets: self.collect_edge_versions(),
-            adjacency_datasets: self.collect_adjacency_versions(),
-            l1_runs: self.l1_manager.list_runs(),
-            indexes: self.collect_index_versions(),
-        };
-
-        // Write manifest atomically
-        self.write_manifest(&manifest).await?;
-
-        Ok(Snapshot::new(manifest))
-    }
-
-    /// Open a specific snapshot for reading
-    pub async fn open_snapshot(&self, version: u64) -> Result<SnapshotReader> {
-        let manifest = self.read_manifest(version).await?;
-
-        Ok(SnapshotReader {
-            manifest,
-            vertex_readers: self.open_vertex_readers(&manifest).await?,
-            edge_readers: self.open_edge_readers(&manifest).await?,
-            adjacency_cache: self.load_adjacency(&manifest).await?,
-        })
-    }
-}
-```
+A flush manifest records the read cut but no restore point. `Uni::create_snapshot` (and `uni.admin.snapshot.create`) flushes and also records a restore point, which tags every table's version so a restore can return to it. `VERSION AS OF` reads a snapshot with a restore point at its tagged versions, and a flush manifest through its version ceiling over the live tables.
 
 ---
 
@@ -983,7 +931,8 @@ Uni uses the `object_store` crate for storage abstraction, supporting local file
 | Amazon S3 | `s3://bucket/path` | **Stable** |
 | Google Cloud Storage | `gs://bucket/path` | **Stable** |
 | Azure Blob Storage | `az://container/path` | **Stable** |
-| Memory | (in-memory) | **Stable** (testing) |
+
+There is no in-memory object store: a `memory://` URI is rejected, and `Uni::in_memory()` opens a store in a temporary directory that is removed when the database is dropped.
 
 ### Using Local Storage
 
@@ -994,7 +943,7 @@ let db = Uni::open("./my-database").build().await?;
 // Explicit file:// URI
 let db = Uni::open("file:///var/data/uni").build().await?;
 
-// In-memory for testing
+// Temporary directory for testing
 let db = Uni::in_memory().build().await?;
 ```
 
@@ -1015,25 +964,22 @@ let db = Uni::open("az://my-container/graph-data").build().await?;
 
 **Credential Resolution:**
 
-Cloud credentials are resolved automatically using standard environment variables and configuration files:
+Cloud credentials come from the environment, a typed `CloudStorageConfig`, or raw storage options (highest precedence); see [Storage & Cloud Durability](../features/storage-cloud.md).
 
 | Provider | Environment Variables | Config Files |
 |----------|----------------------|--------------|
-| AWS S3 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL` | `~/.aws/credentials` |
+| AWS S3 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL(_S3)`, web identity, container credentials, `AWS_PROFILE` | `~/.aws/config` and `~/.aws/credentials` only for the profile `AWS_PROFILE` names (or `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`) |
 | GCS | `GOOGLE_APPLICATION_CREDENTIALS` | Application Default Credentials |
-| Azure | `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_SAS_TOKEN` | Azure CLI credentials |
+| Azure | `AZURE_STORAGE_ACCOUNT(_NAME)`, `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_SAS_TOKEN`, client-secret/federated/MSI keys | Azure CLI only with `azure_use_azure_cli=true` |
 
 ### Hybrid Mode (Local + Cloud)
 
-For optimal performance with cloud storage, use hybrid mode to maintain a local write cache:
+Hybrid mode keeps the WAL and ID allocator in a local directory and everything else in the object store:
 
 ```rust
-use uni_common::CloudStorageConfig;
-
-let cloud = CloudStorageConfig::s3_from_env("my-bucket");
-
-let db = Uni::open("./local-cache")
-    .remote_storage("s3://my-bucket/graph-data", cloud)
+// The remote side is configured from the environment.
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/graph-data")
     .build()
     .await?;
 ```
@@ -1066,11 +1012,12 @@ let db = Uni::open("./local-cache")
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Benefits:**
-- **Low-latency writes**: All mutations go to local WAL + L0 buffer
-- **Durable storage**: Data flushed to cloud storage on interval/threshold
-- **Cost efficiency**: Minimize cloud API calls through batching
-- **Crash recovery**: WAL provides local durability before cloud sync
+**Semantics:**
+- **Commits** go to the local WAL and L0, so they don't wait on the object store. They are on that host only until a flush (on `auto_flush_interval` / `auto_flush_threshold`) writes them to the object store. `shutdown()` flushes; a failed flush there is logged and leaves the commits in the WAL.
+- **One host at a time.** The store is held by the object-store lease and by an OS lock on the local directory.
+- **Crash recovery** replays the local WAL when the same directory reopens.
+- **WAL lineage.** The local WAL has an id (`wal_id.json`), and the store records the id of the WAL it follows (`catalog/wal_claim.json`, in the object store). A writable open records its own WAL's id before its first commit. An open whose WAL is not the recorded one, and which holds segments with mutations, belongs to a host that crashed or was dropped and whose store another host has opened since: it fails with `StaleWal` (or, with `set_aside_stale_wal()`, moves the segments to `wal_set_aside/`). Replaying such a WAL would apply commits made against an older state, with IDs the newer writer may have reused. A read-only open skips it. The claim also names the directory the WAL lives in (host, path, device and inode), so a copy of the directory is not taken for the original; a non-hybrid writable open of a store that has a claim re-claims it for its own shared WAL.
+- **Forks** keep their WAL in the object store (`R/storage/wal_forks/`), so they are not tied to the host.
 
 ---
 
@@ -1125,7 +1072,7 @@ use uni_db::UniConfig;
 let mut config = UniConfig::default();
 config.auto_flush_threshold = 10_000;
 config.auto_flush_interval = Some(Duration::from_secs(5));
-config.compaction.max_l1_runs = 4;
+config.compaction.max_l1_runs = 8;
 config.compaction.max_l1_size_bytes = 256 * 1024 * 1024;
 ```
 

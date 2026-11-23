@@ -17,13 +17,13 @@ Every entity in Uni has two primary identifiers:
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                    Internal (VID)                                    │   │
-│  │                    0x0001_0000_0000_002A                             │   │
+│  │                    0x0000_0000_0000_002A                             │   │
 │  │                    Dense id; labels resolved separately                │   │
 │  └───────────────────────────────┬─────────────────────────────────────┘   │
 │                                  │ associated provenance                       │
 │  ┌───────────────────────────────▼─────────────────────────────────────┐   │
 │  │                    Provenance (UniId)                                │   │
-│  │                    bafkreihdwdcefgh4dqkjv67uzcmw7o...               │   │
+│  │                    b4nq4gcu6cvvommstnin35vnaplbil...               │   │
 │  │                    Content-addressed, CRDT-compatible                │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
@@ -66,7 +66,7 @@ manipulation. For O(1) array indexing during query execution, remap a VID to a
 ### Usage
 
 ```rust
-use uni_db::core::Vid;
+use uni_db::Vid;
 
 let vid = Vid::new(42);       // a single u64 id
 assert_eq!(vid.as_u64(), 42);
@@ -86,7 +86,7 @@ storage, not from bits of the id.
 ### Usage
 
 ```rust
-use uni_db::core::Eid;
+use uni_db::Eid;
 
 let eid = Eid::new(21);
 assert_eq!(eid.as_u64(), 21);
@@ -116,7 +116,7 @@ The UniId is a content-addressed identifier for distributed systems and provenan
 │                                                                            │
 │   Multibase prefix: 'b' (base32 lowercase)                                 │
 │                                                                            │
-│   Example: bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku     │
+│   Example: b4nq4gcu6cvvommstnin35vnaplbilpt72taijlclnysgtlydo4wa           │
 │            ─                                                               │
 │            └── multibase prefix                                            │
 │             ────────────────────────────────────────────────────────       │
@@ -202,7 +202,7 @@ IDs are allocated internally by the `IdAllocator`. This is an internal component
 - Object-store backed for durability (S3, GCS, local filesystem)
 - Batch allocation for performance (configurable batch size)
 - Manifest-based persistence for recovery
-- Sequential within each label/type
+- One database-wide counter for VIDs and one for EIDs, shared by all labels and edge types
 - Never reuses IDs (even after deletes)
 
 ---
@@ -212,9 +212,11 @@ IDs are allocated internally by the `IdAllocator`. This is an internal component
 ### UID Index Structure
 
 ```
-indexes/uid_to_vid/{label}/index.lance
+indexes/uni_id_to_vid/{label}/index.lance
 ├── _uid: FixedSizeBinary(32)  // SHA3-256 hash bytes
-└── _vid: UInt64               // Corresponding VID
+├── _vid: UInt64               // Corresponding VID
+├── _uid_hex: Utf8             // hex-encoded _uid; BTree-indexed for lookups
+└── _version: UInt64           // version of the mapping; lookups take the highest
 ```
 
 ### Resolution Performance
@@ -237,7 +239,7 @@ indexes/uid_to_vid/{label}/index.lance
 | Internal operations | VID |
 | Cross-system sync | UniId |
 | Provenance tracking | UniId |
-| Array indexing | VID offset |
+| Array indexing | VID remapped to a `DenseIdx` |
 
 ---
 

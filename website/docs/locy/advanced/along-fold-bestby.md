@@ -7,11 +7,21 @@
 ```locy
 CREATE RULE shortest AS
 MATCH (a)-[e:EDGE]->(b)
+ALONG dist = e.weight
+YIELD KEY a, KEY b, dist
+
+CREATE RULE shortest AS
+MATCH (a)-[e:EDGE]->(mid)
+WHERE mid IS shortest TO b
 ALONG dist = prev.dist + e.weight
 YIELD KEY a, KEY b, dist
 ```
 
-Use `prev.<field>` to reference prior recursive step values.
+Use `prev.<field>` to reference prior recursive step values: it reads the field of
+the fact the clause's self-reference (`mid IS shortest TO b`) matched. `prev` is only
+valid in a clause that references its own rule (or one recursive with it), so a base
+clause sets the starting value; `prev` in a base clause is the compile error
+`PrevInBaseCase`.
 
 An ALONG rule yields **one fact per derivation path**. Two paths that reach the
 same key with equal values produce two rows that are identical on every column,
@@ -172,12 +182,14 @@ A rule can have multiple `FOLD` clauses to compute several aggregates simultaneo
 
 ```locy
 CREATE RULE exposure AS
-MATCH (a:Account)-[t:TRANSFER*]->(b:Account)
+MATCH (a:Account)-[t:TRANSFER]->(b:Account)
 WHERE b IS suspicious
 FOLD total = MSUM(t.amount),
-     path_count = MCOUNT()
-YIELD KEY a, total, path_count
+     transfer_count = MCOUNT(*)
+YIELD KEY a, total, transfer_count
 ```
+
+A row count is written `MCOUNT(*)` or `MCOUNT()` (`COUNT(*)` and `COUNT()` outside recursion work the same way); `MCOUNT(x)` counts the rows where `x` is not null.
 
 ## Post-FOLD WHERE (HAVING)
 
@@ -238,7 +250,22 @@ Every example above is non-recursive, where post-FOLD `WHERE` behaves exactly li
 
 There the filter is applied **once, to the converged answer** — not per iteration. The self-reference reads the rule's *unfiltered* folded value, so rows the threshold excludes can still derive further rows. They are correctly absent from the output *while having contributed to it*, which is what makes this hard to notice: the answer looks reasonable, and small acyclic examples often agree with the intended reading.
 
+Take a sanctioned entity `S` that owns 60% of `A` and 11% of `B`, where `B` owns all of `C`:
+
+```cypher
+CREATE (s:Entity {name: 'S', sanctioned: true}),
+       (a:Entity {name: 'A'}), (b:Entity {name: 'B'}), (c:Entity {name: 'C'}),
+       (s)-[:OWNS {pct: 60.0}]->(a),
+       (s)-[:OWNS {pct: 11.0}]->(b),
+       (b)-[:OWNS {pct: 100.0}]->(c)
+```
+
 ```locy
+// Seed: a sanctioned entity is blocked outright.
+CREATE RULE blocked AS
+MATCH (e:Entity) WHERE e.sanctioned = true
+YIELD KEY e, 100.0 AS agg
+
 // WRONG if you meant "an owner only counts once it reaches 50%".
 CREATE RULE blocked AS
 MATCH (o:Entity)-[s:OWNS]->(e:Entity)
@@ -248,9 +275,9 @@ WHERE agg >= 50.0           // filters the ANSWER, not the recursion
 YIELD KEY e, agg
 ```
 
-An entity holding 11% is filtered out of the result, yet still satisfies `o IS blocked` on the next hop, so everything *it* owns is derived regardless. Moving the aggregate into its own rule and filtering where it is consumed does not help — the filter still sits outside the recursion.
+This answers `{S, A, C}`. `B`, held at 11%, is filtered out of the result, yet still satisfies `o IS blocked` on the next hop, so everything *it* owns is derived regardless. Moving the aggregate into its own rule and filtering where it is consumed does not help — the filter still sits outside the recursion.
 
-The compiler warns with `HavingInRecursivePath`; check `result.warnings()`.
+The compiler warns with `HavingInRecursivePath`; it is a compile warning, so check `result.compile_warnings` (Rust: `result.compile_warnings()`), not `result.warnings`.
 
 **This is the intended behaviour when the filter selects what you see.** A child that the threshold removes from the answer must still have been visible to its parent while the fixpoint ran — that is what probabilistic rules need, and why this is a warning rather than an error. The two intents are spelled identically, so the compiler cannot tell them apart.
 
@@ -260,6 +287,10 @@ Write `REQUIRE` instead when the threshold *defines* the rule — an ownership o
 
 ```locy
 CREATE RULE blocked AS
+MATCH (e:Entity) WHERE e.sanctioned = true
+YIELD KEY e, 100.0 AS agg
+
+CREATE RULE blocked AS
 MATCH (o:Entity)-[s:OWNS]->(e:Entity)
 WHERE o IS blocked
 FOLD agg = MSUM(s.pct)
@@ -267,11 +298,11 @@ REQUIRE agg >= 50.0         // constrains the RECURSION
 YIELD KEY e, agg
 ```
 
-On the graph above this answers `{A}`: the owner at 11% is excluded, so nothing downstream of it is derived. The same rule with `WHERE` answers `{A, C}`.
+On the graph above this answers `{S, A}`: `B`, held at 11%, is excluded, so nothing downstream of it is derived. The same rule with `WHERE` answers `{S, A, C}`.
 
 Both clauses may appear on one rule, `REQUIRE` first — constrain the derivation, then filter what is shown.
 
-**`REQUIRE` must be one-way.** In a recursive rule it is rejected at compile time unless the comparison can only ever turn from false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a non-decreasing fold (`MSUM` over non-negative values, `MMAX`, `MCOUNT`, `MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MMIN`, `MPROD`). Equality is never admissible. The reverse pairings would let a fact be derived and then withdrawn, which the fixpoint reads as progress rather than oscillation, so the rule would run to the iteration limit instead of converging.
+**`REQUIRE` must be one-way.** In a recursive rule it is rejected at compile time unless the comparison can only ever turn from false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a non-decreasing fold (`MSUM` over non-negative values, `MAX`/`MMAX`, `COUNT`/`MCOUNT`, `MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MIN`/`MMIN`, `MPROD`). The direction is the one the aggregate declares in the registry, so a plugin aggregate that declares one is checked the same way, and one that declares none is rejected. Equality is never admissible. The reverse pairings would let a fact be derived and then withdrawn, which the fixpoint reads as progress rather than oscillation, so the rule would run to the iteration limit instead of converging.
 
 Outside recursion the direction is not policed and `REQUIRE` means exactly what the post-FOLD `WHERE` means — there is one pass, so nothing can flip. That makes it safe to reach for from the start: a rule keeps the meaning its author wrote if a self-reference is added later.
 
@@ -282,6 +313,13 @@ Outside recursion the direction is not policed and `REQUIRE` means exactly what 
 ```locy
 CREATE RULE cheapest AS
 MATCH (a)-[e:EDGE]->(b)
+ALONG cost = e.weight
+BEST BY cost ASC
+YIELD KEY a, KEY b, cost
+
+CREATE RULE cheapest AS
+MATCH (a)-[e:EDGE]->(mid)
+WHERE mid IS cheapest TO b
 ALONG cost = prev.cost + e.weight
 BEST BY cost ASC
 YIELD KEY a, KEY b, cost
@@ -304,7 +342,13 @@ The `similar_to()` expression function works in ALONG accumulators and BEST BY s
 ```locy
 CREATE RULE semantic_path AS
 MATCH (a:Document)-[:LINKS_TO]->(b:Document)
-ALONG relevance = prev.relevance * similar_to(b.embedding, $query)
+ALONG relevance = similar_to(b.embedding, $query)
+YIELD KEY a, KEY b, relevance
+
+CREATE RULE semantic_path AS
+MATCH (a:Document)-[:LINKS_TO]->(m:Document)
+WHERE m IS semantic_path TO b
+ALONG relevance = prev.relevance * similar_to(m.embedding, $query)
 YIELD KEY a, KEY b, relevance
 ```
 
@@ -313,7 +357,14 @@ YIELD KEY a, KEY b, relevance
 ```locy
 CREATE RULE best_match AS
 MATCH (a:Topic)-[:RELATED]->(b:Topic)
-ALONG score = prev.score + similar_to(b.embedding, $query)
+ALONG score = similar_to(b.embedding, $query)
+BEST BY score DESC
+YIELD KEY a, KEY b, score
+
+CREATE RULE best_match AS
+MATCH (a:Topic)-[:RELATED]->(m:Topic)
+WHERE m IS best_match TO b
+ALONG score = prev.score + similar_to(m.embedding, $query)
 BEST BY score DESC
 YIELD KEY a, KEY b, score
 ```

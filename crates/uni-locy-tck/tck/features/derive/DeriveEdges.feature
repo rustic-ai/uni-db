@@ -85,6 +85,26 @@ Feature: DERIVE Clause Parsing
     Then evaluation should succeed
     And the graph should contain 1 nodes with label 'Country'
 
+  Scenario: DERIVE NEW stores the new node's properties
+    Given having executed:
+      """
+      CREATE (:City {name: 'Paris', country: 'France'})
+      CREATE (:City {name: 'Rome', country: 'Italy'})
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE categorize AS
+        MATCH (c:City)
+        DERIVE (NEW x:Country {name: c.country, capital: c.name})<-[:IN]-(c)
+      DERIVE categorize
+      MATCH (x:Country)<-[:IN]-(c:City) RETURN x.name AS country, x.capital AS capital
+      """
+    Then evaluation should succeed
+    And the graph should contain 2 nodes with label 'Country'
+    And the command result 1 should be a Cypher with at least 2 rows
+    And the command result 1 should be a Cypher containing row where country = 'France'
+    And the command result 1 should be a Cypher containing row where capital = 'Rome'
+
   Scenario: DERIVE idempotency — re-derive does not duplicate
     Given having executed:
       """

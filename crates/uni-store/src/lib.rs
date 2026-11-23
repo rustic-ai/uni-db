@@ -5,10 +5,13 @@ pub mod backend;
 pub mod cloud;
 pub mod compaction;
 pub mod fork;
+pub mod lease;
+pub mod location;
 pub mod runtime;
 pub mod storage;
 pub mod store_utils;
 pub mod snapshot {
+    pub mod backup;
     pub mod manager;
     pub mod restore;
 }

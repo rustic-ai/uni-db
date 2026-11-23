@@ -121,6 +121,15 @@ impl<'a> ForkBuilder<'a> {
                     }
                 }
             }
+            Err(UniError::ForkNotFound { .. }) if parent.db.is_read_only() => {
+                // Creating a fork writes the store (the registry, branches, an
+                // allocator), which a read-only handle never does: the
+                // writer holds the store, and a registry write from here
+                // would make it fence itself.
+                return Err(UniError::ReadOnly {
+                    operation: format!("create fork '{}' from a read-only handle", self.name),
+                });
+            }
             Err(UniError::ForkNotFound { .. }) => {
                 // Resolve effective TTL: builder override > config default > None.
                 let effective_ttl = self.ttl.or(parent.db.config.fork_default_ttl);
@@ -445,6 +454,11 @@ async fn create_fork_2pc(
     // inherited (base_paths) rows. Without this the fork starts at version
     // 0 and in-tx reads filter out every inherited row.
     info.fork_point_version_hwm = fork_point.version_hwm;
+    // The id floors the fork's own allocator starts at: ids below them on
+    // the fork were inherited, which is what lets the diff pair an edited
+    // row with its ancestor's by id.
+    info.fork_point_vid_hwm = fork_point.vid_hwm;
+    info.fork_point_eid_hwm = fork_point.eid_hwm;
     // Phase 3: record the parent fork id when this is a nested fork.
     // `parent_fork_id == None` ⇒ parent is primary.
     info.parent_fork_id = parent.fork_scope().map(|s| s.fork_id());

@@ -4,11 +4,11 @@
 
 # Python API — Symbol Reference
 
-Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 5.3.0.
+Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 6.0.0.
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**199 classes.**
+**203 classes.**
 
 ---
 
@@ -609,10 +609,12 @@ Async builder for creating and configuring an AsyncUni instance.
 | `xervo_catalog_from_file(path: str) -> AsyncUniBuilder` | — |
 | `xervo_runtime(runtime: ModelRuntime) -> AsyncUniBuilder` | — |
 | `cloud_config(config: dict[str, Any]) -> AsyncUniBuilder` | — |
+| `storage_options(options: dict[str, str]) -> AsyncUniBuilder` | — |
 | `config(config: dict[str, Any]) -> AsyncUniBuilder` | — |
 | `batch_size(size: int) -> AsyncUniBuilder` | — |
 | `wal_enabled(enabled: bool) -> AsyncUniBuilder` | — |
 | `read_only() -> AsyncUniBuilder` | — |
+| `set_aside_stale_wal() -> AsyncUniBuilder` | — |
 | `skip_invalid_locy_rules(skip: bool) -> AsyncUniBuilder` | — |
 | `write_lease(lease: WriteLease) -> AsyncUniBuilder` | — |
 | `strict_schema(enabled: bool) -> AsyncUniBuilder` | — |
@@ -1077,15 +1079,18 @@ The edge side of a `ForkDiff`.
 
 ## `EdgePropertyChange`
 
-An edge's property changes (paired by src_uid, dst_uid, edge_type).
+An edge's property changes, paired by inherited EID under shared lineage.
 
 **Attributes**
 
 | Name | Type |
 |---|---|
 | `edge_type` | `str` |
+| `eid` | `int` |
 | `src_uid` | `str` |
 | `dst_uid` | `str` |
+| `after_src_uid` | `str` |
+| `after_dst_uid` | `str` |
 | `changes` | `list[PropertyChange]` |
 
 ---
@@ -1167,7 +1172,7 @@ Result from a Locy EXPLAIN command.
 
 ## `ExplainOutput`
 
-Typed output from ``session.explain()``.
+Typed output from ``session.query_with(cypher).explain()``.
 
 **Attributes**
 
@@ -1688,7 +1693,7 @@ A fluent binder for executing a prepared Cypher query.
 
 ## `ProfileOutput`
 
-Typed output from ``session.profile()``.
+Typed output from ``session.query_with(cypher).profile()``.
 
 **Attributes**
 
@@ -1750,7 +1755,6 @@ Outcome counts from `Uni.promote_from_fork`.
 | `vertices_skipped_no_ext_id_for_delete` | `int` |
 | `vertices_conflicting` | `int` |
 | `vertices_skipped_uid_conflict` | `int` |
-| `vertices_skipped_no_uid` | `int` |
 | `edges_inserted` | `int` |
 | `edges_skipped` | `int` |
 | `edges_skipped_duplicate` | `int` |
@@ -2406,10 +2410,12 @@ Builder for creating or opening a Uni database.
 | `xervo_catalog_from_file(path: str) -> UniBuilder` | — |
 | `xervo_runtime(runtime: ModelRuntime) -> UniBuilder` | — |
 | `cloud_config(config: dict[str, Any]) -> UniBuilder` | — |
+| `storage_options(options: dict[str, str]) -> UniBuilder` | — |
 | `config(config: dict[str, Any]) -> UniBuilder` | — |
 | `batch_size(size: int) -> UniBuilder` | — |
 | `wal_enabled(enabled: bool) -> UniBuilder` | — |
 | `read_only() -> UniBuilder` | — |
+| `set_aside_stale_wal() -> UniBuilder` | — |
 | `skip_invalid_locy_rules(skip: bool) -> UniBuilder` | — |
 | `write_lease(lease: WriteLease) -> UniBuilder` | — |
 | `strict_schema(enabled: bool) -> UniBuilder` | — |
@@ -2473,7 +2479,7 @@ Constraint violation.
 
 ## `UniDatabaseLockedError` — extends `UniError`
 
-Database is locked by another process.
+Kept for compatibility; nothing raises it (see ``UniStoreLockedError``).
 
 ---
 
@@ -2627,6 +2633,19 @@ Fork with the given name does not exist.
 | Name | Type |
 |---|---|
 | `blockers` | `list[str]` |
+
+---
+
+## `UniForkTaggedError` — extends `UniError`
+
+`drop_fork` / `drop_fork_cascade` refused because a fork has tags.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `name` | `str` |
+| `tags` | `list[str]` |
 
 ---
 
@@ -2836,9 +2855,36 @@ Derived facts are stale relative to the current database version.
 
 ---
 
+## `UniStaleWalError` — extends `UniError`
+
+The hybrid WAL is an earlier writer's; ``set_aside_stale_wal()`` moves it.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `store` | `str` |
+| `wal` | `str` |
+| `segments` | `int` |
+
+---
+
 ## `UniStorageError` — extends `UniError`
 
 Storage layer error.
+
+---
+
+## `UniStoreLockedError` — extends `UniError`
+
+Another handle holds the store open for writing; ``holder`` names it.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `store` | `str` |
+| `holder` | `str` |
 
 ---
 
@@ -2910,6 +2956,18 @@ Writes are stopped at the write throttle's hard limit with compaction disabled.
 
 ---
 
+## `UniWriterFencedError` — extends `UniError`
+
+This handle may no longer write (lease lost, closed, read-only).
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `reason` | `str` |
+
+---
+
 ## `Value`
 
 A tagged Uni value — opt-in wrapper for explicit type discrimination.
@@ -2957,7 +3015,7 @@ The vertex side of a `ForkDiff`.
 
 ## `VertexPropertyChange`
 
-A vertex's property changes (paired by UID).
+A vertex's property changes.
 
 **Attributes**
 
@@ -2965,6 +3023,9 @@ A vertex's property changes (paired by UID).
 |---|---|
 | `label` | `str` |
 | `uid` | `str` |
+| `after_uid` | `str` |
+| `ext_id` | `str | None` |
+| `vid` | `int | None` |
 | `changes` | `list[PropertyChange]` |
 
 ---
@@ -3001,6 +3062,7 @@ Write lease configuration for multi-agent coordination.
 | Signature | Description |
 |---|---|
 | `LOCAL() -> WriteLease` *(static)* | — |
+| `UNENFORCED() -> WriteLease` *(static)* | — |
 | `DYNAMODB(table: str) -> WriteLease` *(static)* | — |
 
 ---

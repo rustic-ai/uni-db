@@ -85,16 +85,32 @@ db.schema()
 
 ## Step 3: Insert Sparse Vectors
 
-A sparse vector value is a `{indices, values}` map of two **equal-length** lists: `indices` are the term ids (each `< dimensions`) and `values` are their weights.
+A sparse vector is two **equal-length** lists: `indices` are the term ids (each `< dimensions`) and `values` are their weights. Write it as an `{indices, values}` map literal, or pass it as a sparse vector parameter:
 
 ```cypher
 CREATE (:Doc {
     content: 'graph databases for semantic retrieval',
     emb: {indices: [42, 1337, 9001], values: [0.81, 0.44, 0.62]}
 })
+
+CREATE (:Doc {
+    content: 'graph databases for semantic retrieval',
+    emb: $emb
+})
 ```
 
-The two lists are positional: term `42` has weight `0.81`, term `1337` has weight `0.44`, and so on. Term ids do not need to be sorted, but they must be unique and within `[0, dimensions)`.
+Either form is stored as the same sparse vector and is found by `uni.sparse.query` and `uni.search`. A map that is not exactly `{indices: [...], values: [...]}` with lists of equal length, non-negative integer ids and numeric weights is refused with a `TypeError`.
+
+```python
+tx = session.tx()
+tx.execute(
+    "CREATE (:Doc {content: 'graph databases for semantic retrieval', emb: $emb})",
+    {"emb": uni_db.SparseVector([42, 1337, 9001], [0.81, 0.44, 0.62])},
+)
+tx.commit()
+```
+
+The two lists are positional: term `42` has weight `0.81`, term `1337` has weight `0.44`, and so on. Term ids do not need to be sorted (they are sorted on write, and the weights of a repeated id are summed), but they must be within `[0, dimensions)`.
 
 ---
 
@@ -137,7 +153,7 @@ YIELD vid, score, rerank_score
 |---|---|---|
 | `vid` | Integer | Vertex id of the matched document |
 | `score` | Float | The sparse **dot product** of query against document weights — **higher = more similar** |
-| `rerank_score` | Float | Reranker score when a reranker is configured; `null` otherwise |
+| `rerank_score` | Float | Equal to `score` (`uni.sparse.query` does not apply a reranker) |
 
 !!! note "`score` is the dot product"
     Unlike cosine-based dense search, `uni.sparse.query` returns the raw **dot product** of the query weights against the stored document weights. Higher is more similar. There is no separate `distance` or `sparse_score` column — the relevance value is `score`.

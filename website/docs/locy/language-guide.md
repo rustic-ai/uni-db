@@ -135,7 +135,7 @@ YIELD KEY c, risk
 CREATE RULE vendor_reliability AS
 MATCH (v:Vendor)-[:SUPPLIES]->(c:Component)
 WHERE c IS failure_risk
-FOLD reliability = MPROD(1.0 - failure_risk.risk)
+FOLD reliability = MPROD(1.0 - risk)
 YIELD KEY v, reliability
 ```
 
@@ -157,7 +157,7 @@ CREATE RULE at_risk AS
   YIELD KEY a, failure_likelihood(a.score) AS risk
 ```
 
-Register a Python callable (or Rust `NeuralClassifier` impl) under the model name in `LocyConfig.classifier_registry` before running. Calibrate against held-out labels with `CALIBRATE failure_likelihood ON MATCH (a:Asset) TARGET a.actually_failed METHOD platt_scaling`; validate with `VALIDATE failure_likelihood ON MATCH (a:Asset) TARGET a.actually_failed METRICS brier_score, auc`. `EXPLAIN` traces every classifier invocation with raw and calibrated probabilities, a confidence band, and the feature dict that produced the score.
+Register a Python callable (or Rust `NeuralClassifier` impl) under the model name in `LocyConfig.classifier_registry` before running. Calibrate against held-out labels with `CALIBRATE failure_likelihood ON MATCH (a:Asset) TARGET a.actually_failed METHOD platt_scaling`; validate the rule's output with `VALIDATE at_risk ON MATCH (a:Asset) TARGET a.actually_failed METRICS brier_score, auc`. `EXPLAIN` traces every classifier invocation with raw and calibrated probabilities, a confidence band, and the feature dict that produced the score.
 
 See [Neural Predicates](advanced/neural-predicates.md) for the full reference (every FEATURES source, every calibration method, every warning).
 
@@ -218,10 +218,8 @@ ASSUME {
 }
 ```
 
-The body may hold rules, `QUERY`, Cypher, `DERIVE` and nested `ASSUME`.
-`ABDUCE` and `EXPLAIN RULE` in an ASSUME body are compile errors: run them at
-the top level, or inside a transaction you roll back (`tx()` or
-`session.scratch()`). See
+The body may hold rules, `QUERY`, Cypher, `DERIVE`, `ABDUCE`, `EXPLAIN RULE`
+and nested `ASSUME`; each command runs against the hypothetical state. See
 [DERIVE, ASSUME, ABDUCE](advanced/derive-assume-abduce.md#assume).
 
 ## Abductive Reasoning
@@ -238,10 +236,27 @@ EXPLAIN RULE reachable WHERE a.name = 'Alice'
 
 ## Modules
 
-<!-- doctest: skip -->
-```cypher
+`MODULE` names the program's namespace: its rules are qualified with it, and a
+`QUERY` (or `IS` reference) may use the short or the fully qualified name.
+
+```locy
 MODULE acme.security
-USE acme.common
+CREATE RULE link AS MATCH (a:Host)-[:CONNECTS]->(b:Host) YIELD KEY a, KEY b
+QUERY acme.security.link RETURN b.name AS target
 ```
+
+`USE` imports the rules of a module registered with `rules().register`, so a
+program can name them by their short names. `USE acme.security` imports every
+rule of the module; `USE acme.security { link }` only the listed ones:
+
+```locy
+USE acme.security { link }
+CREATE RULE exposed AS MATCH (a:Host)-[:CONNECTS]->(b:Host) WHERE (a, b) IS link YIELD KEY b
+QUERY exposed RETURN b.name AS name
+```
+
+A module or rule that is not registered is a compile error (`ModuleNotFound`,
+`ImportNotFound`). A program sees the modules registered on the database, plus
+those registered on its session.
 
 For advanced semantics of `ALONG`, `FOLD`, `BEST BY`, and mutation reasoning, continue to the advanced pages.

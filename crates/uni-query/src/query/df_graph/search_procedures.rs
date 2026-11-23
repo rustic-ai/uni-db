@@ -688,14 +688,18 @@ pub(crate) async fn sparse_rerank(
         let Some(props) = props_map.get(vid) else {
             continue;
         };
-        let score = match props.get(property) {
-            Some(uni_common::Value::SparseVector { indices, values }) => {
-                match uni_sparse_vector::SparseVector::new(indices.clone(), values.clone()) {
+        // The native value or the `{indices, values}` map form a sparse vector
+        // can be stored as; `from_pairs` canonicalizes the latter.
+        let score = match props.get(property).and_then(Value::sparse_parts) {
+            Some((indices, values)) => {
+                match uni_sparse_vector::SparseVector::from_pairs(
+                    indices.into_iter().zip(values).collect(),
+                ) {
                     Ok(doc) => uni_sparse_vector::ops::sparse_dot(scoring_query, &doc),
                     Err(_) => 0.0,
                 }
             }
-            _ => 0.0,
+            None => 0.0,
         };
         // A zero score means no query-term overlap — not a sparse match. Dropping
         // it keeps the L0 brute-force path and the flushed-index path (which only

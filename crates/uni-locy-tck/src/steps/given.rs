@@ -250,3 +250,41 @@ fn register_counting_mock(world: &mut LocyWorld, name: String, value: f64) {
     world.classifier_registry.insert(name.clone(), classifier);
     world.classifier_call_counts.insert(name, counter);
 }
+
+/// Register a mock that records every input it receives and returns its
+/// Float feature `feature_name`, clamped to `[0, 1]` (0 when the feature is
+/// missing or not a number). Lets a scenario assert what the runtime passed
+/// the classifier.
+#[given(
+    regex = r#"^a registered recording mock classifier ['"](.+)['"] echoing Float feature ['"](.+)['"]$"#
+)]
+fn register_recording_mock(world: &mut LocyWorld, name: String, feature_name: String) {
+    let seen: Arc<std::sync::Mutex<Vec<uni_locy::ClassifyInput>>> = Arc::default();
+    let seen_ref = Arc::clone(&seen);
+    let classifier: Arc<dyn NeuralClassifier> =
+        Arc::new(MockClassifier::new("mock/recording", move |inp| {
+            seen_ref.lock().expect("recording lock").push(inp.clone());
+            match inp.features.get(&feature_name) {
+                Some(FeatureValue::Float(v)) => v.clamp(0.0, 1.0),
+                Some(FeatureValue::Int(v)) => (*v as f64).clamp(0.0, 1.0),
+                _ => 0.0,
+            }
+        }));
+    world.classifier_registry.insert(name.clone(), classifier);
+    world.classifier_inputs.insert(name, seen);
+}
+
+/// Register the docstring's Locy program in the database-level rule registry,
+/// as `db.rules().register(..)` does.
+#[given("the following Locy rules are registered:")]
+async fn register_locy_rules(world: &mut LocyWorld, step: &cucumber::gherkin::Step) {
+    let program = step
+        .docstring()
+        .expect("Expected a docstring with the Locy rules to register");
+    world
+        .db()
+        .rules()
+        .register(program)
+        .await
+        .unwrap_or_else(|e| panic!("registering the rules failed: {e}\nProgram:\n{program}"));
+}

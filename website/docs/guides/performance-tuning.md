@@ -361,12 +361,12 @@ let config = UniConfig {
 
 ### Compaction
 
-Compaction is fully automatic. A background loop runs every `check_interval` (default 30s) and triggers compaction when any threshold is exceeded:
+Compaction is fully automatic. A background loop runs every `check_interval` (default 10s) and triggers compaction when any threshold is exceeded:
 
 | Trigger | Condition | Default |
 |---------|-----------|---------|
-| **ByRunCount** | L1 delta tables with data ≥ threshold | `max_l1_runs = 4` |
-| **BySize** | Aggregate L1 size ≥ threshold | `max_l1_size_bytes = 256 MB` |
+| **ByRunCount** | Uncompacted flush generations ≥ threshold | `max_l1_runs = 8` |
+| **BySize** | Estimated L1 size (rows × entry estimate) ≥ threshold | `max_l1_size_bytes = 256 MB` |
 | **ByAge** | Oldest L1 run age ≥ threshold | `max_l1_age = 1 hour` |
 
 **What runs during compaction:**
@@ -382,19 +382,19 @@ use uni_db::UniConfig;
 
 let mut config = UniConfig::default();
 config.compaction.enabled = true;                          // Enable background compaction (default: true)
-config.compaction.max_l1_runs = 4;                         // Trigger after 4 L1 runs (default: 4)
+config.compaction.max_l1_runs = 8;                         // Trigger after 8 flush generations (default: 8)
 config.compaction.max_l1_size_bytes = 256 * 1024 * 1024;   // Trigger at 256 MB (default: 256 MB)
 config.compaction.max_l1_age = Duration::from_secs(3600);  // Trigger after 1 hour (default: 1 hour)
-config.compaction.check_interval = Duration::from_secs(30);// Check every 30s (default: 30s)
+config.compaction.check_interval = Duration::from_secs(10);// Check every 10s (default: 10s)
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Enable background compaction |
-| `max_l1_runs` | `4` | Max L1 delta run count before triggering |
+| `max_l1_runs` | `8` | Max uncompacted flush generations before triggering |
 | `max_l1_size_bytes` | `256 MB` | Max aggregate L1 size before triggering |
 | `max_l1_age` | `1 hour` | Max age of oldest L1 run before triggering |
-| `check_interval` | `30s` | How often the background loop checks |
+| `check_interval` | `10s` | How often the background loop checks |
 
 #### Manual Compaction (Optional)
 
@@ -414,9 +414,9 @@ uni query "CALL uni.admin.compact() YIELD tables_optimized, fragments_removed, d
 ```
 
 ```rust
-// Label/edge-specific compaction via Rust API
-db.compact_label("Paper").await?;
-db.compact_edge_type("CITES").await?;
+// Label/edge-specific compaction via Rust API (the name may be a label or an edge type)
+db.compaction().compact("Paper").await?;
+db.compaction().compact("CITES").await?;
 ```
 
 ---
@@ -680,8 +680,7 @@ Detailed per-component memory stats are not exposed yet. Use OS-level tools (e.g
 Uni supports multiple cloud storage backends with automatic credential resolution:
 
 ```rust
-use uni_db::Uni;
-use uni_common::CloudStorageConfig;
+use uni_db::{CloudStorageConfig, Uni};
 
 // Amazon S3
 let cfg = CloudStorageConfig::S3 {
@@ -694,8 +693,9 @@ let cfg = CloudStorageConfig::S3 {
     virtual_hosted_style: true,
 };
 
-let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/graph-data", cfg)
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/graph-data")
+    .cloud_storage(cfg)
     .build()
     .await?;
 
@@ -706,8 +706,9 @@ let cfg = CloudStorageConfig::Gcs {
     service_account_key: None,
 };
 
-let db = Uni::open("./local-meta")
-    .remote_storage("gs://my-gcs-bucket/graph-data", cfg)
+let db = Uni::open("./local-wal")
+    .hybrid("gs://my-gcs-bucket/graph-data")
+    .cloud_storage(cfg)
     .build()
     .await?;
 
@@ -722,15 +723,16 @@ let cfg = CloudStorageConfig::S3 {
     virtual_hosted_style: false,
 };
 
-let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/graph-data", cfg)
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/graph-data")
+    .cloud_storage(cfg)
     .build()
     .await?;
 ```
 
-### Hybrid Mode for Optimal Performance
+### Hybrid Mode for Write Latency
 
-Use hybrid mode (local + cloud) for best write latency with cloud durability:
+Hybrid mode keeps commits in a local WAL, so they don't wait on the object store. They reach the object store at the next flush:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -752,6 +754,7 @@ Use hybrid mode (local + cloud) for best write latency with cloud durability:
 - Write latency matters (< 1ms)
 - Data must ultimately reside in cloud storage
 - You have local SSD for the write cache
+- One host writes the store at a time, and losing that host's disk may cost the commits since the last flush. The flush interval bounds that window; a successful `shutdown()` closes it.
 
 ### Auto-Flush Tuning for Cloud
 
@@ -765,6 +768,7 @@ Tune L1 flush frequency for request cost and checkpoint latency. With WAL enable
 | Local SSD | 1-5s | No request charge; reduce L0 backlog |
 
 ```rust
+use std::time::Duration;
 use uni_db::{Uni, UniConfig};
 
 // Cost-optimized for cloud (fewer API calls)
@@ -773,8 +777,8 @@ config.auto_flush_threshold = 50_000;
 config.auto_flush_interval = Some(Duration::from_secs(30));
 config.auto_flush_min_mutations = 100;
 
-let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/data", CloudStorageConfig::s3_from_env("my-bucket"))
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/data") // configured from the environment
     .config(config)
     .build()
     .await?;

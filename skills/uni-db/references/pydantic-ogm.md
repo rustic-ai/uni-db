@@ -118,7 +118,7 @@ def Field(
 
 | Parameter | Type | Description |
 |---|---|---|
-| `index` | `"btree" \| "hash" \| "fulltext" \| "vector"` | Index type to create |
+| `index` | `"btree" \| "hash" \| "fulltext" \| "vector" \| "sparse"` | Index type to create |
 | `unique` | `bool` | Unique constraint (recorded, not yet enforced) |
 | `tokenizer` | `str` | Tokenizer for fulltext index |
 | `metric` | `"l2" \| "cosine" \| "dot"` | Distance metric for vector index |
@@ -127,7 +127,7 @@ def Field(
 ### Type Aliases
 
 ```python
-IndexType  = Literal["btree", "hash", "fulltext", "vector"]
+IndexType  = Literal["btree", "hash", "fulltext", "vector", "sparse"]
 Direction  = Literal["outgoing", "incoming", "both"]
 VectorMetric = Literal["l2", "cosine", "dot"]
 ```
@@ -187,7 +187,7 @@ class Vector(Generic[N]):
 ```python
 class Document(UniNode):
     embedding: Vector[1536]                            # Required, auto-indexed
-    summary_vec: Vector[768] | None = None             # Optional
+    summary_vec: Vector[768] | None = None             # Optional (nullable vector column)
     custom_vec: Vector[384] = Field(metric="cosine")   # Custom metric
 ```
 
@@ -283,11 +283,17 @@ Same methods; `add` and `create_edge` are sync (staging only); `commit` and `rol
 
 ```python
 with session.transaction() as tx:
-    tx.add(Person(name="Alice"))
-    tx.add(Person(name="Bob"))
-    tx.create_edge(alice, "FRIEND_OF", bob)
+    alice, bob = Person(name="Alice"), Person(name="Bob")
+    tx.add(alice)
+    tx.add(bob)
+    tx.create_edge(alice, "FRIEND_OF", bob)  # nodes added to this tx are accepted
 # auto-commits on exit; rolls back on exception
 ```
+
+Commit creates the added nodes before the edges, so `create_edge` accepts a node that is
+persisted or `add`-ed to the same transaction; any other unsaved node raises `NotPersisted`.
+A failed commit rolls back and returns the nodes it created to their unsaved state (no
+`vid`, removed from the identity map).
 
 ---
 
@@ -506,7 +512,8 @@ class User(UniNode):
 | `dict` | `json` | |
 | `list[T]` | `list:T` | Typed list |
 | `Vector[N]` | `vector:N` | N-dimensional vector |
-| `T \| None` | `T` + nullable | Optional field |
+| `SparseVector[N]` | `sparse_vector:N` | Learned-sparse vector; saved as `uni_db.SparseVector` |
+| `T \| None` | `T` + nullable | Optional field (`Vector[N] \| None` is a nullable vector column) |
 
 Utilities: `python_type_to_uni(type_hint, *, nullable=False) -> (str, bool)`, `uni_to_python_type(str) -> type`, `get_vector_dimensions(type_hint) -> int|None`, `python_to_db_value(value, type_hint) -> Any`, `db_to_python_value(value, type_hint) -> Any`.
 
@@ -620,7 +627,7 @@ All inherit from `UniPydanticError`.
 | `TypeMappingError` | Unsupported Python type in model field |
 | `ValidationError` | Model validation failure |
 | `NotRegisteredError` | Model not registered with `session.register()` |
-| `NotPersisted` | `refresh()` or edge op on entity without VID |
+| `NotPersisted` | `refresh()` or edge op on entity without VID (a node `add`-ed to the same transaction is accepted by `tx.create_edge`) |
 | `NotTrackedError` | Operating on entity not tracked by session |
 | `TransactionError` | Transaction state violation (double commit, etc.) |
 | `QueryError` | Query failure or `one()` with != 1 result |

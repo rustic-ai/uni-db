@@ -12,14 +12,14 @@ Quality teams trace batch genealogy through MES batch records, often across mult
 
 ## With Uni
 
-The notebook defines recursive campaign lineage traversal: starting from the deviated batch, Uni traces every downstream batch through campaign genealogy (`NEXT_BATCH`) paths, carrying risk along each path with `ALONG`. Risk accumulates through the genealogy — batches farther from the deviation accrue per-edge carry risk on top of process risk, so distance from the deviation drives the score. Intervention selection is cost-optimized with a dual priority via `BEST BY`: minimize residual risk first, then minimize cost among equally safe options. A counterfactual `ASSUME` scenario and an `ABDUCE` minimal-change search test containment, and `EXPLAIN RULE` produces a derivation trace for any conclusion as ready-made evidence for regulatory submission. The model is a handful of declarative Locy rules covering lineage, risk propagation, intervention costing, and optimal selection.
+The notebook defines recursive campaign lineage traversal: starting from the deviated batch, Uni traces every downstream batch through campaign genealogy (`NEXT_BATCH`) paths, carrying risk along each path with `ALONG`. Risk accumulates through the genealogy — batches farther from the deviation accrue per-edge carry risk on top of process risk, so distance from the deviation drives the score. Intervention selection is cost-optimized with a dual priority via `BEST BY`: minimize residual risk first, then minimize cost among equally safe options. A counterfactual `ASSUME` scenario and validated single-edit candidates from `ABDUCE` test containment, and `EXPLAIN RULE` produces a derivation trace for any conclusion as ready-made evidence for regulatory submission. The model is a handful of declarative Locy rules covering lineage, risk propagation, intervention costing, and optimal selection.
 
 ## What You'll See
 
 - Complete batch genealogy from the deviated source through every downstream campaign batch, with no manual tracing
 - Risk-ranked impacted batches with scores derived from genealogy distance (hops) and per-edge carry risk
 - Optimal intervention plan: quarantine, retest, or release for each batch, selected risk-first then cost-second
-- Counterfactual containment (`ASSUME`) and minimal-change (`ABDUCE`) analysis, plus a derivation trace (`EXPLAIN RULE`) for inclusion in regulatory deviation reports
+- Counterfactual containment (`ASSUME`) and single-edit (`ABDUCE`) analysis, plus a derivation trace (`EXPLAIN RULE`) for inclusion in regulatory deviation reports
 
 ## Why It Matters
 

@@ -1,6 +1,6 @@
 # Uni Rust API Reference
 
-**Crate:** `uni-db` | **Target:** current 5.3.0 source; selected API signatures below
+**Crate:** `uni-db` | **Target:** current 6.0.0 source; selected API signatures below
 
 ---
 
@@ -75,8 +75,13 @@ impl UniBuilder {
     pub fn config(mut self, config: UniConfig) -> Self;
     pub fn schema_file(mut self, path: impl AsRef<Path>) -> Self;
     pub fn xervo_catalog(mut self, catalog: Vec<ModelAliasSpec>) -> Self;
-    pub fn remote_storage(mut self, remote_url: &str, config: CloudStorageConfig) -> Self;
+    pub fn cloud_storage(mut self, config: CloudStorageConfig) -> Self;    // remote-only or hybrid
+    pub fn storage_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self;
+    pub fn storage_options<K, V>(mut self, options: impl IntoIterator<Item = (K, V)>) -> Self;
+    pub fn hybrid(mut self, remote_url: &str) -> Self;        // WAL + IDs local, data remote
+    #[deprecated] pub fn remote_storage(self, remote_url: &str, config: CloudStorageConfig) -> Self;
     pub fn read_only(mut self) -> Self;
+    pub fn set_aside_stale_wal(mut self) -> Self; // hybrid: move an earlier writer's WAL aside instead of UniError::StaleWal
     pub fn write_lease(mut self, lease: WriteLease) -> Self;
     pub async fn build(self) -> Result<Uni>;
     pub fn build_sync(self) -> Result<Uni>;       // blocking, creates own runtime
@@ -160,9 +165,8 @@ impl Session {
     pub async fn prepare(&self, cypher: &str) -> Result<PreparedQuery>;
     pub async fn prepare_locy(&self, program: &str) -> Result<PreparedLocy>;
 
-    // Hooks (add_hook, remove_hook, list_hooks, clear_hooks)
-    pub fn add_hook(&mut self, name: impl Into<String>, hook: impl SessionHook + 'static);
-    pub fn remove_hook(&mut self, name: &str) -> bool;
+    // Hooks: add_hook / remove_hook / list_hooks / clear_hooks are deprecated.
+    // Install hooks with db.add_plugin(BuiltinHookPlugin::new(name, Arc::new(hook))).
 
     // Commit notifications
     pub fn watch(&self) -> CommitStream;           // all commits
@@ -296,7 +300,8 @@ pub enum DataType {
     String, Int32, Int64, Float32, Float64, Bool,
     Timestamp, Date, Time, DateTime, Duration, CypherValue, Bytes,
     Point(PointType),              // Geographic | Cartesian2D | Cartesian3D
-    Vector { dimensions: usize },
+    Vector { dimensions: usize }, SparseVector { dimensions: usize }, BinaryVector { dimensions: usize },
+    Btic,
     Crdt(CrdtType),                // GCounter | GSet | ORSet | LWWRegister | LWWMap | Rga | VectorClock | VCRegister
     List(Box<DataType>),
     Map(Box<DataType>, Box<DataType>),
@@ -307,11 +312,13 @@ pub enum DataType {
 
 ```rust
 pub enum IndexType {
-    Vector(VectorIndexCfg),  FullText,  Scalar(ScalarType),  Inverted(InvertedIndexConfig),
+    Vector(VectorIndexCfg),  FullText,  FullTextWithAnalyzer(AnalyzerConfig),
+    Scalar(ScalarType),  Inverted(InvertedIndexConfig),
+    Sparse { dimensions: usize, quantize: bool, embedding: Option<EmbeddingCfg>, idf: bool },
 }
 pub struct VectorIndexCfg {
-    pub algorithm: VectorAlgo,  // Flat | IvfFlat | IvfPq | IvfSq | IvfRq | HnswFlat | Hnsw | HnswSq | HnswPq
-    pub metric: VectorMetric,   // Cosine | L2 | Dot
+    pub algorithm: VectorAlgo,  // Flat | IvfFlat | IvfPq | IvfSq | IvfRq | HnswFlat | Hnsw | HnswSq | HnswPq | Muvera
+    pub metric: VectorMetric,   // Cosine | L2 | Dot | L1
     pub embedding: Option<EmbeddingCfg>,
 }
 pub enum ScalarType { BTree, Hash, Bitmap, LabelList }
@@ -321,10 +328,10 @@ pub enum ScalarType { BTree, Hash, Bitmap, LabelList }
 
 ```rust
 pub enum SchemaChange {
-    AddLabel { name },
-    AddProperty { label_or_type, name, data_type: DataType, nullable: bool },
+    AddLabel { name, description: Option<String> },
+    AddProperty { label_or_type, name, data_type: DataType, nullable: bool, description: Option<String> },
     AddIndex(IndexDefinition),
-    AddEdgeType { name, from_labels: Vec<String>, to_labels: Vec<String> },
+    AddEdgeType { name, from_labels: Vec<String>, to_labels: Vec<String>, description: Option<String> },
 }
 ```
 
@@ -352,14 +359,14 @@ impl BulkWriterBuilder {
 ```rust
 impl BulkWriter {
     pub async fn insert_vertices(&mut self, label: &str, vertices: impl IntoArrow) -> Result<Vec<Vid>>;
-    pub async fn insert_edges(&mut self, edge_type: &str, edges: Vec<EdgeData>) -> Result<()>;
+    pub async fn insert_edges(&mut self, edge_type: &str, edges: Vec<EdgeData>) -> Result<Vec<Eid>>;
     pub async fn commit(mut self) -> Result<BulkStats>;
     pub async fn abort(mut self) -> Result<()>;
     pub fn stats(&self) -> &BulkStats;
 }
 ```
 
-**Gotcha:** BulkWriter bypasses normal isolation. Already-flushed batches cannot be rolled back.
+**Gotcha:** BulkWriter rows are staged and become visible only at `commit()`; `abort()` discards everything the load wrote. `load_id()` names the load; after a crash or an ambiguous commit, `db.bulk_load_applied(id)` says whether it was applied.
 
 ### StreamingAppender (`tx.appender(label)`)
 
@@ -374,12 +381,12 @@ impl StreamingAppender {
     pub async fn append(&mut self, properties: impl Into<HashMap<String, Value>>) -> Result<()>;
     pub async fn write_batch(&mut self, batch: &RecordBatch) -> Result<()>;
     pub async fn finish(mut self) -> Result<BulkStats>;
-    pub fn abort(mut self);
+    pub async fn abort(mut self) -> Result<()>;
     pub fn buffered_count(&self) -> usize;
 }
 ```
 
-**Supporting types:** `EdgeData { src_vid, dst_vid, properties }`, `BulkStats { vertices_inserted, edges_inserted, indexes_rebuilt, duration, index_build_duration, indexes_pending }`.
+**Supporting types:** `EdgeData { src_vid, dst_vid, properties }`, `BulkStats { vertices_inserted, edges_inserted, indexes_rebuilt, duration, index_build_duration, index_task_ids, indexes_pending, load_id, warnings }`.
 
 ---
 
@@ -402,11 +409,11 @@ impl<'a> Params<'a> {
 
 ```rust
 impl<'a> RuleRegistry<'a> {
-    pub fn register(&self, program: &str) -> Result<()>;
-    pub fn remove(&self, name: &str) -> Result<bool>;
+    pub async fn register(&self, program: &str) -> Result<()>;
+    pub async fn remove(&self, name: &str) -> Result<bool>;
     pub fn list(&self) -> Vec<String>;
     pub fn get(&self, name: &str) -> Option<RuleInfo>;   // { name, clause_count, is_recursive }
-    pub fn clear(&self);
+    pub async fn clear(&self) -> Result<()>;
     pub fn count(&self) -> usize;
 }
 ```
@@ -462,7 +469,9 @@ impl Row {
 pub enum Value {
     Null, Bool(bool), Int(i64), Float(f64), String(String), Bytes(Vec<u8>),
     List(Vec<Value>), Map(HashMap<String, Value>),
-    Node(Node), Edge(Edge), Path(Path), Vector(Vec<f32>), Temporal(TemporalValue),
+    Node(Node), Edge(Edge), Path(Path), Vector(Vec<f32>),
+    SparseVector { indices: Vec<u32>, values: Vec<f32> }, BinaryVector(Vec<u8>),
+    Temporal(TemporalValue),
 }
 pub struct Node { pub vid: Vid, pub labels: Vec<String>, pub properties: HashMap<String, Value> }
 pub struct Edge { pub eid: Eid, pub edge_type: String, pub src: Vid, pub dst: Vid, pub properties: HashMap<String, Value> }
@@ -476,7 +485,7 @@ impl ExecuteResult {
     pub fn affected_rows(&self) -> usize;
     pub fn nodes_created(&self) -> usize;       pub fn nodes_deleted(&self) -> usize;
     pub fn relationships_created(&self) -> usize;  pub fn relationships_deleted(&self) -> usize;
-    pub fn properties_set(&self) -> usize;
+    pub fn properties_set(&self) -> usize;     pub fn properties_removed(&self) -> usize;
     pub fn labels_added(&self) -> usize;        pub fn labels_removed(&self) -> usize;
     pub fn metrics(&self) -> &QueryMetrics;
 }
@@ -600,6 +609,7 @@ pub struct UniConfig {
     pub lance_metadata_cache_bytes: Option<usize>,
     pub lance_index_cache_bytes: Option<usize>,
     pub object_store: ObjectStoreConfig,
+    pub writer_lease: WriterLeaseConfig, // single-writer lease and lock timing
     pub index_rebuild: IndexRebuildConfig,
     pub strict_schema: bool,
     pub partial_lance_writes: bool,
@@ -611,6 +621,7 @@ pub struct UniConfig {
     pub flush_stream_timeout: Duration,
     pub drop_fork_drain_timeout: Duration,
     pub flush_drain_timeout: Duration,
+    pub read_cut_refresh: Option<Duration>, // read-only handles: how often to pick up new flushes (None: every query locally, 1 s remote)
     pub max_forks: Option<usize>,
     pub fork_default_ttl: Option<Duration>,
     pub fork_sweeper_interval: Duration,
@@ -633,7 +644,7 @@ pub struct UniConfig {
 | `FileSandboxConfig` | `enabled`, `allowed_paths: Vec<PathBuf>` |
 | `CloudStorageConfig` | `S3 { bucket, region, endpoint, ... }`, `Gcs { bucket, ... }`, `Azure { container, account, ... }` |
 
-Convenience: `CloudStorageConfig::s3_from_env(bucket)`, `::gcs_from_env(bucket)`, `::azure_from_env(container)`.
+Convenience: `CloudStorageConfig::s3_from_env(bucket)`, `::gcs_from_env(bucket)`, `::azure_from_env(container) -> anyhow::Result<Self>`. None is needed to open a store: unset fields fall back to the environment.
 
 ---
 
@@ -674,16 +685,22 @@ pub enum UniError {
     // Transaction
     Transaction { message }, TransactionConflict { message }, TransactionAlreadyCompleted,
     TransactionExpired { tx_id, hint }, CommitTimeout { tx_id, hint },
+    SerializationConflict { message }, ConstraintConflict { message }, TransactionRollbackOnly,
+    LockTimeout { timeout_ms },
     // Access control
-    ReadOnly { operation }, PermissionDenied { action }, DatabaseLocked,
+    ReadOnly { operation }, PermissionDenied { action }, DatabaseLocked /* never raised */,
+    // Single writer and hybrid lineage
+    StoreLocked { store, holder }, WriterFenced { reason }, StaleWal { store, wal, segments },
     WriteContextAlreadyActive { session_id, hint },
     // Resource limits
-    MemoryLimitExceeded { limit_bytes }, Timeout { timeout_ms }, Cancelled,
+    MemoryLimitExceeded { limit_bytes, message }, Timeout { timeout_ms }, Cancelled,
     // Locy
-    StaleDerivedFacts { version_gap }, RuleConflict { rule_name },
+    StaleDerivedFacts { version_gap }, RuleConflict { rule_name }, LocyIncomplete { detail },
     // Other
     HookRejected { message }, Constraint { message },
     Storage { message, source }, Io(std::io::Error), Internal(anyhow::Error),
+    // ... plus fork (ForkNotFound, ForkInUse, ...), bulk-load, trigger, auth and
+    // other variants: see crates/uni-common/src/api/error.rs
 }
 ```
 
@@ -699,7 +716,7 @@ db.schema()
     .label("Product")
         .property("name", DataType::String)
         .property("price", DataType::Float64)
-        .vector("embedding", 384)
+        .property_nullable("embedding", DataType::Vector { dimensions: 384 })
         .index("name", IndexType::Scalar(ScalarType::BTree))
     .apply().await?;
 
@@ -727,16 +744,17 @@ let stats = writer.commit().await?;
 println!("Inserted {} vertices in {:?}", stats.vertices_inserted, stats.duration);
 ```
 
-### Locy with session parameters
+### Locy with parameters
+
+Locy does not read session params; pass them on the builder.
 
 ```rust
-session.params().set("threshold", 0.8);
 let result = session.locy_with(r#"
     CREATE RULE high_score AS
         MATCH (n:Product) WHERE n.score > $threshold
         YIELD KEY n
     QUERY high_score RETURN n
-"#).timeout(Duration::from_secs(30)).max_iterations(100).run().await?;
+"#).param("threshold", 0.8).timeout(Duration::from_secs(30)).max_iterations(100).run().await?;
 for fact in result.rows().unwrap_or(&vec![]) {
     println!("{:?}", fact["n"]);
 }

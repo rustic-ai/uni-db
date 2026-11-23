@@ -35,7 +35,7 @@ class UniNotFoundError(UniError):
     ...
 
 class UniDatabaseLockedError(UniError):
-    """Database is locked by another process."""
+    """Kept for compatibility; nothing raises it (see ``UniStoreLockedError``)."""
 
     ...
 
@@ -268,6 +268,24 @@ class UniReadOnlyError(UniError):
     """Operation not supported on read-only database."""
 
     ...
+
+class UniStoreLockedError(UniError):
+    """Another handle holds the store open for writing; ``holder`` names it."""
+
+    store: str
+    holder: str
+
+class UniStaleWalError(UniError):
+    """The hybrid WAL is an earlier writer's; ``set_aside_stale_wal()`` moves it."""
+
+    store: str
+    wal: str
+    segments: int
+
+class UniWriterFencedError(UniError):
+    """This handle may no longer write (lease lost, closed, read-only)."""
+
+    reason: str
 
 class UniPermissionDeniedError(UniError):
     """Permission denied."""
@@ -744,7 +762,7 @@ class QueryResult:
     def __bool__(self) -> bool: ...
 
 class ExplainOutput:
-    """Typed output from ``session.explain()``."""
+    """Typed output from ``session.query_with(cypher).explain()``."""
 
     plan_text: str
     warnings: list[str]
@@ -753,7 +771,10 @@ class ExplainOutput:
     suggestions: Any
 
 class ProfileOutput:
-    """Typed output from ``session.profile()``."""
+    """Typed output from ``session.query_with(cypher).profile()``.
+
+    The transaction query and execute builders' ``profile()`` return it too.
+    """
 
     total_time_ms: int
     peak_memory_bytes: int
@@ -1380,7 +1401,8 @@ class CancellationToken:
 class WriteLease:
     """Write lease configuration for multi-agent coordination.
 
-    ``repr()`` is one of ``WriteLease.LOCAL``, ``WriteLease.DYNAMODB(...)`` or
+    ``repr()`` is one of ``WriteLease.LOCAL`` (the default lock or lease),
+    ``WriteLease.UNENFORCED``, ``WriteLease.DYNAMODB(...)`` or
     ``WriteLease.CUSTOM``. ``CUSTOM`` has no constructor and is read-back only:
     it denotes a lease provider configured in Rust, which is a trait object
     Python cannot supply. Passing one back to a builder raises ``ValueError``.
@@ -1388,6 +1410,8 @@ class WriteLease:
 
     @staticmethod
     def LOCAL() -> WriteLease: ...
+    @staticmethod
+    def UNENFORCED() -> WriteLease: ...
     @staticmethod
     def DYNAMODB(table: str) -> WriteLease: ...
 
@@ -1493,10 +1517,12 @@ class UniBuilder:
     def xervo_catalog_from_file(self, path: str) -> UniBuilder: ...
     def xervo_runtime(self, runtime: ModelRuntime) -> UniBuilder: ...
     def cloud_config(self, config: dict[str, Any]) -> UniBuilder: ...
+    def storage_options(self, options: dict[str, str]) -> UniBuilder: ...
     def config(self, config: dict[str, Any]) -> UniBuilder: ...
     def batch_size(self, size: int) -> UniBuilder: ...
     def wal_enabled(self, enabled: bool) -> UniBuilder: ...
     def read_only(self) -> UniBuilder: ...
+    def set_aside_stale_wal(self) -> UniBuilder: ...
     def skip_invalid_locy_rules(self, skip: bool) -> UniBuilder: ...
     def write_lease(self, lease: WriteLease) -> UniBuilder: ...
     def strict_schema(self, enabled: bool) -> UniBuilder: ...
@@ -1866,8 +1892,10 @@ class Session:
     Example::
 
         session = db.session()
-        session.set("threshold", 0.5)
-        results = session.query("MATCH (n) WHERE n.score > $threshold RETURN n")
+        session.params().set("threshold", 0.5)
+        results = session.query(
+            "MATCH (n) WHERE n.score > $session.threshold RETURN n"
+        )
     """
 
     # --- Parameters ---
@@ -2287,7 +2315,9 @@ class Uni:
         db = Uni.temporary()
         db.schema().label("Person").property("name", "String").apply()
         session = db.session()
-        session.execute("CREATE (n:Person {name: 'Alice'})")
+        with session.tx() as tx:
+            tx.execute("CREATE (n:Person {name: 'Alice'})")
+            tx.commit()
         results = session.query("MATCH (n:Person) RETURN n.name AS name")
     """
 
@@ -2417,10 +2447,12 @@ class AsyncUniBuilder:
     def xervo_catalog_from_file(self, path: str) -> AsyncUniBuilder: ...
     def xervo_runtime(self, runtime: ModelRuntime) -> AsyncUniBuilder: ...
     def cloud_config(self, config: dict[str, Any]) -> AsyncUniBuilder: ...
+    def storage_options(self, options: dict[str, str]) -> AsyncUniBuilder: ...
     def config(self, config: dict[str, Any]) -> AsyncUniBuilder: ...
     def batch_size(self, size: int) -> AsyncUniBuilder: ...
     def wal_enabled(self, enabled: bool) -> AsyncUniBuilder: ...
     def read_only(self) -> AsyncUniBuilder: ...
+    def set_aside_stale_wal(self) -> AsyncUniBuilder: ...
     def skip_invalid_locy_rules(self, skip: bool) -> AsyncUniBuilder: ...
     def write_lease(self, lease: WriteLease) -> AsyncUniBuilder: ...
     def strict_schema(self, enabled: bool) -> AsyncUniBuilder: ...
@@ -2443,7 +2475,9 @@ class AsyncUni:
         db = await AsyncUni.temporary()
         await db.schema().label("Person").property("name", "String").apply()
         session = db.session()
-        await session.execute("CREATE (n:Person {name: 'Alice'})")
+        tx = await session.tx()
+        await tx.execute("CREATE (n:Person {name: 'Alice'})")
+        await tx.commit()
         results = await session.query("MATCH (n:Person) RETURN n.name AS name")
     """
 
@@ -3227,18 +3261,28 @@ class DiffEdge:
     properties: dict[str, Any]
 
 class VertexPropertyChange:
-    """A vertex's property changes (paired by UID)."""
+    """A vertex's property changes.
+
+    Paired by ``(label, ext_id)``, or, when one side is the other's
+    ancestor, by the VID the descendant inherited.
+    """
 
     label: str
     uid: str
+    after_uid: str
+    ext_id: str | None
+    vid: int | None
     changes: list[PropertyChange]
 
 class EdgePropertyChange:
-    """An edge's property changes (paired by src_uid, dst_uid, edge_type)."""
+    """An edge's property changes, paired by inherited EID under shared lineage."""
 
     edge_type: str
+    eid: int
     src_uid: str
     dst_uid: str
+    after_src_uid: str
+    after_dst_uid: str
     changes: list[PropertyChange]
 
 class VertexDiff:
@@ -3308,7 +3352,6 @@ class PromoteReport:
     vertices_skipped_no_ext_id_for_delete: int
     vertices_conflicting: int
     vertices_skipped_uid_conflict: int
-    vertices_skipped_no_uid: int
     edges_inserted: int
     edges_skipped: int
     edges_skipped_duplicate: int
@@ -3355,6 +3398,15 @@ class UniRestoreBlockedByForksError(UniError):
     """
 
     forks: list[str]
+
+class UniForkTaggedError(UniError):
+    """`drop_fork` / `drop_fork_cascade` refused because a fork has tags.
+
+    Nothing was dropped. Remove each tag with ``untag_fork``, then retry.
+    """
+
+    name: str
+    tags: list[str]
 
 class UniForkSubtreeInUseError(UniError):
     """`drop_fork_cascade` refused because the subtree has live sessions / open tx."""

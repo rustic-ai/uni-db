@@ -25,7 +25,7 @@ MATCH (n:Person {ext_id: 'user-123'}) RETURN n
 Dense, sequential, never reused. Serves as `_vid` column in all Lance tables and as array offsets in CSR adjacency structures. Sentinel: `Vid::INVALID = u64::MAX`.
 
 ```rust
-use uni_db::core::Vid;
+use uni_db::Vid;
 let vid = Vid::new(42);  // dense id; labels are resolved via VidLabelsIndex
 ```
 
@@ -58,10 +58,10 @@ Same dense `u64` auto-increment shape as VID; neither encodes a label or edge-ty
 | Uni Type | Arrow Type | Cypher DDL | Python Factory | Rust Enum |
 |----------|-----------|------------|----------------|-----------|
 | `String` | `Utf8` | `STRING` | `DataType.STRING()` | `DataType::String` |
-| `Int32` | `Int32` | `INTEGER` | `DataType.INT32()` | `DataType::Int32` |
-| `Int64` (alias: `Int`) | `Int64` | `INTEGER` | `DataType.INT64()` | `DataType::Int64` |
-| `Float32` | `Float32` | `FLOAT` | `DataType.FLOAT32()` | `DataType::Float32` |
-| `Float64` (alias: `Float`) | `Float64` | `FLOAT` | `DataType.FLOAT64()` | `DataType::Float64` |
+| `Int32` | `Int32` | `INT32` | `DataType.INT32()` | `DataType::Int32` |
+| `Int64` (alias: `Int`) | `Int64` | `INTEGER`, `INT`, `INT64` | `DataType.INT64()` | `DataType::Int64` |
+| `Float32` | `Float32` | `FLOAT32` | `DataType.FLOAT32()` | `DataType::Float32` |
+| `Float64` (alias: `Float`) | `Float64` | `FLOAT`, `FLOAT64`, `DOUBLE` | `DataType.FLOAT64()` | `DataType::Float64` |
 | `Bool` | `Boolean` | `BOOLEAN` | `DataType.BOOL()` | `DataType::Bool` |
 
 ### Temporal Types
@@ -82,18 +82,18 @@ Same dense `u64` auto-increment shape as VID; neither encodes a label or edge-ty
 | Uni Type | Arrow Type | Cypher DDL | Rust Enum |
 |----------|-----------|------------|-----------|
 | `Vector { dimensions }` | `FixedSizeList(Float32, N)` | `VECTOR(N)` | `DataType::Vector { dimensions: N }` |
-| `List(T)` | `List(T)` | `LIST(T)` | `DataType::List(Box<DataType>)` |
-| `Map(K, V)` | `List(Struct(key, value))` | `MAP(K, V)` | `DataType::Map(Box<DataType>, Box<DataType>)` |
-| `CypherValue` | `LargeBinary` | -- | `DataType::CypherValue` |
+| `List(T)` | `List(T)` | `LIST<T>` | `DataType::List(Box<DataType>)` |
+| `Map(K, V)` | `List(Struct(key, value))` | `MAP<STRING, V>` | `DataType::Map(Box<DataType>, Box<DataType>)` |
+| `CypherValue` | `LargeBinary` | `JSON` | `DataType::CypherValue` |
 | `Bytes` | `LargeBinary` | `BYTES` (also `BLOB`, `BINARY`) | `DataType::Bytes` |
 
 ### Spatial Types
 
 | Uni Type | Arrow Type | Rust Enum |
 |----------|-----------|-----------|
-| `Point(Geographic)` | Struct(latitude, longitude, crs: Float64) | `DataType::Point(Geographic)` |
-| `Point(Cartesian2D)` | Struct(x, y, crs: Float64) | `DataType::Point(Cartesian2D)` |
-| `Point(Cartesian3D)` | Struct(x, y, z, crs: Float64) | `DataType::Point(Cartesian3D)` |
+| `Point(Geographic)` | Struct(latitude, longitude, crs: Utf8) | `DataType::Point(Geographic)` |
+| `Point(Cartesian2D)` | Struct(x, y, crs: Utf8) | `DataType::Point(Cartesian2D)` |
+| `Point(Cartesian3D)` | Struct(x, y, z, crs: Utf8) | `DataType::Point(Cartesian3D)` |
 
 ### CRDT Types
 
@@ -221,12 +221,12 @@ All CRDTs implement `CrdtMerge` (commutative, associative, idempotent). Serializ
 | Type | Best For | Query Pattern | Creation |
 |------|----------|---------------|----------|
 | **BTree** | Range queries, ordering, prefix | `WHERE x > 5`, `STARTS WITH` | Default. `CREATE INDEX idx ON Label (prop)` |
-| **Hash** | Exact match lookups | `WHERE x = 123` | Rust: `ScalarType::Hash` |
-| **Bitmap** | Low-cardinality columns (< 1000 distinct values) | `WHERE status = 'active'` | DDL: `"BITMAP"`, Rust: `ScalarType::Bitmap` |
+| **Hash** | Exact match lookups | `WHERE x = 123` | Rust: `ScalarType::Hash` (stored as BTree; the procedure rejects `HASH`) |
+| **Bitmap** | Low-cardinality columns (< 1000 distinct values) | `WHERE status = 'active'` | Procedure: `"BITMAP"`, Rust: `ScalarType::Bitmap` |
 | **LabelList** | List columns with containment queries | `array_contains_any`, `array_contains_all` | DDL: `"LABEL_LIST"`, Rust: `ScalarType::LabelList` |
 
 ```cypher
-CREATE INDEX idx_name FOR (p:Person) ON (p.name)          // Default: BTree
+CREATE INDEX idx_name FOR (p:Person) ON (p.name)          // Always BTree (OPTIONS {type} is ignored)
 
 // Via procedure API
 CALL uni.schema.createIndex('Event', 'status', {"type": "BITMAP"})
@@ -249,32 +249,36 @@ db.schema().label("User")
 | **Flat** | None | < 10k vectors, exact search | — |
 | **IVF-Flat** | None | Medium datasets, exact within partitions | `partitions` |
 | **IVF-SQ** | Scalar (int8) | Large datasets, good recall/memory tradeoff | `partitions` |
-| **IVF-PQ** | Product | Very large datasets, minimum memory | `partitions`, `sub_vectors`, `num_bits` |
+| **IVF-PQ** | Product | Default. Very large datasets, minimum memory | `partitions` (default 256), `sub_vectors` (default derived from the dimension), `num_bits` (default 8) |
 | **IVF-RQ** | RaBitQ | Better accuracy than PQ at similar compression | `partitions`, `num_bits` |
 | **HNSW-Flat** | None | Exact graph search, no compression loss | `m`, `ef_construction`, `partitions` |
-| **HNSW-SQ** | Scalar (int8) | Default. Best recall-latency tradeoff | `m`, `ef_construction`, `partitions` |
+| **HNSW-SQ** | Scalar (int8) | Best recall-latency tradeoff | `m`, `ef_construction`, `partitions` |
 | **HNSW-PQ** | Product | Large datasets with graph speed + compression | `m`, `ef_construction`, `sub_vectors`, `partitions` |
 
 ```cypher
-// HNSW-SQ (default if no type specified)
+// IVF-PQ is the default when no type is given
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw_sq' }
+  OPTIONS { metric: 'cosine' }
+
+// HNSW-SQ
+CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
+  OPTIONS { metric: 'cosine', type: 'hnsw_sq' }
 
 // HNSW-Flat (no quantization, exact graph search)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw_flat' }
+  OPTIONS { metric: 'cosine', type: 'hnsw_flat' }
 
 // HNSW-SQ with IVF partitions for very large datasets
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'hnsw_sq', partitions: 32 }
+  OPTIONS { metric: 'cosine', type: 'hnsw_sq', partitions: 32 }
 
 // IVF-RQ (RaBitQ, 1-bit per dimension by default)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'cosine', type: 'ivf_rq', partitions: 256 }
+  OPTIONS { metric: 'cosine', type: 'ivf_rq', partitions: 256 }
 
 // IVF-PQ for memory-constrained large datasets
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding)
-  WITH { metric: 'l2', type: 'ivf_pq', partitions: 256, sub_vectors: 16 }
+  OPTIONS { metric: 'l2', type: 'ivf_pq', partitions: 256, sub_vectors: 16 }
 ```
 
 **Distance Metrics:**
@@ -294,17 +298,29 @@ CALL uni.fts.query('Article', 'content', 'graph database', 10)
 YIELD node, score
 ```
 
+`FULLTEXT` `OPTIONS` take the tokenizer/analyzer keys and `with_positions` (default `true`, needed for phrase queries); an unknown key is an error. Query syntax: words are OR'd; `AND`, `OR`, `NOT` / `-word`, `"phrases"` and parentheses work on flushed and unflushed rows alike (see `vector-hybrid-search.md`).
+
 ### JSON FTS Index
 
-Full-text search on nested JSON/JSONB properties:
+Full-text search on the string values of a `JSON` property:
 
 ```cypher
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
+  OPTIONS { with_positions: true, paths: ['title', 'author.name'] }
 ```
+
+The index keeps a derived text column (`__jfts_<column>`, hidden) holding the document's string values, filled at flush and backfilled on creation. `uni.fts.query('Data', 'metadata', ...)` searches it. `d.metadata[.path] CONTAINS 'x'` is prefiltered from it (the predicate is still applied, so answers do not change). `paths` (default: the whole document) restricts what is indexed; a `CONTAINS` outside them is not prefiltered.
 
 ### Inverted Index
 
-Term-to-VID mapping for list containment queries (`ANY(x IN list WHERE x IN allowed)`). Memory guard: 256 MB default.
+Term-to-VID mapping for `LIST<STRING>` columns:
+
+```cypher
+CREATE INVERTED INDEX idx_tags FOR (d:Doc) ON (d.tags)
+  OPTIONS { normalize: true, max_terms_per_doc: 10000 }
+```
+
+(or `uni.schema.createIndex(label, prop, {type: 'INVERTED'})`). `ANY(x IN d.tags WHERE x IN ['a', 'b'])` (a literal list of strings or a `$param`) reads candidate vids from the index plus matching unflushed rows; the predicate is still applied. Not used inside a transaction, on a pinned snapshot or on a fork. `EXPLAIN` shows it as `INVERTED`.
 
 ---
 
@@ -316,7 +332,7 @@ The query planner pushes predicates in this priority order:
 |----------|-------|--------|------------|
 | 1 | **UID Index** | `n._uid = '...'` | O(1) hash |
 | 2 | **Scalar Index** | `n.prop = value`, `n.prop > value` | O(log N) |
-| 3 | **Full-Text Index** | `CONTAINS 'term'` | BM25 scored |
+| 3 | **JSON FTS / Inverted** | `doc[.path] CONTAINS 'term'`, `ANY(x IN n.list WHERE x IN [...])` | Candidate vids, predicate re-applied |
 | 4 | **Lance Columnar** | Arrow predicate pushdown | Columnar scan |
 | 5 | **Residual Filter** | Post-scan evaluation | O(N) |
 
@@ -433,9 +449,15 @@ ALTER LABEL Person RENAME PROPERTY name TO full_name
 // Add edge property
 ALTER EDGE TYPE KNOWS ADD PROPERTY since DATE
 
-// Drop label / edge type (soft-delete)
+// Drop label / edge type (soft-delete). Refused while data carries it:
+// "Cannot drop label 'TempData': 3 vertices still carry it; ..."
 DROP LABEL IF EXISTS TempData
 DROP EDGE TYPE IF EXISTS OLD_RELATION
+
+// Property defaults: a constant, applied to new rows that omit the property
+// (CREATE, MERGE, bulk). An explicit NULL stays NULL; no backfill.
+CREATE LABEL Item (name STRING, qty INT DEFAULT 1, born DATE DEFAULT date('2020-01-01'))
+ALTER LABEL Item ADD PROPERTY color STRING DEFAULT 'red'
 
 // Add / drop indexes
 CREATE INDEX idx_name FOR (p:Person) ON (p.name)
@@ -473,7 +495,7 @@ YIELD name, type, enabled, properties, target
 ### SHOW Commands
 
 ```cypher
-SHOW INDEXES        // All indexes with status
+SHOW INDEXES        // All indexes: name, type, details
 SHOW CONSTRAINTS    // All constraints
 SHOW DATABASE       // Database metadata
 ```
@@ -496,6 +518,8 @@ db.indexes().rebuild("Person", background=True)
 **PropertyInfo fields:** `name`, `data_type`, `nullable`, `is_indexed`
 
 **IndexInfo fields:** `name`, `index_type`, `properties: list[str]`, `status`
+
+During a rebuild an index is `Building`, `Stale` or `Failed`; the planner uses only `Online` indexes, so queries fall back to a scan meanwhile.
 
 ---
 

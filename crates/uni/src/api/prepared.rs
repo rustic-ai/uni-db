@@ -435,7 +435,8 @@ impl PreparedLocy {
         cancel: crate::api::impl_query::CancelScope,
         principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
     ) -> Result<Self> {
-        let (compiled, parameters) = compile_locy_with_registry(program, &rule_registry)?;
+        let (compiled, parameters) =
+            compile_locy_with_registry(program, &rule_registry, &db.plugin_registry)?;
         let schema_version = db.schema.schema().schema_version;
 
         Ok(Self {
@@ -555,8 +556,11 @@ impl PreparedLocy {
             return Ok(());
         }
 
-        (inner.compiled, inner.parameters) =
-            compile_locy_with_registry(&self.program_text, &self.rule_registry)?;
+        (inner.compiled, inner.parameters) = compile_locy_with_registry(
+            &self.program_text,
+            &self.rule_registry,
+            &self.db.plugin_registry,
+        )?;
         inner.schema_version = current_version;
         Ok(())
     }
@@ -569,6 +573,7 @@ impl PreparedLocy {
 fn compile_locy_with_registry(
     program: &str,
     rule_registry: &std::sync::RwLock<LocyRuleRegistry>,
+    plugin_registry: &uni_plugin::PluginRegistry,
 ) -> Result<(uni_locy::CompiledProgram, Vec<String>)> {
     let (ast, parameters) =
         uni_cypher::parse_locy_with_parameters(program).map_err(|e| UniError::Parse {
@@ -580,20 +585,24 @@ fn compile_locy_with_registry(
         })?;
 
     let registry = rule_registry.read().unwrap();
-    let compiled = if registry.rules.is_empty() {
-        drop(registry);
-        uni_locy::compile(&ast).map_err(|e| UniError::Query {
-            message: format!("LocyCompileError: {e}"),
-            query: None,
-        })
-    } else {
-        let external_names: Vec<String> = registry.rules.keys().cloned().collect();
-        drop(registry);
-        uni_locy::compile_with_external_rules(&ast, &external_names).map_err(|e| UniError::Query {
-            message: format!("LocyCompileError: {e}"),
-            query: None,
-        })
-    }?;
+    let external_names: Vec<String> = registry.rules.keys().cloned().collect();
+    let modules = registry.modules.clone();
+    drop(registry);
+    let compiled = uni_locy::compile_with_oracles_and_config(
+        &ast,
+        &modules,
+        &external_names,
+        &uni_locy::LocyConfig {
+            neural_predicates_preview: false,
+            ..Default::default()
+        },
+        &crate::api::impl_locy::plugin_monotonicity_oracle(plugin_registry),
+        &crate::api::impl_locy::plugin_direction_oracle(plugin_registry),
+    )
+    .map_err(|e| UniError::Query {
+        message: format!("LocyCompileError: {e}"),
+        query: None,
+    })?;
     Ok((compiled, parameters))
 }
 

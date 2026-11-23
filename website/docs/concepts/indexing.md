@@ -18,7 +18,7 @@ Uni supports five categories of indexes:
 ├─────────────────────┼─────────────────────┼──────────────────────┼──────────────────────┼────────────────────┤
 │ Similarity search   │ Exact/range queries │ Keyword search       │ JSON document search │ List membership    │
 │ Nearest neighbors   │ Equality checks     │ Text matching        │ CONTAINS operator    │ Multi-value props  │
-│ Embeddings          │ Sorting             │ Relevance ranking    │ Phrase search        │ Security filtering │
+│ Embeddings          │ Sorting             │ Relevance ranking    │ Term positions       │ Security filtering │
 └─────────────────────┴─────────────────────┴──────────────────────┴──────────────────────┴────────────────────┘
 ```
 
@@ -47,7 +47,7 @@ Vector indexes enable fast approximate nearest neighbor (ANN) search on embeddin
 | Metric | Formula | Use Case |
 |--------|---------|----------|
 | **Cosine** | 1 - (A·B)/(‖A‖‖B‖) | Normalized embeddings |
-| **L2** | √Σ(aᵢ-bᵢ)² | Euclidean distance |
+| **L2** | Σ(aᵢ-bᵢ)² | Squared Euclidean distance |
 | **Dot** | -A·B | Inner product (unnormalized) |
 
 ### Creating Vector Indexes
@@ -239,11 +239,12 @@ ORDER BY distance
 
 **With Threshold:**
 
+The sixth argument is a **minimum similarity**, on the same scale as the yielded `score` (for cosine, `(2 - distance) / 2`):
+
 ```cypher
-CALL uni.vector.query('Paper', 'embedding', $query_vector, 100, NULL, 0.2)
-YIELD node, distance
-WHERE distance < 0.15
-RETURN node.title, distance
+CALL uni.vector.query('Paper', 'embedding', $query_vector, 100, NULL, 0.8)
+YIELD node, score
+RETURN node.title, score
 ```
 
 **Hybrid (Vector + Graph):**
@@ -304,7 +305,7 @@ Scalar indexes optimize exact match and range queries on primitive properties.
 | Type | Operations | Best For |
 |------|------------|----------|
 | **BTree** | `=`, `<`, `>`, `<=`, `>=`, `BETWEEN` | General purpose, range queries |
-| **Hash** | `=`, `IN` | High-cardinality equality lookups |
+| **Hash** | `=`, `IN` | High-cardinality equality lookups (Rust schema builder only; stored as a BTree) |
 | **Bitmap** | `=`, `IN`, low-cardinality filters | Enum-like columns (< 1000 distinct values), boolean flags |
 | **LabelList** | `array_contains_any`, `array_contains_all` | List columns with tag/category filtering |
 
@@ -323,7 +324,7 @@ CALL uni.schema.createIndex('Event', 'status', {"type": "BITMAP"})
 CALL uni.schema.createIndex('Doc', 'tags', {"type": "LABEL_LIST"})
 ```
 
-The storage layer supports BTree, Hash, Bitmap, and LabelList scalar indexes. BTree is the default when no type is specified.
+`CREATE INDEX` always builds a BTree. `uni.schema.createIndex` accepts `BTREE`, `BITMAP` and `LABEL_LIST`. `Hash` is available only from the Rust schema builder (`ScalarType::Hash`); it has no separate on-disk form and is stored as a BTree.
 
 ### Composite Indexes
 
@@ -380,10 +381,17 @@ ON EACH [p.title, p.abstract]
 |-----------|-------------|---------|
 | `standard` | Unicode word boundaries | "Hello, World!" → ["hello", "world"] |
 | `whitespace` | Split on whitespace only | "Hello, World!" → ["hello,", "world!"] |
-| `ngram` | Character n-grams | "cat" → ["ca", "at"] (bigrams) |
+| `ngram` | Character n-grams (`ngram_min`/`ngram_max`, default 3) | "cats" → ["cat", "ats"] (trigrams) |
 | `keyword` | No tokenization | "Hello World" → ["hello world"] |
 
-**Note:** Tokenizer configuration is not yet exposed via DDL; the default is `standard`.
+The default is `standard`. Choose another tokenizer and analyzer through `OPTIONS`: `tokenizer` (or `analyzer`), `language`, `stemmer` (bool), `stopwords` (bool or list of words), `lower_case`, `ascii_folding`, `max_token_length`, `ngram_min`, `ngram_max`, and `with_positions` (bool, default `true`: store term positions, which phrase queries need; an `ngram` tokenizer never stores them). Any other key is refused with an error naming it; `normalize` and `max_terms_per_doc` belong to `CREATE INVERTED INDEX`.
+
+```cypher
+CREATE FULLTEXT INDEX paper_title_ngram
+FOR (p:Paper)
+ON EACH [p.title]
+OPTIONS { tokenizer: 'ngram', ngram_min: 3, ngram_max: 4 }
+```
 
 ### Querying Full-Text Indexes
 
@@ -394,24 +402,43 @@ RETURN p.title
 LIMIT 10
 ```
 
-**Boolean Operators:**
+**BM25-ranked search:**
 
-<!-- doctest: skip -->
 ```cypher
-// AND (default)
-'transformer attention'  // Both terms required
+CALL uni.fts.query('Paper', 'abstract', 'transformer attention', 10)
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
+```
 
-// OR
-'transformer OR attention'
+### Full-Text Query Syntax
 
-// NOT
-'transformer NOT vision'
+A plain list of words matches documents that contain **any** of them (OR) and ranks them by BM25. The query may also use:
 
-// Phrase
-'"attention mechanism"'
+| Syntax | Meaning |
+|--------|---------|
+| `graph database` | Either word (OR); adjacent terms are OR'd |
+| `graph AND database` | Both words |
+| `graph OR database` | Either word |
+| `"graph database"` | The phrase: the words adjacent and in order |
+| `-legacy`, `NOT legacy` | Exclude documents with the word |
+| `(graph OR vector) AND search` | Grouping |
 
-// Wildcard
-'transform*'
+`AND` binds tighter than `OR` and adjacency, so `a b AND c` is `a OR (b AND c)`. The operators are recognised only in upper case; `and`, `or` and `not` are words. A `-` negates only at the start of a word, phrase or group (`e-mail` is one term). A negated term excludes documents but does not score.
+
+The same syntax applies to unflushed rows, rows flushed since the index was built, indexed rows and undeclared (schemaless) properties, with the same answer before and after a flush.
+
+Edge cases:
+
+- A blank query matches nothing.
+- A query, or a parenthesised group, whose every term is negated (`-legacy`) is an error: it has nothing to rank.
+- An unbalanced quote or parenthesis, or `AND` / `OR` / `NOT` without an operand, is an error.
+- A phrase on an index built without positions (an `ngram` index, or `with_positions: false`) is an error naming the index's missing positions.
+
+```cypher
+CALL uni.fts.query('Paper', 'abstract', '"neural network" AND (vision OR speech) -survey', 10)
+YIELD node, score
+RETURN node.title, score
 ```
 
 ---
@@ -425,7 +452,7 @@ JSON Full-Text indexes enable BM25-based full-text search on JSON document colum
 | Use Case | Index Type |
 |----------|------------|
 | Search within JSON documents | JSON Full-Text Index |
-| Keyword/phrase search in text fields | JSON Full-Text Index |
+| Keyword search in text fields | JSON Full-Text Index |
 | Exact JSON path matching | JsonPath Index |
 | Equality filters on scalar fields | Scalar Index |
 
@@ -435,45 +462,58 @@ JSON Full-Text indexes enable BM25-based full-text search on JSON document colum
 
 ```cypher
 CREATE JSON FULLTEXT INDEX article_fts
-FOR (a:Article) ON _doc
+FOR (a:Article) ON doc
 ```
 
 **With Options:**
 
 ```cypher
 CREATE JSON FULLTEXT INDEX article_fts
-FOR (a:Article) ON _doc
+FOR (a:Article) ON doc
 OPTIONS { with_positions: true }
 ```
 
-The `with_positions` option enables phrase search by storing term positions.
+The `with_positions` option stores term positions in the index, which phrase queries need. `paths` restricts the index to the string values under the listed key paths:
+
+```cypher
+CREATE JSON FULLTEXT INDEX article_title_fts
+FOR (a:Article) ON doc
+OPTIONS { paths: ['title', 'meta.author'] }
+```
+
+The indexed column is a declared `JSON` property (`doc` here); names starting with `_` are reserved.
 
 **If Not Exists:**
 
 ```cypher
 CREATE JSON FULLTEXT INDEX article_fts IF NOT EXISTS
-FOR (a:Article) ON _doc
+FOR (a:Article) ON doc
 ```
 
 ### Querying with CONTAINS
 
-Use the `CONTAINS` operator to perform full-text search on FTS-indexed columns:
+Use `CONTAINS` on a JSON path to match string values inside the document:
 
 ```cypher
-// Basic full-text search
-MATCH (a:Article)
-WHERE a._doc CONTAINS 'graph database'
-RETURN a.title
-
 // Path-specific search (searches within a JSON path)
 MATCH (a:Article)
-WHERE a._doc.title CONTAINS 'graph'
+WHERE a.doc.title CONTAINS 'Graph'
 RETURN a.title
 
 // Combined with exact matching
 MATCH (a:Article)
-WHERE a._doc.title CONTAINS 'graph' AND a.status = 'published'
+WHERE a.doc.title CONTAINS 'Graph' AND a.status = 'published'
 RETURN a.title
+```
+
+`CONTAINS` on a JSON path is a case-sensitive substring match on the value at that path. With a JSON full-text index on the column, the scan first narrows to the rows whose indexed text contains the term (flushed rows from the index's text column, unflushed rows from their documents), and the predicate is then applied to those rows, so the answer is the same as without the index. One difference: without the index, a path into a document that is not a map (`a.doc.title` where `doc` is a string) is a type error, while with the index such a row is not among the candidates, so it is skipped instead of raising the error. `EXPLAIN` reports the index as `JSON_FTS`. A path outside the index's `paths` is evaluated without the prefilter.
+
+`uni.fts.query` on a `JSON` column searches the index's text, with the full query syntax:
+
+```cypher
+CALL uni.fts.query('Article', 'doc', 'graph -vector', 10)
+YIELD node, score
+RETURN node.title, score
 ```
 
 ### Query Routing Priority
@@ -481,84 +521,84 @@ RETURN a.title
 The query planner routes predicates to the most efficient index:
 
 ```
-1. _uid = 'xxx'           → UidIndex (O(1) lookup)
-2. column CONTAINS 'term' → Lance FTS (BM25 ranking)
-3. path = 'exact'         → JsonPathIndex (exact match)
-4. Pushable predicates    → Lance scan filter
-5. Else                   → Residual (post-load filter)
+1. _uid = 'xxx'                    → UidIndex (O(1) lookup)
+2. path = 'exact'                  → JsonPathIndex (exact match)
+3. doc[.path] CONTAINS 'text'      → JSON full-text candidates, then the predicate
+4. ANY(x IN n.p WHERE x IN [...])  → Inverted-index candidates, then the predicate
+5. Pushable predicates             → Lance scan filter
+6. Else                            → Residual (post-load filter)
 ```
 
 ### JSON FTS Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `with_positions` | false | Enable phrase search (stores term positions) |
+| `with_positions` | false | Store term positions (needed for phrase queries) |
+| `paths` | all | List of dotted key paths (`'title'`, `'meta.author'`) whose string values are indexed |
+
+Any other key is refused.
 
 ### How It Works
 
-JSON Full-Text indexes use Lance's inverted index with triplet tokenization:
+A JSON full-text index keeps a derived text column next to the JSON column: each row's string values (map values and list elements, recursively; keys and numbers are not text), one per line, restricted to `paths` when given. Every flush fills it, and creating the index fills it for rows already flushed. The index is a BM25 full-text index on that column, with the standard tokenizer.
 
 ```
-Document: { "title": "Graph Databases", "year": 2024 }
+Document: { "title": "Graph Databases", "tags": ["storage"], "year": 2024 }
          ↓
-Tokens:  (title, string, "graph"), (title, string, "databases"), (year, int, 2024)
+Text:     "storage\nGraph Databases"
          ↓
-Query:   title:graph → Matches documents with "graph" in title path
+Query:    uni.fts.query('Article', 'doc', 'graph', 10) → matches
 ```
 
 ---
 
 ## Inverted Indexes
 
-Inverted indexes enable efficient filtering on `List<String>` properties, ideal for tag-based access control and multi-value attribute queries.
+Inverted indexes store a term → vertex mapping for `List<String>` properties, for tag-based access control and multi-value attribute queries.
 
 ### Use Cases
 
-| Use Case | Query Pattern | Benefit |
-|----------|---------------|---------|
-| **Tag filtering** | `ANY(tag IN d.tags WHERE tag IN $allowed)` | O(k) vs O(n) scan |
-| **Security labels** | Filter by granted access tags | Multi-tenant filtering |
-| **Categories** | Documents in multiple categories | Efficient set intersection |
-| **Skills matching** | Users with any required skill | Fast membership checks |
+| Use Case | Query Pattern |
+|----------|---------------|
+| **Tag filtering** | `ANY(tag IN d.tags WHERE tag IN $allowed)` |
+| **Security labels** | Filter by granted access tags |
+| **Categories** | Documents in multiple categories |
+| **Skills matching** | Users with any required skill |
 
 ### Creating Inverted Indexes
 
-**Via Schema:**
-
-```json
-{
-  "indexes": {
-    "document_tags": {
-      "type": "inverted",
-      "label": "Document",
-      "property": "tags",
-      "config": {
-        "normalize": true,
-        "max_terms_per_doc": 10000
-      }
-    }
-  }
-}
-```
-
-**Via Cypher:**
+**Via procedure:**
 
 ```cypher
-CREATE FULLTEXT INDEX document_tags
-FOR (d:Document)
-ON EACH [d.tags]
+CALL uni.schema.createIndex('Document', 'tags', {type: 'INVERTED'})
+```
+
+The procedure uses the default configuration below.
+
+**Via Cypher DDL:**
+
+```cypher
+CREATE INVERTED INDEX document_tags FOR (d:Document) ON (d.tags)
 OPTIONS { normalize: true, max_terms_per_doc: 10000 }
 ```
+
+`IF NOT EXISTS` may follow the index name. `OPTIONS` takes `normalize` and `max_terms_per_doc`; any other key is refused.
 
 **Via Rust API:**
 
 ```rust
+use uni_db::core::schema::InvertedIndexConfig;
+
 db.schema()
     .label("Document")
         .property("tags", DataType::List(Box::new(DataType::String)))
         .index("tags", IndexType::Inverted(InvertedIndexConfig {
+            name: "document_tags".to_string(),
+            label: "Document".to_string(),
+            property: "tags".to_string(),
             normalize: true,
             max_terms_per_doc: 10_000,
+            metadata: Default::default(),
         }))
     .apply()
     .await?;
@@ -569,11 +609,11 @@ db.schema()
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `normalize` | `true` | Lowercase and trim whitespace on terms |
-| `max_terms_per_doc` | `10_000` | Maximum terms per document (DoS protection) |
+| `max_terms_per_doc` | `10_000` | Distinct terms recorded per document (DoS protection); a document with more is still found by every term |
 
 ### Query Patterns
 
-**ANY IN pattern (optimized):**
+**ANY IN pattern:**
 
 ```cypher
 // Finds documents with ANY of the specified tags
@@ -611,27 +651,9 @@ Result: Union of 'rust' and 'python' → [vid_1, vid_2, vid_3]
 
 ### Query Planner Integration
 
-When an inverted index exists on a `List<String>` property, the query planner automatically rewrites `ANY IN` patterns to use index lookups:
+A predicate `ANY(x IN n.p WHERE x IN <list>)`, where the list is a literal of strings or a parameter, on a property with an `Online` inverted index is served as a candidate prefilter: the scan reads only the vertices the index lists for any of the terms, plus the unflushed vertices whose list holds one, and the predicate is then applied to them, so the answer is the same as without the index. `EXPLAIN` reports the index as `INVERTED`, and `PROFILE` counts the lookup in the scan's `index_hits`.
 
-```
-Query: MATCH (d:Document) WHERE ANY(tag IN d.tags WHERE tag IN $allowed) RETURN d
-
-Without Index:
-├─ Full Scan: Document
-└─ Filter: ANY(tag IN d.tags WHERE tag IN $allowed)  // O(n × m)
-
-With Inverted Index:
-├─ Inverted Index Lookup: tags IN $allowed           // O(k)
-└─ Fetch: Document properties
-```
-
-### Performance Comparison
-
-| Scenario | Without Index | With Index | Speedup |
-|----------|---------------|------------|---------|
-| 1M docs, 10 tags each, query 3 tags | ~5s scan | ~10ms | 500x |
-| 100K docs, security filter | ~500ms | ~5ms | 100x |
-| Multi-value category filter | ~1s | ~15ms | 67x |
+The prefilter is not used inside a transaction, on a pinned snapshot or on a fork (the postings follow primary's newest state), or when a term is not a string; those reads scan the label.
 
 ---
 
@@ -658,8 +680,13 @@ DROP INDEX paper_year
 ### Rebuild Indexes
 
 ```rust
-// Rust API
-db.rebuild_indexes("Paper", false).await?;
+// Rust API: rebuild every index on a label (`true` runs it in the background)
+db.indexes().rebuild("Paper", false).await?;
+```
+
+```python
+# Python
+db.indexes().rebuild("Paper", background=False)
 ```
 
 ---
@@ -728,23 +755,25 @@ config.index_rebuild.retry_delay = Duration::from_secs(60); // Delay between ret
 
 ## Index Storage
 
-Indexes are stored within the Lance dataset structure:
+Vector, scalar and full-text indexes are Lance-native indexes inside the label's dataset. Inverted and sparse indexes, and the UID index, are separate datasets under `indexes/`:
 
 ```
 storage/
-├── vertices_Paper/
+├── vertices_Paper.lance/
 │   ├── data/
-│   │   └── *.lance
 │   ├── _indices/                    # Lance native indexes
-│   │   └── embedding_idx-uuid/      # Vector index
-│   │       ├── index.idx
-│   │       └── aux/
+│   │   ├── <uuid>/                  # Vector index
+│   │   │   ├── index.idx
+│   │   │   └── auxiliary.idx
+│   │   ├── <uuid>/                  # Scalar (BTree) index
+│   │   └── <uuid>/                  # Full-text index
 │   └── _versions/
 └── indexes/
-    ├── scalar_paper_year/           # Separate scalar index
-    │   └── index.lance
-    └── fulltext_paper_search/       # Full-text index
-        └── index/
+    ├── Paper/
+    │   ├── tags_inverted/           # Inverted index (List<String>)
+    │   └── emb_sparse/              # Sparse vector index
+    └── uni_id_to_vid/
+        └── Paper/index.lance        # UID → VID index
 ```
 
 ---
@@ -783,7 +812,6 @@ Indexes integrate with Uni's predicate pushdown optimization:
 | `p.x > 5` | BTree | Yes |
 | `p.x IN [1,2,3]` | BTree | Yes |
 | `p.x IS NULL` | BTree | Yes |
-| `p._doc CONTAINS 'foo'` | JSON FTS | Yes (if FTS-indexed) |
 | `p.x CONTAINS 'foo'` | None | No (residual, if not FTS-indexed) |
 | `p.x STARTS WITH 'foo'` | BTree | Partial |
 | `func(p.x) = 5` | None | No (residual) |
@@ -822,7 +850,7 @@ Indexes integrate with Uni's predicate pushdown optimization:
 SHOW INDEXES
 ```
 
-For rebuilds, use the Rust API (`db.rebuild_indexes("Label", async_)`) or drop/recreate the index in Cypher.
+For rebuilds, use `db.indexes().rebuild("Label", background)` (Rust and Python) or drop/recreate the index in Cypher.
 
 ---
 

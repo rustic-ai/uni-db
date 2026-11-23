@@ -116,21 +116,23 @@ CREATE (c:Chunk {id: 'c1', text: 'Function verify() checks signatures.'})
 Alternatively, you can pre-compute embeddings externally or via the Uni-Xervo runtime directly:
 
 ```rust
-let xervo = db.xervo()?;
+let xervo = db.xervo();
 let embeddings = xervo.embed("embed/default", &["Function verify() checks signatures."]).await?;
 ```
 
-For bulk import, use JSONL with either pre-computed embeddings or rely on the auto-embed pipeline:
+For bulk loads, use the bulk writer (see [Bulk Ingest](../features/bulk-ingest.md)) with either
+pre-computed embeddings or the auto-embed pipeline. `uni import` does not load chunks: it runs
+only the built-in Semantic Scholar demo importer.
 
-```bash
-# With pre-computed embeddings
-# chunks.jsonl: {"id": "c1", "text": "Function verify() checks signatures.", "embedding": [...]}
-# Without embeddings (auto-generated if index has embedding config)
-# chunks.jsonl: {"id": "c1", "text": "Function verify() checks signatures."}
-
-uni import support-bot \
-  --papers chunks.jsonl \
-  --citations relations.jsonl
+```python
+writer = session.tx().bulk_writer().build()
+writer.insert_vertices("Chunk", [
+    # With a pre-computed embedding (c1_embedding: a list of floats)
+    {"id": "c1", "text": "Function verify() checks signatures.", "embedding": c1_embedding},
+    # Without one (generated if the index has an embedding config)
+    {"id": "c2", "text": "Function sign() produces signatures."},
+])
+writer.commit()
 ```
 
 ### Linking chunks to entities
@@ -194,7 +196,8 @@ With Uni-Xervo's generation API, you can close the RAG loop entirely within Uni 
 use uni_db::xervo::{Message, GenerationOptions};
 
 // 1. Retrieve context (from the GraphRAG query above)
-let context_rows = db.query_with(
+let session = db.session();
+let context_rows = session.query_with(
     "CALL uni.vector.query('Chunk', 'embedding', $q, 5) YIELD node, distance
      MATCH (node)-[:MENTIONS]->(topic:Entity)
      RETURN node.text AS chunk, topic.name AS entity, distance"
@@ -223,5 +226,5 @@ println!("{}", result.text);
 ### Key Advantages
 
 *   **Speed**: No network round-trip between Vector DB and Graph DB. The join happens in-memory via the adjacency cache.
-*   **Simplicity**: Just one Docker container (or embedded binary) to manage.
+*   **Simplicity**: One embedded library inside your process; no separate servers to run.
 *   **Precision**: We filter vector noise using graph structure (only chunks related to specific entities).

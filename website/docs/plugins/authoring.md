@@ -16,8 +16,8 @@ We show the two WASM paths side by side — the **Component Model** (WASM-CM)
 and **Extism** — because they are the production sandboxed loaders. If you
 want the in-process scripting loaders instead, the same surface and manifest
 concepts apply; jump to [Rhai](loaders/rhai.md) or [PyO3](loaders/pyo3.md)
-once you've read this page. To author the Rust-only surfaces — operators,
-index kinds, storage backends, CRDTs, hooks, triggers, and more — see
+once you've read this page. To author the Rust-only surfaces — optimizer rules,
+index kinds, label storage, CRDTs, hooks, triggers, and more — see
 [Authoring native (Rust) plugins](authoring-rust.md).
 
 The worked sources for this guide live in the repository:
@@ -31,7 +31,8 @@ The worked sources for this guide live in the repository:
 
 A plugin registers one or more **surfaces** — the kinds of extension point it
 plugs into. Across all four non-Rust loaders (WASM-CM, Extism, Rhai, PyO3),
-v1 covers three surfaces:
+v1 covers three surfaces, plus guest-authored graph algorithms (covered in
+[Graph Algorithms](graph-algorithms.md)):
 
 | Surface | What it is | Capability gate |
 | --- | --- | --- |
@@ -49,7 +50,7 @@ carry. When you're choosing, the rule of thumb is:
 - You need to `CALL` it as a statement, possibly yielding several rows, or it
   has side effects → **procedure**.
 
-The full catalogue of surfaces the framework defines (storage backends,
+The full catalogue of surfaces the framework defines (label storage,
 index kinds, CRDTs, hooks, algorithms, and more) — including which are
 reachable from native Rust plugins only — is on the
 [Concepts](concepts.md) page. This guide builds a scalar; the manifest and
@@ -392,9 +393,10 @@ session on that handle.
 
 === "Python"
 
-    The default wheel ships the Component Model loader as
-    `load_wasm_component`; Extism plugins load via `load_wasm_extism` (which
-    requires the `extism-plugins` feature). Pass `grants` for the capabilities
+    The Component Model loader is `load_wasm_component` (the `wasm-plugins`
+    feature) and Extism plugins load via `load_wasm_extism` (the
+    `extism-plugins` feature). The published wheels omit both; build the
+    bindings with `maturin develop --features wasm-plugins,extism-plugins`. Pass `grants` for the capabilities
     the host is willing to grant — `["ScalarFn"]` is enough here.
 
     ```python
@@ -430,16 +432,17 @@ session on that handle.
     use uni_plugin::{Capability, CapabilitySet};
     use uni_plugin_wasm::WasmLoader;
 
-    let db = Uni::open("./geo.db")?;
+    let db = Uni::open("./geo.db").build().await?;
     let bytes = std::fs::read(
         "examples/example-wasm-geo/target/wasm32-wasip2/release/example_wasm_geo.wasm",
     )?;
 
     let loader = WasmLoader::new();
     let caps = CapabilitySet::from_iter_of([Capability::ScalarFn]);
-    let host_grants = vec!["ScalarFn".to_owned()];
 
-    let outcome = db.load_wasm_component(&loader, &bytes, &host_grants, &caps)?;
+    // host grants, then registrar capabilities; the Python methods pass the
+    // same set as both.
+    let outcome = db.load_wasm_component(&loader, &bytes, &caps, &caps)?;
     assert_eq!(outcome.plugin_id, "ai.example.geo");
     ```
 
@@ -483,7 +486,7 @@ it. The `m6` test is the pattern to copy — load the plugin, build an input
 batch, invoke by `QName`, and compare against the reference, byte-equal for
 the compiled WASM paths or within a small ULP tolerance for scripted loaders.
 The geo example also ships unit tests on the math itself (Paris→London
-≈ 343.557 km, antipodes ≈ half-circumference) that you can mirror for your
+≈ 343.556 km, antipodes ≈ half-circumference) that you can mirror for your
 own formula.
 
 ---

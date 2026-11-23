@@ -15,7 +15,6 @@ Uni executes filters, projections, and aggregations using columnar, vectorized e
     ```rust
     use uni_db::Uni;
 
-    # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./my_db").build().await?;
     let session = db.session();
 
@@ -24,8 +23,6 @@ Uni executes filters, projections, and aggregations using columnar, vectorized e
     ).await?;
 
     println!("{:?}", results);
-    # Ok(())
-    # }
     ```
 
 === "Python"

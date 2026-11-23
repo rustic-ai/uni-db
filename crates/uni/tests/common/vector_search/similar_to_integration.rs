@@ -1729,3 +1729,88 @@ async fn test_similar_to_fts_without_flush() -> Result<()> {
 
     Ok(())
 }
+
+// ── Sparse and multi-vector sources ─────────────────────────────────────────
+
+/// `similar_to` scores a sparse-vector property by dot product and a
+/// `LIST<VECTOR>` property by MaxSim, as the pure `similar_to` does, in both
+/// storage tiers. It answered NULL on the first and failed on the second.
+#[tokio::test]
+async fn test_similar_to_sparse_and_multivector_sources() -> Result<()> {
+    use uni_db::Value;
+
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Doc")
+        .property("title", DataType::String)
+        .property("emb", DataType::SparseVector { dimensions: 100 })
+        .property(
+            "tokens",
+            DataType::List(Box::new(DataType::Vector { dimensions: 2 })),
+        )
+        .apply()
+        .await?;
+    let sparse = |indices: Vec<u32>, values: Vec<f32>| Value::SparseVector { indices, values };
+    let tx = db.session().tx().await?;
+    for (title, emb, tokens) in [
+        ("a", sparse(vec![1, 5], vec![1.0, 2.0]), "[[1.0, 0.0]]"),
+        (
+            "b",
+            sparse(vec![5, 9], vec![0.5, 4.0]),
+            "[[1.0, 0.0], [0.0, 1.0]]",
+        ),
+    ] {
+        tx.execute_with(&format!(
+            "CREATE (:Doc {{title: $title, emb: $emb, tokens: {tokens}}})"
+        ))
+        .param("title", Value::String(title.to_string()))
+        .param("emb", emb)
+        .run()
+        .await?;
+    }
+    tx.commit().await?;
+
+    let query = sparse(vec![1, 9], vec![3.0, 1.0]);
+    for tier in ["L0", "L1"] {
+        if tier == "L1" {
+            db.flush().await?;
+        }
+        // a: 1*3 = 3; b: 4*1 = 4.
+        let result = db
+            .session()
+            .query_with("MATCH (d:Doc) RETURN d.title AS t, similar_to(d.emb, $q) AS s ORDER BY t")
+            .param("q", query.clone())
+            .fetch_all()
+            .await?;
+        let got: Vec<(String, f64)> = result
+            .rows()
+            .iter()
+            .map(|r| Ok((r.get::<String>("t")?, r.get::<f64>("s")?)))
+            .collect::<Result<_>>()?;
+        assert_eq!(
+            got,
+            vec![("a".to_string(), 3.0), ("b".to_string(), 4.0)],
+            "{tier}: sparse similar_to"
+        );
+
+        // MaxSim with query tokens [1,0] and [0,1] under cosine: a scores
+        // 1 + 0 = 1, b scores 1 + 1 = 2.
+        let result = db
+            .session()
+            .query(
+                "MATCH (d:Doc) \
+                 RETURN d.title AS t, similar_to(d.tokens, [[1.0, 0.0], [0.0, 1.0]]) AS s \
+                 ORDER BY t",
+            )
+            .await?;
+        let got: Vec<(String, f64)> = result
+            .rows()
+            .iter()
+            .map(|r| Ok((r.get::<String>("t")?, r.get::<f64>("s")?)))
+            .collect::<Result<_>>()?;
+        assert_eq!(got.len(), 2, "{tier}");
+        assert!((got[0].1 - 1.0).abs() < 1e-6, "{tier}: a: {got:?}");
+        assert!((got[1].1 - 2.0).abs() < 1e-6, "{tier}: b: {got:?}");
+    }
+    Ok(())
+}

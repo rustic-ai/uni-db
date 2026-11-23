@@ -1187,9 +1187,13 @@ fn build_fold_declaration(pair: Pair<LocyRule>) -> Result<FoldBinding, ParseErro
                 name = Some(normalize_locy_identifier(child.as_str()));
             }
             LocyRule::fold_expression => {
-                // fold_expression = { expression }
+                // fold_expression = { fold_count_star | expression }
                 let expr_pair = child.into_inner().next().unwrap();
-                expr = Some(reparse_as_cypher_expression(expr_pair.as_str())?);
+                expr = Some(if expr_pair.as_rule() == LocyRule::fold_count_star {
+                    reparse_as_cypher_expression("MCOUNT()")?
+                } else {
+                    normalize_fold_count_star(reparse_as_cypher_expression(expr_pair.as_str())?)
+                });
             }
             LocyRule::eq => {}
             _ => {}
@@ -1200,6 +1204,32 @@ fn build_fold_declaration(pair: Pair<LocyRule>) -> Result<FoldBinding, ParseErro
         name: name.unwrap(),
         aggregate: expr.unwrap(),
     })
+}
+
+/// Rewrites a fold's `COUNT(*)` to the zero-argument `COUNT()`.
+///
+/// A FOLD counts rows through its zero-argument form; Cypher parses
+/// `COUNT(*)` with a `*` argument, which a fold would otherwise read as an
+/// input column.
+fn normalize_fold_count_star(expr: ast::Expr) -> ast::Expr {
+    match expr {
+        ast::Expr::FunctionCall {
+            name,
+            args,
+            distinct,
+            window_spec,
+        } if name.eq_ignore_ascii_case("COUNT")
+            && matches!(args.as_slice(), [ast::Expr::Wildcard]) =>
+        {
+            ast::Expr::FunctionCall {
+                name,
+                args: Vec::new(),
+                distinct,
+                window_spec,
+            }
+        }
+        other => other,
+    }
 }
 
 /// Parse a post-FOLD `REQUIRE` clause into definitional-threshold expressions.

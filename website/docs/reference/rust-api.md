@@ -1,6 +1,6 @@
 # Rust API Reference
 
-Reference for the current Uni 5.3.0 source API. Consult Rustdoc for the full
+Reference for the current Uni 6.0.0 source API. Consult Rustdoc for the full
 public surface; this page explains the main types and workflows.
 
 ## Quick Start
@@ -48,7 +48,7 @@ async fn main() -> uni_db::Result<()> {
 
 ## Architecture Overview
 
-Uni 2.0.0 uses a three-tier access model:
+Uni uses a three-tier access model:
 
 ```
 Uni  (lifecycle / admin)
@@ -104,12 +104,42 @@ let db = Uni::temporary().build().await?;
 | `list_snapshots()` | `Result<Vec<SnapshotManifest>>` | List all available snapshots. |
 | `restore_snapshot(id)` | `Result<()>` | Restore the database (data and schema) to a snapshot taken with `create_snapshot`, at once and on disk. |
 | `delete_snapshot(id)` | `Result<()>` | Delete a snapshot and release the storage versions it pins, so compaction reclaims them. |
-| `shutdown()` | `Result<()>` | Graceful shutdown: flush data, stop background tasks. |
+| `shutdown()` | `Result<()>` | Graceful shutdown: flush data, stop background tasks. Consumes the handle. |
+| `shutdown_in_place()` | `Result<()>` | As `shutdown()`, without consuming the handle (for a shared `Arc<Uni>`). |
+| `uri()` | `&str` | Path or URI backing the database (the scratch directory for `temporary()`). |
+| `background_task_count()` | `usize` | Number of tracked background tasks still running. |
+| `bulk_load_applied(load_id)` | `Result<bool>` | Whether the bulk load `load_id` reached its commit point. |
+| `xervo()` | `UniXervo` | Access embedding, generation and NLP operations. |
 | `config()` | `&UniConfig` | Get current configuration. |
 | `write_lease()` | `Option<&WriteLease>` | Get write lease configuration, if any. |
 | `compaction()` | `Compaction` | Access compaction operations. |
 | `indexes()` | `Indexes` | Access index management operations. |
 | `functions()` | `Functions` | Access custom Cypher function management. |
+
+### Forks (admin)
+
+All `async`. Forks are created and opened through `Session::fork`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `list_forks()` | `Vec<ForkInfo>` | Every known fork. |
+| `fork_info(name)` | `Result<ForkInfo>` | One fork's metadata (`UniError::ForkNotFound` if absent). |
+| `drop_fork(name)` / `drop_fork_cascade(name)` | `Result<()>` | Drop a leaf fork / a fork and its subtree. A tagged fork (anywhere in the subtree) is refused with `UniError::ForkTagged { name, tags }`, and nothing is tombstoned. |
+| `tag_fork(fork, tag)` / `untag_fork(fork, tag)` | `Result<()>` | Flush the fork and pin its current version / remove the fork's own tag. A tagged fork cannot be dropped: untag first. `tag_fork` errors with `ForkLifecycle { stage: "tag" }` on a fork with no branched datasets. |
+| `list_fork_tags(fork)` | `Result<Vec<String>>` | This fork's tags; never another fork's tag of the same name. |
+| `diff_fork_primary(fork)` / `diff_forks(a, b)` | `Result<ForkDiff>` | Content diff against primary or another fork. Edited rows pair into `changed` by `(label, ext_id)`, and by inherited VID / EID when one side is the other's ancestor. |
+| `promote_from_fork(fork, &patterns)` | `Result<PromoteReport>` | Apply fork changes to primary in one transaction. `ReadOnly` on a read-only handle. |
+| `promote_from_fork_with_options(fork, &patterns, &options)` | `Result<PromoteReport>` | As above, with `PromoteOptions` (conflict policy). |
+
+### Plugins
+
+| Method | Description |
+|--------|-------------|
+| `add_plugin(plugin)` | Register a compiled-in `uni_plugin::Plugin`. |
+| `load_rhai_plugin(loader, script, registrar_caps)` | Load a Rhai script plugin (`rhai-plugins` feature). |
+| `load_wasm_component(loader, bytes, host_grants, registrar_caps)` | Load a WASM component plugin (`wasm-plugins` feature). |
+| `load_wasm_extism(loader, bytes, host_grants, registrar_caps)` | Load an Extism plugin (`extism-plugins` feature). |
+| `load_python_plugin(py, loader, module_src, module_name, registrar_caps)` | Load a Python plugin (`pyo3-plugins` feature). |
 
 ### Schema Introspection
 
@@ -133,10 +163,11 @@ Returned by `Uni::open()`, `Uni::create()`, etc. Configures the database before 
 ```rust
 let db = Uni::open("./my-graph")
     .schema_file("schema.json")
-    .config(UniConfig { /* ... */ })
+    .config(UniConfig::default())
     .read_only()
     .write_lease(WriteLease::Local)
-    .remote_storage("s3://bucket/data", cloud_config)
+    .hybrid("s3://bucket/data")
+    .cloud_storage(cloud_config)
     .build()
     .await?;
 ```
@@ -146,15 +177,22 @@ let db = Uni::open("./my-graph")
 | `schema_file(path)` | Load schema from JSON file on initialization. |
 | `config(config)` | Set `UniConfig` options (includes `strict_schema`, timeouts, cache, etc.). |
 | `read_only()` | Open in read-only mode (no writer created). |
+| `set_aside_stale_wal()` | Hybrid mode: when the local WAL belongs to an earlier writer of the store (`UniError::StaleWal`), move it to `wal_set_aside/` and open. |
 | `write_lease(lease)` | Set write lease strategy for multi-agent access. |
 | `xervo_catalog(catalog)` | Set Uni-Xervo model catalog. |
 | `xervo_runtime(runtime)` | Set pre-built Xervo `ModelRuntime` directly (for testing or advanced use). |
-| `remote_storage(url, config)` | Configure hybrid local+remote storage. |
+| `cloud_storage(config)` | Typed object-store configuration (endpoint, credentials, region) for a remote-only or hybrid store. |
+| `storage_option(key, value)` / `storage_options(map)` | Raw `object_store` options passed to both storage clients; highest precedence. |
+| `hybrid(remote_url)` | Hybrid mode: data at `remote_url`, WAL and ID allocator in the opened directory. |
+| `remote_storage(url, config)` | Deprecated: `hybrid(url).cloud_storage(config)`. |
+| `skip_invalid_locy_rules(bool)` | Skip persisted Locy rules that no longer compile instead of failing the open. |
+| `plugin_trust(cfg)` | `PluginTrustConfig` for externally loaded plugins (signature policy, trust roots, artifact pins). Default: signatures not checked. |
+| `build()` | `async` -- Open the database. Returns `Result<Uni>`. |
+| `build_sync()` | Open from synchronous code on a process-wide runtime. Panics inside an async context. |
 
-!!! note "`remote_storage` is the Rust spelling"
-    The Python builder exposes this as `.hybrid(local, remote)` +
-    `.cloud_config(cfg)`. The Rust builder has neither — `remote_storage` takes
-    both in one call.
+!!! note "Python spelling"
+    The Python builder exposes these as `.hybrid(local, remote)`,
+    `.cloud_config(dict)` and `.storage_options(dict)`.
 
 **Concurrency control — `UniConfig::ssi_enabled`**
 
@@ -170,8 +208,6 @@ let db = Uni::open("./my_db")
     .build()
     .await?;
 ```
-
-| `build()` | `async` -- Open the database. Returns `Result<Uni>`. |
 
 ---
 
@@ -209,6 +245,7 @@ let session2 = session.clone();
 |--------|---------|-------------|
 | `query(cypher)` | `Result<QueryResult>` | Execute a read-only Cypher query. Rejects mutations with an error. Uses transparent plan cache. |
 | `query_with(cypher)` | `QueryBuilder` | Build a parameterized read query with `.param()`, `.timeout()`, `.max_memory()`. |
+| `run(cypher)` | `Result<QueryResult>` | Run one statement: a read as `query()`, a write in its own auto-committed transaction. |
 
 ### Locy Evaluation
 
@@ -230,6 +267,18 @@ let session2 = session.clone();
 |--------|---------|-------------|
 | `tx()` | `Result<Transaction>` | Create a new transaction. Fails if session is pinned or another write context is active. |
 | `tx_with()` | `TransactionBuilder` | Build a transaction with `.timeout()` and `.isolation()` options. |
+| `scratch()` | `Result<Transaction>` | Like `tx()`, but `commit()` is refused, so its writes are always discarded. |
+| `transact_with_retry(opts, f)` | `Result<T>` | Run `f` (`\|tx\| Box::pin(async move { ... })`) in a fresh transaction and commit, retrying on a retriable conflict per `RetryOptions`. |
+| `execute_with_retry(cypher)` | `Result<ExecuteResult>` | One mutation with the default retry policy. |
+
+### Forks and Maintenance
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `fork(name)` | `ForkBuilder` | Open or create a fork; `.ttl(..)`, then `.await`. Returns a forked `Session`. |
+| `fork_schema()` | `ForkSchemaBuilder` | Fork-local schema additions on a forked session. |
+| `is_forked()` | `bool` | Whether this session is scoped to a fork. |
+| `flush()` | `Result<()>` | Flush this session's database (on a fork, the fork's) to storage. |
 
 ### Scoped Parameters
 
@@ -238,7 +287,8 @@ let session = db.session();
 session.params().set("tenant", 42);
 session.params().set("region", "us-east");
 
-// Parameters are auto-merged into queries as $session.tenant, $session.region
+// Parameters are auto-merged into queries and Locy programs as
+// $session.tenant, $session.region
 let rows = session.query("MATCH (n) WHERE n.tenant = $session.tenant RETURN n").await?;
 ```
 
@@ -293,6 +343,8 @@ session.refresh().await?;
 | `watch_with()` | `WatchBuilder` | Build a filtered commit notification stream. |
 
 ### Hooks
+
+Deprecated: register hooks with `Uni::add_plugin(uni_plugin_host::hooks::BuiltinHookPlugin::new(...))`.
 
 | Method | Description |
 |--------|-------------|
@@ -396,10 +448,12 @@ println!("Version: {}, Mutations: {}", result.version, result.mutations_committe
 | `param(name, value)` | `Self` | Bind a parameter. |
 | `cancellation_token(token)` | `Self` | Attach a cancellation token. |
 | `timeout(duration)` | `Self` | Set maximum execution time. |
+| `max_memory(bytes)` | `Self` | Set maximum memory for the statement. |
 | `execute()` | `Result<ExecuteResult>` | Execute as mutation; returns affected rows. |
 | `fetch_all()` | `Result<QueryResult>` | Execute as query; returns rows. |
 | `fetch_one()` | `Result<Option<Row>>` | Execute and return first row. |
 | `cursor()` | `Result<QueryCursor>` | Execute and return a streaming cursor. |
+| `profile()` | `Result<(QueryResult, ProfileOutput)>` | Execute with profiling. |
 
 ### Cypher Writes
 
@@ -415,6 +469,8 @@ println!("Version: {}, Mutations: {}", result.version, result.mutations_committe
 | `param(key, value)` | `Self` | Bind a parameter. |
 | `params(iter)` | `Self` | Bind multiple parameters. |
 | `timeout(duration)` | `Self` | Set maximum execution time. |
+| `max_memory(bytes)` | `Self` | Set maximum memory for the mutation. |
+| `cancellation_token(token)` | `Self` | Attach a cancellation token. |
 | `run()` | `Result<ExecuteResult>` | Execute the mutation. |
 | `profile()` | `Result<(ExecuteResult, ProfileOutput)>` | Execute the mutation with profiling. |
 
@@ -465,7 +521,8 @@ tx.commit().await?;
 
 | Method | Description |
 |--------|-------------|
-| `require_fresh()` | Reject if any commits occurred between evaluation and apply. |
+| `require_fresh()` | Reject if any commits occurred between evaluation and apply (the default; `apply()` behaves this way). |
+| `allow_stale()` | Apply whatever the version gap. |
 | `max_version_gap(n)` | Reject if gap exceeds `n` versions. |
 | `run()` | Execute the apply operation. Returns `Result<ApplyResult>`. |
 
@@ -627,27 +684,40 @@ db.schema()
 ```rust
 pub enum DataType {
     String,
+    Int32,
     Int64,
+    Float32,
     Float64,
-    Boolean,
+    Bool,
+    Timestamp,
     Date,
+    Time,
     DateTime,
     Duration,
+    CypherValue,                 // schemaless/JSON-like value (DDL `JSON`)
     Bytes,
-    Json,
+    Point(PointType),
     Vector { dimensions: usize },
-    // ... additional variants
+    SparseVector { dimensions: usize },
+    BinaryVector { dimensions: usize },
+    Btic,
+    Crdt(CrdtType),
+    List(Box<DataType>),
+    Map(Box<DataType>, Box<DataType>),
 }
 ```
 
 ### IndexType Enum
 
 ```rust
+#[non_exhaustive]
 pub enum IndexType {
     Vector(VectorIndexCfg),
     FullText,
+    FullTextWithAnalyzer(AnalyzerConfig),   // build with IndexType::full_text_with_analyzer
     Scalar(ScalarType),
     Inverted(InvertedIndexConfig),
+    Sparse { dimensions: usize, quantize: bool, embedding: Option<EmbeddingCfg>, idf: bool },
 }
 
 pub enum ScalarType {
@@ -682,6 +752,7 @@ pub enum VectorMetric {
     Cosine,
     L2,
     Dot,
+    L1,   // exact search only; an L1 column cannot build an ANN index
 }
 ```
 
@@ -836,7 +907,7 @@ tx.commit().await?;
 | `append(properties)` | `Result<()>` | Append a single row. Auto-flushes when buffer is full. |
 | `write_batch(record_batch)` | `Result<()>` | Append an Arrow `RecordBatch`. |
 | `finish()` | `Result<BulkStats>` | Flush remaining rows and commit. Consumes self. |
-| `abort()` | `()` | Discard all data. Consumes self. |
+| `abort()` | `Result<()>` | Discard all data. `async`; consumes self. |
 | `buffered_count()` | `usize` | Number of rows currently buffered. |
 
 ---
@@ -861,8 +932,10 @@ let result = session.locy_with("
     .run()
     .await?;
 
-for row in result.rows() {
-    println!("{:?}", row);
+if let Some(rows) = result.rows() {
+    for row in rows {
+        println!("{:?}", row);
+    }
 }
 ```
 
@@ -873,10 +946,13 @@ for row in result.rows() {
 | `params_map(map)` | `Self` | Bind from a `HashMap`. |
 | `timeout(duration)` | `Self` | Override evaluation timeout. |
 | `max_iterations(n)` | `Self` | Override max fixpoint iterations. |
+| `max_memory(bytes)` | `Self` | Cap the memory this evaluation may use. |
+| `allow_partial(bool)` | `Self` | Return the partial result (with `incomplete` diagnostics) instead of `UniError::LocyIncomplete` when the evaluation exceeds `timeout` or `max_iterations`. |
 | `cancellation_token(token)` | `Self` | Attach a cancellation token. |
 | `with_config(config)` | `Self` | Apply a full `LocyConfig`. |
 | `run()` | `Result<LocyResult>` | Evaluate and return results. |
 | `explain()` | `Result<LocyExplainOutput>` | Explain without executing. |
+| `profile()` | `Result<(LocyResult, LocyProfileOutput)>` | Evaluate with profiling. |
 
 Cancellation is enforced against the whole evaluation, not just the Cypher
 statements the program dispatches, so a long-running fixpoint is interruptible.
@@ -901,12 +977,14 @@ let result = session.locy("
     QUERY edge_rule RETURN a, b
 ").await?;
 
-// Access rows (via Deref to inner LocyResult)
-for row in result.rows() { /* ... */ }
+// Access rows (via Deref to inner LocyResult); `rows()` is `Option<&Vec<FactRow>>`
+if let Some(rows) = result.rows() {
+    for row in rows { /* ... */ }
+}
 
 // Execution metrics
 let metrics = result.metrics();
-println!("Duration: {:?}", metrics.duration);
+println!("Duration: {:?}", metrics.total_time);
 
 // Derived facts (from DERIVE commands)
 if let Some(derived) = result.derived() {
@@ -1178,8 +1256,13 @@ impl SessionHook for AuditHook {
 }
 
 let mut session = db.session();
+#[allow(deprecated)]
 session.add_hook("audit", AuditHook);
 ```
+
+`Session::add_hook` and the other hook methods are deprecated; a hook registered
+as a plugin (`Uni::add_plugin(uni_plugin_host::hooks::BuiltinHookPlugin::new(...))`)
+fires for every session.
 
 ---
 
@@ -1191,11 +1274,14 @@ Coordinate write access across multiple processes sharing the same database.
 
 ```rust
 pub enum WriteLease {
-    Local,                          // Single-process lock (default)
-    DynamoDB { table: String },     // DynamoDB-based distributed lease
-    Custom(Box<dyn WriteLeaseProvider>),  // Custom provider
+    Local,                          // Default: OS lock (local) or renewed lease (object store)
+    DynamoDB { table: String },     // Not implemented: the open fails
+    Custom(Box<dyn WriteLeaseProvider>),  // Your provider: acquire, heartbeat, release
+    Unenforced,                     // No lock or lease: one writer by convention
 }
 ```
+
+`Local` (the default) holds a local store with an OS lock and an object store with a renewed lease. A second writable open fails with `UniError::StoreLocked`, and a handle that loses its lease (or was closed) fails writes with `UniError::WriterFenced`. Read-only handles take no lease. `DynamoDB` is not implemented, so the open fails. Timing is in `UniConfig::writer_lease` (`ttl` 30 s, `renew_interval` 10 s, `acquire_grace` 5 s, `clock_skew` 5 s). Reads see the table versions the latest manifest names; a read-only handle picks up newer ones at most once per `UniConfig::read_cut_refresh` (by default every query for a local store, once a second for an object store).
 
 ### WriteLeaseProvider Trait
 
@@ -1264,14 +1350,14 @@ Mirrors the `Session` API, with all async methods wrapped in `block_on()`.
 | `query_with(cypher)` | `QueryBuilderSync` | `.param().fetch_all()` |
 | `locy(program)` | `Result<LocyResult>` | |
 | `locy_with(program)` | `LocyBuilderSync` | `.param().run()` |
-| `rules()` | `RuleRegistry` | |
+| `rules()` | `RuleRegistrySync` | |
 | `compile_locy(program)` | `Result<CompiledProgram>` | |
 | `tx()` | `Result<TransactionSync>` | |
 | `tx_with()` | `TransactionBuilderSync` | |
 | `watch()` | `CommitStream` | |
 | `watch_with()` | `WatchBuilder` | |
-| `add_hook(name, hook)` | | Takes `&mut self` |
-| `remove_hook(name)` | `bool` | |
+| `add_hook(name, hook)` | | Deprecated. Takes `&mut self` |
+| `remove_hook(name)` | `bool` | Deprecated |
 | `pin_to_version(id)` | `Result<()>` | Takes `&mut self` |
 | `pin_to_timestamp(ts)` | `Result<()>` | Takes `&mut self` |
 | `refresh()` | `Result<()>` | Takes `&mut self` |
@@ -1290,7 +1376,7 @@ Mirrors the `Session` API, with all async methods wrapped in `block_on()`.
 | `query(cypher)` | `Result<QueryResult>` | |
 | `query_with(cypher)` | `TxQueryBuilderSync` | |
 | `execute(cypher)` | `Result<ExecuteResult>` | |
-| `execute_with(cypher)` | `ExecuteBuilderSync` | `.param().run()`, `.param().profile()` |
+| `execute_with(cypher)` | `ExecuteBuilderSync` | `.param()`, `.params()`, `.timeout()`, `.max_memory()`, then `.run()` |
 | `locy(program)` | `Result<LocyResult>` | |
 | `locy_with(program)` | `TxLocyBuilderSync` | `.param().run()` |
 | `apply(derived)` | `Result<ApplyResult>` | |
@@ -1331,7 +1417,7 @@ let session = template.create();
 |--------|---------|-------------|
 | `param(key, value)` | `Self` | Bind a parameter for all sessions. |
 | `rules(program)` | `Result<Self>` | Pre-compile Locy rules (eager compilation). |
-| `hook(name, hook)` | `Self` | Attach a named session hook. |
+| `hook(name, hook)` | `Self` | Attach a named session hook (a `SessionHook`; see [Session Hooks](#session-hooks)). |
 | `query_timeout(duration)` | `Self` | Default query timeout. |
 | `transaction_timeout(duration)` | `Self` | Default transaction timeout. |
 | `build()` | `Result<SessionTemplate>` | Build the template. |
@@ -1429,9 +1515,9 @@ println!("Columns: {:?}", result.columns());
 println!("Row count: {}", result.len());
 println!("Empty: {}", result.is_empty());
 
-// Metrics
+// Metrics (parse_time, plan_time, exec_time, total_time, rows_returned, ...)
 let metrics = result.metrics();
-println!("Duration: {:?}", metrics.duration);
+println!("Duration: {:?}", metrics.total_time);
 
 // Consume into owned rows
 let rows: Vec<Row> = result.into_rows();
@@ -1443,10 +1529,10 @@ Returned by `tx.execute()` and `ExecuteBuilder::run()`.
 
 ```rust
 let result = tx.execute("CREATE (:Person {name: 'Alice'})").await?;
-println!("Affected rows: {}", result.affected_rows);
-println!("Nodes created: {}", result.nodes_created);
-println!("Relationships created: {}", result.relationships_created);
-println!("Properties set: {}", result.properties_set);
+println!("Affected rows: {}", result.affected_rows());
+println!("Nodes created: {}", result.nodes_created());
+println!("Relationships created: {}", result.relationships_created());
+println!("Properties set: {}", result.properties_set());
 ```
 
 The counters are the statement's side effects in the openCypher TCK's terms:
@@ -1472,8 +1558,10 @@ let name: String = row.get("n.name")?;
 let age: i64 = row.get("n.age")?;
 let maybe_email: Option<String> = row.get("n.email").ok();
 
-// Access by index
-let first_value: &Value = row.get_by_index(0)?;
+// Access by index, or untyped
+let first: String = row.get_idx(0)?;
+let raw: Option<&Value> = row.value("n.name");
+let all: &[Value] = row.values();
 ```
 
 ### QueryCursor
@@ -1485,9 +1573,13 @@ let mut cursor = session.query_with("MATCH (n) RETURN n")
     .cursor()
     .await?;
 
-while let Some(row) = cursor.next().await? {
-    // Process row without loading entire result set
+while let Some(batch) = cursor.next_batch().await {
+    for row in batch? {
+        // Process a page of rows without loading the entire result set
+    }
 }
+
+// Or drain what is left: cursor.collect_remaining().await?
 ```
 
 ---
@@ -1506,11 +1598,13 @@ pub enum Value {
     Bytes(Vec<u8>),
     List(Vec<Value>),
     Map(HashMap<String, Value>),
+    Node(Node),        // Node { vid, labels, properties }
+    Edge(Edge),        // Edge { eid, edge_type, src, dst, properties }
+    Path(Path),        // Path { nodes: Vec<Node>, edges: Vec<Edge> }
     Vector(Vec<f32>),
-    Node { id: Vid, labels: Vec<String>, properties: HashMap<String, Value> },
-    Edge { id: Eid, src: Vid, dst: Vid, edge_type: String, properties: HashMap<String, Value> },
-    Path { nodes: Vec<Value>, edges: Vec<Value> },
-    // ... additional variants (Date, DateTime, Duration)
+    SparseVector { indices: Vec<u32>, values: Vec<f32> },
+    BinaryVector(Vec<u8>),
+    Temporal(TemporalValue),   // Date, Time, DateTime, Duration, ...
 }
 ```
 
@@ -1589,7 +1683,7 @@ let snapshot_id = db.create_snapshot("before_migration").await?;
 // List snapshots
 let snapshots = db.list_snapshots().await?;
 for s in &snapshots {
-    println!("{}: {:?}", s.id, s.created_at);
+    println!("{}: {:?}", s.snapshot_id, s.created_at);
 }
 
 // Pin a session to a snapshot
@@ -1639,8 +1733,8 @@ let names = session.rules().list();
 let info = session.rules().get("edge_rule");
 println!("Rules: {:?}, count: {}", names, session.rules().count());
 
-// Remove and clear
-session.rules().remove("edge_rule").await?;
+// Remove and clear (path_rule depends on edge_rule, so remove it first)
+session.rules().remove("path_rule").await?;
 session.rules().clear().await?;
 ```
 
@@ -1651,7 +1745,7 @@ session.rules().clear().await?;
 | `list()` | `Vec<String>` | List all rule names. |
 | `get(name)` | `Option<RuleInfo>` | Get metadata about a rule. |
 | `count()` | `usize` | Number of registered rules. |
-| `clear()` | `()` | Clear all rules. |
+| `clear()` | `Result<()>` | Clear all rules. |
 
 **`RuleInfo`:**
 

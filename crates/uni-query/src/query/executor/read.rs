@@ -46,7 +46,6 @@ use uni_cypher::ast::{
     ShowConstraints, UnaryOp,
 };
 use uni_store::QueryContext;
-use uni_store::cloud::{build_store_from_url, copy_store_prefix, is_cloud_url};
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::arrow_convert;
@@ -1479,7 +1478,7 @@ impl Executor {
             } => vec![input.as_ref(), pattern_plan.as_ref()],
 
             // Observability wrapper around a fusion-eligible operator
-            // (`VectorKnn`, `InvertedIndexLookup`, or a `ProcedureCall` to
+            // (`VectorKnn`, or a `ProcedureCall` to
             // `uni.search` / `uni.vector.query` / `uni.fts.query` /
             // `uni.sparse.query`). Runtime behaviour is identical to the
             // unwrapped node, so `inner` is a genuine child: treating it as a
@@ -1512,7 +1511,6 @@ impl Executor {
             | LogicalPlan::ExtIdLookup { .. }
             | LogicalPlan::FusedIndexScan { .. }
             | LogicalPlan::VectorKnn { .. }
-            | LogicalPlan::InvertedIndexLookup { .. }
             | LogicalPlan::ProcedureCall { .. }
             | LogicalPlan::LocyProgram { .. }
             | LogicalPlan::LocyDerivedScan { .. }
@@ -1520,6 +1518,7 @@ impl Executor {
             | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -1567,6 +1566,7 @@ impl Executor {
             // Index operations
             LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -3006,6 +3006,17 @@ impl Executor {
                     idx_mgr.create_fts_index(config).await?;
                     Ok(vec![])
                 }
+                LogicalPlan::CreateInvertedIndex {
+                    config,
+                    if_not_exists,
+                } => {
+                    if if_not_exists && self.index_exists_by_name(&config.name) {
+                        return Ok(vec![]);
+                    }
+                    let idx_mgr = self.storage.index_manager();
+                    idx_mgr.create_inverted_index(config).await?;
+                    Ok(vec![])
+                }
                 LogicalPlan::CreateScalarIndex {
                     mut config,
                     if_not_exists,
@@ -3345,9 +3356,6 @@ impl Executor {
                 }
                 LogicalPlan::VectorKnn { .. } => {
                     unreachable!("VectorKnn is handled by DataFusion engine")
-                }
-                LogicalPlan::InvertedIndexLookup { .. } => {
-                    unreachable!("InvertedIndexLookup is handled by DataFusion engine")
                 }
                 LogicalPlan::Sort { input, order_by } => {
                     let rows = self
@@ -4561,195 +4569,77 @@ impl Executor {
     pub(crate) async fn execute_backup(
         &self,
         destination: &str,
-        _options: &HashMap<String, Value>,
+        options: &HashMap<String, Value>,
     ) -> Result<Vec<HashMap<String, Value>>> {
-        // 1. Flush L0
+        // `WITH {…}`: object-store options for the destination.
+        let mut extra = std::collections::BTreeMap::new();
+        for (key, value) in options {
+            let value = match value {
+                Value::String(s) => s.clone(),
+                Value::Int(i) => i.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Bool(b) => b.to_string(),
+                other => {
+                    return Err(anyhow!(
+                        "BACKUP option '{key}' must be a string, number or boolean, not {other:?}"
+                    ));
+                }
+            };
+            extra.insert(key.clone(), value);
+        }
+        // Flush L0, so the copy's snapshot holds every commit made so far.
         if let Some(writer_arc) = &self.writer {
             let writer: &uni_store::Writer = writer_arc.as_ref();
             writer.flush_to_l1(None).await?;
         }
 
-        // 2. Snapshot
-        let snapshot_manager = self.storage.snapshot_manager();
-        let snapshot = snapshot_manager
-            .load_latest_snapshot()
-            .await?
-            .ok_or_else(|| anyhow!("No snapshot found"))?;
-
-        // 3. Copy files - cloud or local path
-        if is_cloud_url(destination) {
-            self.backup_to_cloud(destination, &snapshot.snapshot_id)
-                .await?;
+        // The destination: a URL (inheriting this store's endpoint and
+        // credentials for the same provider) or a sandbox-checked local path.
+        let dest = if uni_store::cloud::is_cloud_url(destination) {
+            self.storage
+                .resolve_foreign_location_with(destination, &extra)
+                .await?
         } else {
-            // Validate local destination path against sandbox
-            let validated_dest = self.validate_path(destination)?;
-            self.backup_to_local(&validated_dest, &snapshot.snapshot_id)
-                .await?;
-        }
+            // A local path or `file://` URI: on this machine's filesystem, so
+            // subject to the file sandbox.
+            let local = match destination.strip_prefix("file://") {
+                Some(_) => url::Url::parse(destination)
+                    .ok()
+                    .and_then(|u| u.to_file_path().ok())
+                    .ok_or_else(|| anyhow!("Invalid file URI: {destination}"))?
+                    .display()
+                    .to_string(),
+                None => destination.to_string(),
+            };
+            let path = self.validate_path(&local)?;
+            std::fs::create_dir_all(&path)?;
+            let uri = if destination.starts_with("file://") {
+                url::Url::from_file_path(&path)
+                    .map_err(|()| anyhow!("Invalid backup path: {}", path.display()))?
+                    .to_string()
+            } else {
+                path.display().to_string()
+            };
+            uni_store::location::StoreLocation::resolve_from_env(
+                &uni_store::location::LocationSpec {
+                    uri,
+                    ..Default::default()
+                },
+                &self.storage.config.object_store,
+            )
+            .await?
+        };
+        let report = uni_store::snapshot::backup::backup_store(&self.storage, &dest).await?;
 
         let mut res = HashMap::new();
         res.insert(
             "status".to_string(),
             Value::String("Backup completed".to_string()),
         );
-        res.insert(
-            "snapshot_id".to_string(),
-            Value::String(snapshot.snapshot_id),
-        );
+        res.insert("snapshot_id".to_string(), Value::String(report.snapshot_id));
+        res.insert("objects".to_string(), Value::Int(report.objects as i64));
+        res.insert("bytes".to_string(), Value::Int(report.bytes as i64));
         Ok(vec![res])
-    }
-
-    /// Backs up database to a local filesystem destination.
-    async fn backup_to_local(&self, dest_path: &std::path::Path, _snapshot_id: &str) -> Result<()> {
-        let source_path = std::path::Path::new(self.storage.base_path());
-
-        if !dest_path.exists() {
-            std::fs::create_dir_all(dest_path)?;
-        }
-
-        // Recursive copy (local to local)
-        if source_path.exists() {
-            Self::copy_dir_all(source_path, dest_path)?;
-        }
-
-        // Copy schema to destination/catalog/schema.json
-        let schema_manager = self.storage.schema_manager();
-        let dest_catalog = dest_path.join("catalog");
-        if !dest_catalog.exists() {
-            std::fs::create_dir_all(&dest_catalog)?;
-        }
-
-        let schema_content = serde_json::to_string_pretty(&schema_manager.schema())?;
-        std::fs::write(dest_catalog.join("schema.json"), schema_content)?;
-
-        Ok(())
-    }
-
-    /// Backs up database to a cloud storage destination.
-    ///
-    /// Streams data from source to destination, supporting cross-cloud backups.
-    async fn backup_to_cloud(&self, dest_url: &str, _snapshot_id: &str) -> Result<()> {
-        use object_store::ObjectStore;
-        use object_store::ObjectStoreExt;
-        use object_store::local::LocalFileSystem;
-        use object_store::path::Path as ObjPath;
-
-        let (dest_store, dest_prefix) = build_store_from_url(dest_url)?;
-        let source_path = std::path::Path::new(self.storage.base_path());
-
-        // Create local store for source, coerced to dyn ObjectStore
-        let src_store: Arc<dyn ObjectStore> =
-            Arc::new(LocalFileSystem::new_with_prefix(source_path)?);
-
-        // Copy catalog/ directory
-        let catalog_src = ObjPath::from("catalog");
-        let catalog_dst = if dest_prefix.as_ref().is_empty() {
-            ObjPath::from("catalog")
-        } else {
-            ObjPath::from(format!("{}/catalog", dest_prefix.as_ref()))
-        };
-        copy_store_prefix(&src_store, &dest_store, &catalog_src, &catalog_dst).await?;
-
-        // Copy storage/ directory
-        let storage_src = ObjPath::from("storage");
-        let storage_dst = if dest_prefix.as_ref().is_empty() {
-            ObjPath::from("storage")
-        } else {
-            ObjPath::from(format!("{}/storage", dest_prefix.as_ref()))
-        };
-        copy_store_prefix(&src_store, &dest_store, &storage_src, &storage_dst).await?;
-
-        // Ensure schema is present at canonical catalog location.
-        let schema_manager = self.storage.schema_manager();
-        let schema_content = serde_json::to_string_pretty(&schema_manager.schema())?;
-        let schema_path = if dest_prefix.as_ref().is_empty() {
-            ObjPath::from("catalog/schema.json")
-        } else {
-            ObjPath::from(format!("{}/catalog/schema.json", dest_prefix.as_ref()))
-        };
-        dest_store
-            .put(&schema_path, bytes::Bytes::from(schema_content).into())
-            .await?;
-
-        Ok(())
-    }
-
-    /// Maximum directory depth for backup operations.
-    ///
-    /// **CWE-674 (Uncontrolled Recursion)**: Prevents stack overflow from
-    /// excessively deep directory structures.
-    const MAX_BACKUP_DEPTH: usize = 100;
-
-    /// Maximum file count for backup operations.
-    ///
-    /// **CWE-400 (Resource Consumption)**: Prevents disk exhaustion and
-    /// long-running operations from malicious or unexpectedly large directories.
-    const MAX_BACKUP_FILES: usize = 100_000;
-
-    /// Recursively copies a directory with security limits.
-    ///
-    /// # Security
-    ///
-    /// - **CWE-674**: Depth limit prevents stack overflow
-    /// - **CWE-400**: File count limit prevents resource exhaustion
-    /// - **Symlink handling**: Symlinks are skipped to prevent loop attacks
-    pub(crate) fn copy_dir_all(
-        src: &std::path::Path,
-        dst: &std::path::Path,
-    ) -> std::io::Result<()> {
-        let mut file_count = 0usize;
-        Self::copy_dir_all_impl(src, dst, 0, &mut file_count)
-    }
-
-    /// Internal implementation with depth and file count tracking.
-    pub(crate) fn copy_dir_all_impl(
-        src: &std::path::Path,
-        dst: &std::path::Path,
-        depth: usize,
-        file_count: &mut usize,
-    ) -> std::io::Result<()> {
-        if depth >= Self::MAX_BACKUP_DEPTH {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Maximum backup depth {} exceeded at {:?}",
-                    Self::MAX_BACKUP_DEPTH,
-                    src
-                ),
-            ));
-        }
-
-        std::fs::create_dir_all(dst)?;
-
-        for entry in std::fs::read_dir(src)? {
-            if *file_count >= Self::MAX_BACKUP_FILES {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "Maximum backup file count {} exceeded",
-                        Self::MAX_BACKUP_FILES
-                    ),
-                ));
-            }
-            *file_count += 1;
-
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-
-            // Skip symlinks to prevent loops and traversal attacks
-            if metadata.file_type().is_symlink() {
-                // Silently skip - logging would require tracing dependency
-                continue;
-            }
-
-            let dst_path = dst.join(entry.file_name());
-            if metadata.is_dir() {
-                Self::copy_dir_all_impl(&entry.path(), &dst_path, depth + 1, file_count)?;
-            } else {
-                std::fs::copy(entry.path(), dst_path)?;
-            }
-        }
-        Ok(())
     }
 
     /// Execute a projection operation.
@@ -4872,7 +4762,30 @@ impl Executor {
                     "SCALAR",
                     format!(":{}({:?})", cfg.label, cfg.properties),
                 ),
-                _ => ("UNKNOWN".to_string(), "UNKNOWN", "".to_string()),
+                uni_common::core::schema::IndexDefinition::Inverted(c) => (
+                    c.name.clone(),
+                    "INVERTED",
+                    format!("on {}.{}", c.label, c.property),
+                ),
+                uni_common::core::schema::IndexDefinition::JsonFullText(c) => (
+                    c.name.clone(),
+                    "JSON_FTS",
+                    if c.paths.is_empty() {
+                        format!("on {}.{}", c.label, c.column)
+                    } else {
+                        format!("on {}.{} paths {:?}", c.label, c.column, c.paths)
+                    },
+                ),
+                uni_common::core::schema::IndexDefinition::Sparse(c) => (
+                    c.name.clone(),
+                    "SPARSE",
+                    format!(
+                        "on {}.{} ({} dimensions)",
+                        c.label, c.property, c.dimensions
+                    ),
+                ),
+                // A kind added later: still listed under its own name.
+                other => (other.name().to_string(), "UNKNOWN", String::new()),
             };
 
             if let Some(f) = filter
@@ -5030,12 +4943,9 @@ impl Executor {
     /// Check if an index with the given name exists.
     pub(crate) fn index_exists_by_name(&self, name: &str) -> bool {
         let schema = self.storage.schema_manager().schema();
-        schema.indexes.iter().any(|idx| match idx {
-            uni_common::core::schema::IndexDefinition::Vector(c) => c.name == name,
-            uni_common::core::schema::IndexDefinition::FullText(c) => c.name == name,
-            uni_common::core::schema::IndexDefinition::Scalar(c) => c.name == name,
-            _ => false,
-        })
+        // Every kind: `IF NOT EXISTS` on an inverted, JSON full-text or
+        // sparse index replaced it when only three kinds were matched.
+        schema.indexes.iter().any(|idx| idx.name() == name)
     }
 
     pub(crate) async fn detach_delete_vertex(

@@ -3,6 +3,7 @@
 // Add new integration tests as a `mod` here, NOT as a new tests/*.rs file.
 
 mod docs_snippets;
+mod locy_fold_count_star;
 mod parse_depth_limit;
 mod parser_backtracking_regression;
 mod path_quantifier_range;
