@@ -47,8 +47,7 @@ Defaults taken where the choice was minor:
 ### Status
 
 Every defect in section 1 is resolved: fixed, or decided as documented. The fixes are in six
-commits, one per area, on `main` after `f7b99b71`. Neither the doc commits nor the fix commits
-are pushed yet.
+commits, one per area, on `main` after `f7b99b71`, and are pushed to `origin/main`.
 
 | Defects | Commit | Status |
 |---|---|---|
@@ -71,9 +70,15 @@ Run on the final code:
 - passed: `cargo fmt --check`, workspace clippy with the CI excludes, the docs snippet test,
   the static guards (except the macOS-only TCK-script check), the strict site build, and the
   Cypher TCK (3928 passed, 1 skipped);
-- not yet run, because the disk filled during the run: the workspace `nextest` run, the
-  failpoint lane, the Locy TCK in both modes, the Python suites with stubtest, and the
-  notebook run.
+- passed on a second run, after the disk filled during the first, on `ee91f16c`:
+  - the workspace `nextest` run: 9067 passed, 157 skipped;
+  - the failpoint lane: 272 passed, and the seams inert without the feature (26 passed);
+  - the Locy TCK: 573 passed, default and sidecar modes;
+  - Python `uni-db`: 1264 passed, 16 skipped; stubtest clean; pyo3 loader tests 35 passed;
+  - `uni-pydantic`: 324 passed, 5 skipped;
+  - the six flagship notebooks against a release wheel, DDI and PdM included.
+  `ruff format --check` failed on `bindings/uni-db/tests/test_neural_classifier.py`, which is now
+  reformatted.
 
 ### Open follow-ups
 
@@ -152,10 +157,9 @@ back to a scan (the Black Book "old Online keeps serving" was the wrong side); `
 has `storage_backends` and no `connectors`; `uni.search` does yield `vector_score` and `fts_score`;
 `rerank_score` is null without a reranker on vector and FTS queries.
 
-Undecided whether code or doc: fork diff does not pair changed rows (`changed` is always
-empty; a property edit is one delete plus one add). For edges the code says this is
-intentional (`crates/uni-fork/src/diff.rs:342-349`). The docs were changed to describe
-the current behaviour.
+Fork diff did not pair changed rows (`changed` was always empty; a property edit was one
+delete plus one add). Resolved in `6e026612` by the "Fork diff pairing" decision above;
+`features/forks.md` describes the pairing.
 
 ## 2. Storage, durability, configuration
 
