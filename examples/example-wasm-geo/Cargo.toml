@@ -28,9 +28,9 @@ crate-type = ["cdylib"]
 wit-bindgen = "0.51"
 # Arrow IPC on wasm32-wasip2. Same feature trim as the extism
 # example (no chrono / csv / json).
-arrow = { version = "57", default-features = false, features = ["ipc"] }
-arrow-array = "57"
-arrow-schema = "57"
+arrow = { version = "58.4.1", default-features = false, features = ["ipc"] }
+arrow-array = "58.4.1"
+arrow-schema = "58.4.1"
 
 [profile.release]
 opt-level = "s"

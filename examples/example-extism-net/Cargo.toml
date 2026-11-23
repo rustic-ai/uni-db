@@ -33,9 +33,9 @@ extism-pdk = "1"
 serde_json = "1"
 # Arrow IPC on wasm32-unknown-unknown — only `ipc` is needed for the
 # StreamReader / StreamWriter used by the scalar invoke ABI.
-arrow = { version = "57", default-features = false, features = ["ipc"] }
-arrow-array = "57"
-arrow-schema = "57"
+arrow = { version = "58.4.1", default-features = false, features = ["ipc"] }
+arrow-array = "58.4.1"
+arrow-schema = "58.4.1"
 
 [profile.release]
 opt-level = "s"
