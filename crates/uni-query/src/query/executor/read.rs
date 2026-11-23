@@ -1478,7 +1478,7 @@ impl Executor {
             } => vec![input.as_ref(), pattern_plan.as_ref()],
 
             // Observability wrapper around a fusion-eligible operator
-            // (`VectorKnn`, `InvertedIndexLookup`, or a `ProcedureCall` to
+            // (`VectorKnn`, or a `ProcedureCall` to
             // `uni.search` / `uni.vector.query` / `uni.fts.query` /
             // `uni.sparse.query`). Runtime behaviour is identical to the
             // unwrapped node, so `inner` is a genuine child: treating it as a
@@ -1511,7 +1511,6 @@ impl Executor {
             | LogicalPlan::ExtIdLookup { .. }
             | LogicalPlan::FusedIndexScan { .. }
             | LogicalPlan::VectorKnn { .. }
-            | LogicalPlan::InvertedIndexLookup { .. }
             | LogicalPlan::ProcedureCall { .. }
             | LogicalPlan::LocyProgram { .. }
             | LogicalPlan::LocyDerivedScan { .. }
@@ -3357,9 +3356,6 @@ impl Executor {
                 }
                 LogicalPlan::VectorKnn { .. } => {
                     unreachable!("VectorKnn is handled by DataFusion engine")
-                }
-                LogicalPlan::InvertedIndexLookup { .. } => {
-                    unreachable!("InvertedIndexLookup is handled by DataFusion engine")
                 }
                 LogicalPlan::Sort { input, order_by } => {
                     let rows = self

@@ -968,7 +968,6 @@ impl HybridPhysicalPlanner {
             LogicalPlan::ScanAll { .. }
             | LogicalPlan::ExtIdLookup { .. }
             | LogicalPlan::VectorKnn { .. }
-            | LogicalPlan::InvertedIndexLookup { .. }
             | LogicalPlan::ProcedureCall { .. }
             | LogicalPlan::LocyProgram { .. }
             | LogicalPlan::LocyFold { .. }
@@ -1192,7 +1191,7 @@ impl HybridPhysicalPlanner {
             // === Graph Operations ===
             // Phase 5b followup: `FusedIndexScanWrapped` is a
             // planner-side observability wrapper around lossy
-            // operators (VectorKnn, InvertedIndexLookup). The
+            // operators (VectorKnn, search procedure calls). The
             // runtime fusion happens at the `BranchedBackend`
             // layer via Lance per-branch reads; the physical
             // planner just unwraps and recurses on the inner node.
@@ -1670,10 +1669,6 @@ impl HybridPhysicalPlanner {
                 *optional,
                 all_properties,
             ),
-
-            LogicalPlan::InvertedIndexLookup { .. } => Err(anyhow!(
-                "Full-text search not yet supported in DataFusion engine"
-            )),
 
             LogicalPlan::AllShortestPaths {
                 input,
@@ -9386,8 +9381,7 @@ pub(crate) fn collect_variable_kinds(
         | LogicalPlan::ExtIdLookup { variable, .. }
         | LogicalPlan::ScanAll { variable, .. }
         | LogicalPlan::ScanMainByLabels { variable, .. }
-        | LogicalPlan::VectorKnn { variable, .. }
-        | LogicalPlan::InvertedIndexLookup { variable, .. } => {
+        | LogicalPlan::VectorKnn { variable, .. } => {
             kinds.insert(variable.clone(), VariableKind::Node);
         }
         LogicalPlan::Traverse {
@@ -9729,7 +9723,6 @@ fn collect_mutation_node_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::FusedIndexScan { .. }
         | LogicalPlan::FusedIndexScanWrapped { .. }
         | LogicalPlan::VectorKnn { .. }
-        | LogicalPlan::InvertedIndexLookup { .. }
         | LogicalPlan::ProcedureCall { .. }
         | LogicalPlan::LocyProgram { .. }
         | LogicalPlan::LocyFold { .. }
@@ -9861,7 +9854,6 @@ fn collect_mutation_edge_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::FusedIndexScan { .. }
         | LogicalPlan::FusedIndexScanWrapped { .. }
         | LogicalPlan::VectorKnn { .. }
-        | LogicalPlan::InvertedIndexLookup { .. }
         | LogicalPlan::ProcedureCall { .. }
         | LogicalPlan::LocyProgram { .. }
         | LogicalPlan::LocyFold { .. }
@@ -10038,8 +10030,7 @@ fn collect_plan_variables_into(plan: &LogicalPlan, out: &mut HashSet<String>) {
         | LogicalPlan::ExtIdLookup { variable, .. }
         | LogicalPlan::ScanAll { variable, .. }
         | LogicalPlan::ScanMainByLabels { variable, .. }
-        | LogicalPlan::VectorKnn { variable, .. }
-        | LogicalPlan::InvertedIndexLookup { variable, .. } => {
+        | LogicalPlan::VectorKnn { variable, .. } => {
             insert_node_var(variable, out);
         }
         LogicalPlan::Traverse {

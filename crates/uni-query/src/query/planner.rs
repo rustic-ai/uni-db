@@ -2126,8 +2126,8 @@ pub enum LogicalPlan {
         kind: FusionKind,
     },
     /// Phase 5b followup: planner-side observability marker for the
-    /// lossy fusion types. Wraps the original `VectorKnn` or
-    /// `InvertedIndexLookup` (or any future leaf operator whose
+    /// lossy fusion types. Wraps the original `VectorKnn` or a search
+    /// `ProcedureCall` (or any future leaf operator whose
     /// shape differs from `Scan`) without changing its fields, so
     /// the physical planner can decay it to `inner` unchanged.
     ///
@@ -2378,12 +2378,6 @@ pub enum LogicalPlan {
         /// From `OPTIONAL MATCH`: emit one all-NULL row when no vertex
         /// qualifies, as an optional `Scan` does.
         optional: bool,
-    },
-    InvertedIndexLookup {
-        label_id: u16,
-        variable: String,
-        property: String,
-        terms: Expr,
     },
     ShortestPath {
         input: Box<LogicalPlan>,
@@ -10660,7 +10654,6 @@ impl QueryPlanner {
             | LogicalPlan::ExtIdLookup { .. }
             | LogicalPlan::ScanMainByLabels { .. }
             | LogicalPlan::VectorKnn { .. }
-            | LogicalPlan::InvertedIndexLookup { .. }
             | LogicalPlan::ProcedureCall { .. }
             | LogicalPlan::TraverseMainByType { .. }
             | LogicalPlan::ShortestPath { .. }
@@ -11196,8 +11189,7 @@ impl QueryPlanner {
             LogicalPlan::FusedIndexScan { variable, .. }
             | LogicalPlan::ExtIdLookup { variable, .. }
             | LogicalPlan::ScanAll { variable, .. }
-            | LogicalPlan::ScanMainByLabels { variable, .. }
-            | LogicalPlan::InvertedIndexLookup { variable, .. } => {
+            | LogicalPlan::ScanMainByLabels { variable, .. } => {
                 vars.insert(variable.clone());
             }
             LogicalPlan::FusedIndexScanWrapped { inner, .. }
@@ -11572,7 +11564,6 @@ pub fn projection_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
         | LogicalPlan::ProcedureCall { .. }
         | LogicalPlan::SubqueryCall { .. }
         | LogicalPlan::VectorKnn { .. }
-        | LogicalPlan::InvertedIndexLookup { .. }
         | LogicalPlan::ShortestPath { .. }
         | LogicalPlan::AllShortestPaths { .. }
         | LogicalPlan::QuantifiedPattern { .. }
@@ -13374,9 +13365,6 @@ fn collect_properties_recursive(
         LogicalPlan::VectorKnn { query, .. } => {
             collect_properties_from_expr_into(query, properties, kinds);
         }
-        LogicalPlan::InvertedIndexLookup { terms, .. } => {
-            collect_properties_from_expr_into(terms, properties, kinds);
-        }
         LogicalPlan::ShortestPath {
             input,
             edge_row_conditions,
@@ -14326,7 +14314,7 @@ pub trait ForkIndexLookup {
 
     /// Phase 5b followup: resolve a label id, then dispatch to
     /// `fork_index_has`. Used by the rewrite when wrapping
-    /// `VectorKnn` and `InvertedIndexLookup` nodes which carry
+    /// `VectorKnn` nodes, which carry
     /// `label_id: u16` rather than the label name. Default returns
     /// `false`; the `StorageManager` impl resolves via its
     /// `schema_manager`.
@@ -15353,8 +15341,7 @@ fn rewrite_node<L: ForkIndexLookup>(plan: LogicalPlan, lookup: &L) -> LogicalPla
         // layer via Lance's per-branch reads.
         //
         // The CALL-style vector/FTS queries land as `ProcedureCall`
-        // (not the dedicated `VectorKnn`/`InvertedIndexLookup`
-        // operators); recognize those by procedure name and the
+        // (not the dedicated `VectorKnn` operator); recognize those by procedure name and the
         // shape of their first two arguments (`label, column, ...`).
         LogicalPlan::ProcedureCall {
             procedure_name,
@@ -15407,36 +15394,6 @@ fn rewrite_node<L: ForkIndexLookup>(plan: LogicalPlan, lookup: &L) -> LogicalPla
                 }
             } else {
                 knn
-            }
-        }
-        LogicalPlan::InvertedIndexLookup {
-            label_id,
-            variable,
-            property,
-            terms,
-        } => {
-            if lookup.fork_index_has_label_id(
-                label_id,
-                &property,
-                uni_store::fork::ForkLocalIndexKind::FullText,
-            ) && let Some(kind) = into_fusion_kind(uni_store::fork::ForkLocalIndexKind::FullText)
-            {
-                LogicalPlan::FusedIndexScanWrapped {
-                    inner: Box::new(LogicalPlan::InvertedIndexLookup {
-                        label_id,
-                        variable,
-                        property,
-                        terms,
-                    }),
-                    kind,
-                }
-            } else {
-                LogicalPlan::InvertedIndexLookup {
-                    label_id,
-                    variable,
-                    property,
-                    terms,
-                }
             }
         }
         // Tree-recursive variants — only the ones that can carry a
