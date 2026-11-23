@@ -46,16 +46,51 @@ Defaults taken where the choice was minor:
 
 ### Status
 
-| Defects | Status |
-|---|---|
-| C2, C13, C14, C17, C18/C25, C19, C22, C27 | Fixed (temporal subtraction, BTIC range, pow and shifts, schemaless hop warning, windows in `WITH` and over groups, index and constraint listings, `similar_to` sparse and multi-vector, vector dimension required). C22's cause was the sparse parameter encoding in `value_to_scalar`. |
-| C3, C4, C15, C16 | Fixed (DDL `DEFAULT` for new writes, with an explicit `NULL` kept; sparse map literals canonicalized; timestamps ordered and present on schemaless labels and edges; DROP refused while data exists, counted by a query over the statement's own view) |
-| C5, C9, C10, C23/C33, C26, C31, C34 (rule removal) | Fixed (`USE` resolves registered modules; NEW node properties stored; REQUIRE direction from the registry; CALIBRATE features by position and node inputs as vids; session params in Locy; `MCOUNT(*)`; removal names dependents). Also fixed: C37, C38. |
-| C11, C12, C24, C36 | Fixed (inverted-index prefilter and `CREATE INVERTED INDEX`, OPTIONS validation; full FTS query syntax; JSON FTS derived text column; `created_at` carried into updates of flushed vertices). Open follow-ups: unflushed rows of a label with no table yet are scored without case folding; inverted postings keep stale terms for updated rows; a dropped JSON full-text index leaves its hidden `__jfts_` column. |
-| C6, C7, C8, C30 | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
-| C21 | Not a defect: ids are intended; declared yield type corrected |
-| C20 `fork_info` | Kept as documented (Python returns `None`) |
-| C1, C20 (promote), C28, C29, C32, C34 (load error), C35; fork diff pairing | Fixed (tagged drop refused with `ForkTagged` and recovery keeps the tombstone; promote on a read-only handle raises `ReadOnly`; `tag_fork` flushes first; promote dedups unflushed primary rows; plugin examples build; WASM and Extism registrar refusals typed; tags scoped to their fork; diff pairs edits by `(label, ext_id)` and by id under lineage). C29's cause was not the one recorded below: the gap was a vertex primary committed after the fork point but had not flushed, with the same content written on the fork, whose flush registered its own vid for the UID. |
+Every defect in section 1 is resolved: fixed, or decided as documented. The fixes are in six
+commits, one per area, on `main` after `f7b99b71`. Neither the doc commits nor the fix commits
+are pushed yet.
+
+| Defects | Commit | Status |
+|---|---|---|
+| C6, C7, C8, C30 | `1c60ef99` | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
+| C2, C13, C14, C17, C18/C25, C19, C22, C27 | `533b23bc` | Fixed (temporal subtraction, BTIC range, pow and shifts, schemaless hop warning, windows in `WITH` and over groups, index and constraint listings, `similar_to` sparse and multi-vector, vector dimension required). C22's cause was the sparse parameter encoding in `value_to_scalar`. Because of C27, a vector index now needs a declared `VECTOR(N)` property; four Python use-case tests relied on an undeclared one and were corrected in `6e026612`. |
+| C3, C4, C15, C16 | `0d1a1d62` | Fixed (DDL `DEFAULT` for new writes, with an explicit `NULL` kept; sparse map literals canonicalized; timestamps ordered and present on schemaless labels and edges; DROP refused while data exists, counted by a query over the statement's own view) |
+| C5, C9, C10, C23/C33, C26, C31, C34 (rule removal), C37, C38 | `270feaca` | Fixed (`USE` resolves registered modules; NEW node properties stored; REQUIRE direction from the registry; CALIBRATE features by position and node inputs as vids; session params in Locy; `MCOUNT(*)`; removal names dependents; EXPLAIN on a row-count fold; `'false'` TARGET strings). The DDI and PdM notebooks use calibrated ranking again. |
+| C1, C20 (promote), C28, C29, C32, C34 (load error), C35; fork diff pairing | `6e026612` | Fixed (tagged drop refused with `ForkTagged` and recovery keeps the tombstone; promote on a read-only handle raises `ReadOnly`; `tag_fork` flushes first; promote dedups unflushed primary rows; plugin examples build and are checked in CI; WASM and Extism registrar refusals typed; tags scoped to their fork; diff pairs edits by `(label, ext_id)` and by id under lineage). C29's cause was not the one recorded below: the gap was a vertex primary committed after the fork point but had not flushed, with the same content written on the fork, whose flush registered its own vid for the UID. Also: tag, promote and diff now return `ForkNotFound` for an unknown fork instead of creating it. |
+| C11, C12, C24, C36 | `20395834` | Fixed (inverted-index prefilter and `CREATE INVERTED INDEX`, OPTIONS validation, `IF NOT EXISTS` for every index kind; full FTS query syntax; JSON FTS derived text column; `created_at` carried into updates of flushed vertices) |
+| C21 | `533b23bc` | Not a defect: ids are integers on purpose; the declared yield type is corrected |
+| C20 `fork_info` | n/a | Kept as documented (Python returns `None`) |
+
+### Verification
+
+Each area's crate tests, clippy and fmt passed before its commit. Each new test was seen
+failing first, except where a commit's report says otherwise: the C11 grammar and comparison
+tests, the C36 `MERGE`/`REMOVE` test, and the C12 parser unit tests.
+
+Run on the final code:
+- passed: `cargo fmt --check`, workspace clippy with the CI excludes, the docs snippet test,
+  the static guards (except the macOS-only TCK-script check), the strict site build, and the
+  Cypher TCK (3928 passed, 1 skipped);
+- not yet run, because the disk filled during the run: the workspace `nextest` run, the
+  failpoint lane, the Locy TCK in both modes, the Python suites with stubtest, and the
+  notebook run.
+
+### Open follow-ups
+
+Not defects from section 1; found while fixing them:
+- Before a label's table exists, unflushed rows are scored by Lance's bare tokenizer, which
+  does not fold case, even when a FULLTEXT or JSON full-text index is declared.
+- The inverted index keeps a vid under terms it no longer holds until the vid is deleted.
+  That is correct for a prefilter, but the postings grow on updates that change terms.
+- Dropping a JSON full-text index leaves its hidden `__jfts_` column registered, no longer
+  filled; re-creating the index backfills it.
+- `LogicalPlan::InvertedIndexLookup` is still never constructed (the prefilter uses the scan
+  path instead).
+- The WASM and Extism example crates still pin arrow 57.
+- An update to a flushed vertex through a path with no prefetch (promote upsert,
+  `insert_vertex_partial` callers) does one point lookup to carry `created_at`.
+- The PdM notebook's calibrated holdout Brier is 0.043 worse than raw, within the notebook's
+  tolerance.
 
 ## 1. Code defects found (the docs describe the intended behaviour)
 
