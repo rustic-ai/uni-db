@@ -223,8 +223,8 @@ jobs:
           UNI_LOCALSTACK_CONFIG_ONLY=1 cargo nextest run -p uni-db --test integration \
             --run-ignored all -E 'test(/^hybrid_localstack_e2e::/)'
 
-      # MinIO, Azurite and fake-gcs-server: open, write, flush, reopen, fork
-      # and back up a remote-only store on each.
+      # S3 (the LocalStack service above), Azurite and fake-gcs-server: open,
+      # write, flush, reopen, fork and back up a remote-only store on each.
       - name: Start object-store emulators
         run: scripts/ci/start_emulators.sh
 

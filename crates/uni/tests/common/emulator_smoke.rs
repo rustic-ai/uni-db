@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! Smoke tests against the MinIO, Azurite and fake-gcs-server emulators.
+//! Smoke tests against an S3 emulator, Azurite and fake-gcs-server.
 //!
 //! Each opens a store remote-only under a fresh prefix, writes, flushes,
 //! reopens, forks, and backs it up to a second prefix of the same bucket,
@@ -12,7 +12,7 @@
 //!
 //! | Emulator | Variables (defaults) |
 //! |---|---|
-//! | MinIO | `UNI_MINIO_ENDPOINT` (`http://127.0.0.1:9000`), `UNI_MINIO_BUCKET` (`uni-test`), keys `minioadmin` |
+//! | S3 (LocalStack in CI) | `UNI_S3_ENDPOINT` (`http://127.0.0.1:4566`), `UNI_S3_BUCKET` (`uni-test`), keys `UNI_S3_ACCESS_KEY_ID` / `UNI_S3_SECRET_ACCESS_KEY` (`test`) |
 //! | Azurite | `UNI_AZURITE_ENDPOINT` (`http://127.0.0.1:10000/devstoreaccount1`), `UNI_AZURITE_CONTAINER` (`uni-test`) |
 //! | fake-gcs-server | `UNI_FAKE_GCS_ENDPOINT` (`http://127.0.0.1:4443`), `UNI_FAKE_GCS_BUCKET` (`uni-test`) |
 
@@ -104,16 +104,19 @@ async fn smoke(base: &str, options: BTreeMap<String, String>) -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Requires MinIO; see the module docs"]
-async fn minio_store_round_trips() -> Result<()> {
-    let endpoint = var("UNI_MINIO_ENDPOINT", "http://127.0.0.1:9000");
-    let bucket = var("UNI_MINIO_BUCKET", "uni-test");
+#[ignore = "Requires an S3 emulator; see the module docs"]
+async fn s3_store_round_trips() -> Result<()> {
+    let endpoint = var("UNI_S3_ENDPOINT", "http://127.0.0.1:4566");
+    let bucket = var("UNI_S3_BUCKET", "uni-test");
     let options = BTreeMap::from([
         ("aws_endpoint".to_string(), endpoint),
-        ("aws_access_key_id".to_string(), "minioadmin".to_string()),
+        (
+            "aws_access_key_id".to_string(),
+            var("UNI_S3_ACCESS_KEY_ID", "test"),
+        ),
         (
             "aws_secret_access_key".to_string(),
-            "minioadmin".to_string(),
+            var("UNI_S3_SECRET_ACCESS_KEY", "test"),
         ),
         ("aws_region".to_string(), "us-east-1".to_string()),
         ("aws_allow_http".to_string(), "true".to_string()),
