@@ -217,9 +217,10 @@ class UniTransaction:
         """Drop the ids and identity-map entries of nodes the rollback undid."""
         identity_map = self._session._identity_map
         for node in self._created_nodes:
-            key = (node.__class__.__label__, node._vid)
-            if identity_map.get(key) is node:
-                del identity_map[key]
+            if node._vid is not None:
+                key = (node.__class__.__label__, node._vid)
+                if identity_map.get(key) is node:
+                    del identity_map[key]
             node._detach_session()
         self._created_nodes.clear()
 
