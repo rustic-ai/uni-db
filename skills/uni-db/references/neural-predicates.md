@@ -136,6 +136,8 @@ CALIBRATE scorer ON MATCH (s:Sample) TARGET s.label METHOD platt_scaling HOLDOUT
 
 `method` takes the same names as `CALIBRATION` in `CREATE MODEL`. `HOLDOUT` is the fraction held out (default 0.2).
 
+The classifier receives the same inputs as at a call site: the model's `FEATURES` expressions supply its `INPUT` values by position, so `INPUT (s) FEATURES s.score` passes `{"s": <s.score>}`, exactly as `scorer(s.score)` does in a rule. A model without `FEATURES` passes the `INPUT` variables themselves (a node arrives as its vid, as `scorer(s)` passes it). A FEATURES count that differs from the INPUT count is a compile error (`CalibrateFeatureArity`), and a feature that is null on every collected row is a runtime error. `TARGET` reads booleans, numbers (non-zero is positive) and strings (`'false'`, `'0'` and the empty string are negative).
+
 Returns `CalibrateCommandResult`:
 
 | Field | Type | Notes |

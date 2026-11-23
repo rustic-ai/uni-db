@@ -6367,7 +6367,7 @@ graph LR
 ```
 
 1. **Parse**: Pest grammar (`locy.pest` stacked on `cypher.pest`) produces `LocyProgram` AST with rules and commands
-2. **Module Resolution**: Resolve `USE module { rule1, rule2 }` imports. Not yet supported: every host passes an empty module map, so a `USE` fails with `ModuleNotFound`
+2. **Module Resolution**: Resolve `USE module { rule1, rule2 }` imports against the module map of the rule registry the program compiles with (`LocyRuleRegistry::modules`: module name to the short names of its rules, filled when a `MODULE` program is registered and rebuilt with the registry from its sources). An unknown module is `ModuleNotFound`, an unknown listed rule `ImportNotFound`
 3. **Dependency Graph**: Build rule-to-rule reference graph
 4. **Stratify**: Detect strongly connected components (SCCs) — these are recursive rule groups
 5. **Wardedness Check**: Ensure negation is stratified (no recursive negation)
@@ -6456,6 +6456,8 @@ CREATE RULE total_exposure AS
 ```
 
 Supported aggregators: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT`, `MSUM`, `MMAX`, `MMIN`, `MCOUNT`, `MNOR`, `MPROD`
+
+A row count is written `COUNT(*)`, `COUNT()`, `MCOUNT(*)` or `MCOUNT()`. The Locy grammar's `fold_count_star` alternative accepts `MCOUNT(*)` (Cypher's `count_args` takes `*` only after `COUNT`), and `build_fold_declaration` rewrites a fold's `COUNT(*)` to the zero-argument call, so every later stage sees the one form that resolves to `COUNTALL`.
 
 #### Monotonicity in Recursive Strata
 
@@ -6580,7 +6582,7 @@ CREATE RULE blocked AS
 
 This is a compile error rather than a warning because the runtime cannot recover. The change test (`prev_rows`) compares whole *contribution* rows, not the folded view, so a group leaving the snapshot is invisible to the producing rule's own convergence check and reaches consumers as a row set that flips back and forth — which `rows_now != prev_rows` reads as progress. A non-monotone `REQUIRE` would run to `max_iterations` and return partial results.
 
-**Direction is a `LocyAggregate` method, not `Semilattice` state.** `Semilattice::monotone_join` says *whether* an aggregate is monotone, never which way, and `MIN`/`MAX` share one `BOUNDED_MIN_MAX` constant. `LocyAggregate::direction()` defaults to `FoldDirection::Unknown`, so an aggregate that has not declared one declines `REQUIRE` and existing plugin implementors are unaffected. The enum lives in `uni-common` because `uni-locy` does not depend on `uni-plugin`, and is re-exported from `uni_plugin::traits::locy`. Currently `check_require_direction` is called only with the registry-free fallback (`default_direction_oracle`, the same six `M*` names), so the direction a registered aggregate declares is not consulted, and `REQUIRE` over `MAX`, `MIN` or `COUNT` in a recursive rule is rejected.
+**Direction is a `LocyAggregate` method, not `Semilattice` state.** `Semilattice::monotone_join` says *whether* an aggregate is monotone, never which way, and `MIN`/`MAX` share one `BOUNDED_MIN_MAX` constant. `LocyAggregate::direction()` defaults to `FoldDirection::Unknown`, so an aggregate that has not declared one declines `REQUIRE` and existing plugin implementors are unaffected. The enum lives in `uni-common` because `uni-locy` does not depend on `uni-plugin`, and is re-exported from `uni_plugin::traits::locy`. `check_require_direction` takes a `DirectionOracle`, threaded like the monotonicity oracle through `compile_with_oracles_and_config` → `typecheck::check` and into ASSUME bodies; hosts pass `locy_direction_verdict` (`locy_fold.rs`), which reads the registry's `direction()` and falls back to `default_direction_oracle` (the six `M*` names) when the registry has no entry or the entry declares `Unknown`. A session consults its own plugin registry before the instance's, as for monotonicity. So `REQUIRE` over `MAX`, `MIN` or `COUNT` in a recursive rule is checked against those aggregates' declared directions.
 
 Outside recursion the direction is not policed: there is one pass, nothing can flip, and `REQUIRE` means what the post-FOLD `WHERE` means. That keeps a rule refactor-safe — it holds the meaning its author wrote if a self-reference is added later.
 
@@ -6763,6 +6765,8 @@ CREATE RULE merge_paths AS
     MATCH (a)-[r]->(b)
     DERIVE MERGE a, b
 ```
+
+A `NEW` node is created once per matched row, with its property map evaluated against that row (`locy_ast_builder::new_node_properties`, through the same `eval_map_expr` the derived-edge inspection uses) plus its `_skolem_id`. The values are spliced into the `CREATE` as typed literals (lists, maps and temporals keep their type), so the Cypher write path converts them to their declared form; the map is evaluated up front rather than handed to the `CREATE` because it may name any row variable, while the `CREATE` binds only the pattern's existing endpoints. The `DerivedFactSet`'s `vertices` report the same properties.
 
 ### PREV (Previous Iteration Access)
 
@@ -7018,7 +7022,7 @@ The hypothetical state differs from the state before the block only by the block
 
 ## Module System
 
-Locy programs can be organized into modules. `MODULE` names the program's rules (`QUERY acme.compliance.compliance_check` names one by its qualified name). Not yet supported: `USE other.module { rule, ... }` imports, which always fail with `ModuleNotFound`, so the rules a program references are defined in the same program.
+Locy programs can be organized into modules. `MODULE` names the program's rules (`QUERY acme.compliance.compliance_check` names one by its qualified name). `USE other.module` imports every rule of a module registered with `rules().register` under its short name, and `USE other.module { rule, ... }` only the listed ones. The module map lives on `LocyRuleRegistry` (`modules`), is filled wherever registered rules are compiled in (`rebuild_registry_from_sources`, `LocyEngine::register`) and cleared with the registry; every compile entry (`evaluate_with_db_and_config_capturing`, `Session::compile_locy_with_config`, `LocyEngine::compile_with_parameters`, prepared Locy, registration itself) passes the map of the registry it already takes registered rules from, so `USE` sees exactly the rules that program can reference. Inside a rebuild a source compiles against the modules of the sources before it, so a registered program can `USE` an earlier one. The map is derived from the persisted sources, so it survives a restart without its own catalog entry.
 
 ```locy
 MODULE acme.compliance
@@ -7530,7 +7534,7 @@ tx.commit().await?;
 let user_id = session.params().get("user_id");
 ```
 
-Session parameters are merged with explicit query parameters. Explicit parameters take precedence.
+Session parameters are merged with explicit query parameters. Explicit parameters take precedence. The session's Locy builder (`LocyBuilder::run` / `explain` / `profile`) merges them the same way, so a program reads `$session.<key>` too; the transaction and internal builders do not, as for Cypher.
 
 ## Facade Accessors
 

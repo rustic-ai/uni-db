@@ -829,6 +829,7 @@ impl Session {
         })?;
         let registry = self.rule_registry.read().unwrap();
         let external_names: Vec<String> = registry.rules.keys().cloned().collect();
+        let modules = registry.modules.clone();
         drop(registry);
 
         // Consult the session registry before the instance one, so a
@@ -848,12 +849,27 @@ impl Session {
                     )
                 })
         };
-        uni_locy::compile_with_oracle_and_config(
+        // The `REQUIRE` direction oracle consults the registries in the same
+        // order, so an aggregate passes both checks against the same entry.
+        let direction = |name: &str| {
+            use uni_common::locy::FoldDirection;
+            match uni_query::query::df_graph::locy_fold::locy_direction_verdict(session_reg, name) {
+                FoldDirection::Unknown => {
+                    uni_query::query::df_graph::locy_fold::locy_direction_verdict(
+                        instance_reg,
+                        name,
+                    )
+                }
+                known => known,
+            }
+        };
+        uni_locy::compile_with_oracles_and_config(
             &ast,
-            &HashMap::new(),
+            &modules,
             &external_names,
             config,
             &oracle,
+            &direction,
         )
         .map_err(|e| UniError::Query {
             message: format!("LocyCompileError: {e}"),

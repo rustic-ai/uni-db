@@ -8968,7 +8968,10 @@ fn resolve_fold_bindings(
                     let upper = name.to_uppercase();
                     let is_count = matches!(upper.as_str(), "COUNT" | "MCOUNT");
 
-                    let canonical: smol_str::SmolStr = if is_count && args.is_empty() {
+                    // `COUNT(*)` is the zero-argument count too.
+                    let counts_rows =
+                        args.is_empty() || matches!(args.as_slice(), [Expr::Wildcard]);
+                    let canonical: smol_str::SmolStr = if is_count && counts_rows {
                         smol_str::SmolStr::new_static("COUNTALL")
                     } else {
                         match upper.as_str() {

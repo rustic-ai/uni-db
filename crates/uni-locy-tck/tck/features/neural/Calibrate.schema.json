@@ -18,6 +18,10 @@
       "label": {
         "nullable": true,
         "type": "Bool"
+      },
+      "score": {
+        "nullable": true,
+        "type": "Float64"
       }
     },
     "Supplier": {

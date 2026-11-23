@@ -36,7 +36,8 @@ A model that scores assets for failure likelihood, invoked inside a rule:
 
     def failure_likelihood(rows):
         # rows is a list[dict[str, Any]] keyed by the INPUT binding name.
-        # A feature value can be None, so treat it as 0.0.
+        # Under CALIBRATE the value is the model's FEATURES expression
+        # (a.score), as it is at the rule's call site; a missing score is None.
         return [min(1.0, max(0.0, r["a"] or 0.0)) for r in rows]
 
     config = uni_db.LocyConfig()

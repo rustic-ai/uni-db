@@ -1611,6 +1611,12 @@ impl Transaction {
                                         .entry(name.clone())
                                         .or_insert_with(|| rule.clone());
                                 }
+                                for (module, rules) in &tx_reg.modules {
+                                    session_reg
+                                        .modules
+                                        .entry(module.clone())
+                                        .or_insert_with(|| rules.clone());
+                                }
                                 rule_promotion_errors.push(RulePromotionError {
                                     rule_text: "<promotion rebuild>".into(),
                                     error: "promoted rules lacked tracked sources; \

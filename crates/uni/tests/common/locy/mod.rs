@@ -36,6 +36,7 @@ pub mod locy_ssi_read_set;
 pub mod locy_timeout_partial;
 pub mod locy_toplevel_sequencing;
 pub mod locy_type_projection_matrix;
+pub mod locy_use_modules;
 pub mod repro_locy_runtime_abduce_target_var;
 pub mod repro_locy_runtime_topk_mnor_mixed_support;
 pub mod repro_locy_runtime_wmc_shared_lineage;

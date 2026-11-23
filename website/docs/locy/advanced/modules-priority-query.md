@@ -12,11 +12,30 @@ CREATE RULE control AS MATCH (a)-[:OWNS]->(b) YIELD KEY a, KEY b
 QUERY acme.compliance.control RETURN b
 ```
 
-`USE acme.common` (and `USE acme.common { rule_a, rule_b }`) parses, but
-importing rules from another module is not wired yet: every `USE` currently
-fails to compile with `ModuleNotFound`, including for rules registered with
-`rules().register`. Until it is, define the rules a program needs in that
-program.
+`USE` imports rules from a module registered with `rules().register`:
+`USE acme.compliance` imports all of its rules under their short names, and
+`USE acme.compliance { control }` only the listed ones.
+
+```python
+db.rules().register("""
+MODULE acme.compliance
+CREATE RULE control AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY a, KEY b
+""")
+
+result = db.session().locy("""
+USE acme.compliance { control }
+CREATE RULE controller AS
+  MATCH (a:Company)-[:OWNS]->(b:Company) WHERE (a, b) IS control YIELD KEY a
+QUERY controller RETURN a.name AS name
+""")
+```
+
+An unregistered module fails to compile with `ModuleNotFound`, and a listed rule
+the module does not define with `ImportNotFound`. A program sees the modules of
+the registry it runs against: those registered on the database, plus, for a
+session, those registered on it. A registered program may itself `USE` a module
+registered before it, and the module map is rebuilt from the registered sources
+when the database reopens.
 
 Benefits:
 

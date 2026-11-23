@@ -200,7 +200,7 @@ Built-in methods:
 
 The `CALIBRATE` command runs its own `MATCH ... [WHERE ...]` as a query, calls the classifier once over all the returned rows, fits the calibrator, and returns a calibrate command result (in Python, a dict with `type: 'calibrate'`):
 
-The classifier is called with one dict per row, keyed by the model's `INPUT` binding name, holding that variable's value in the MATCH row — not the feature expressions of a rule's call site. A scalar (number, string, boolean) is passed as is; a node or any other non-scalar value arrives as `None`. With `INPUT (a)` and `ON MATCH (a:Asset)`, a Python classifier therefore receives `{'a': None}` rows during `CALIBRATE`, and must accept them (`max(0.0, r["a"])` raises `TypeError`).
+The classifier is called with one dict per row, keyed by the model's `INPUT` binding names, with the same values a rule's call site passes: the model's `FEATURES` expressions supply the `INPUT` values by position. With `INPUT (a) FEATURES a.score` and `ON MATCH (a:Asset)`, a Python classifier receives `{'a': <a.score>}` rows, exactly what `failure_likelihood(a.score)` gives it inside a rule, so the calibrator is fitted on the scores the rules produce. A model without `FEATURES` passes the `INPUT` variable itself; a node arrives as its vid there and at a call site alike. A `FEATURES` list whose length differs from the `INPUT` list is a compile error, and a feature that is null on every collected row is a runtime error. `TARGET` reads booleans, numbers (non-zero is positive) and strings (`'false'`, `'0'` and the empty string are negative).
 
 | Field | Meaning |
 |---|---|

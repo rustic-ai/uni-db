@@ -20,6 +20,13 @@ Add new changes here.
 - **Schema:** `DROP LABEL` / `DROP EDGE TYPE` and `uni.schema.dropLabel` / `dropEdgeType` are refused while data still carries the label or type; the error gives the count.
 - **Sparse vectors:** a `{indices, values}` map literal is stored canonically (ids sorted, repeated ids summed) and found by `uni.sparse.query` and `uni.search`; a malformed map is a TypeError.
 - **Timestamps:** `updated_at()` is no longer earlier than `created_at()` on insert, and both work on schemaless labels and on edges after a flush.
+- **Locy:** `USE module` and `USE module { r }` resolve modules registered with `rules().register`, in session and database registries, and across a restart.
+- **Locy:** `DERIVE (NEW x:L {props})` stores the properties, evaluated per matched row.
+- **Locy:** a recursive `REQUIRE` uses the aggregate's declared direction from the registry, so `MAX`, `MIN`, `COUNT` and plugin aggregates can carry a bound.
+- **Locy:** CALIBRATE passes the model's FEATURES values under the INPUT names, the same inputs as a call site; a node input is its vid. A FEATURES/INPUT count mismatch is the compile error `CalibrateFeatureArity`, and a feature null on every row is a runtime error. A `TARGET` string `'false'` or `'0'` is a negative label.
+- **Locy:** programs see session params as `$session.<key>`, as Cypher does.
+- **Locy:** `MCOUNT(*)` parses, and `COUNT(*)` in a FOLD is the zero-argument row count. `EXPLAIN RULE` over a rule with a row-count fold beside another fold no longer fails.
+- **Locy:** `rules().remove(name)` is refused while other rules depend on it, naming them.
 - **OGM:** a `Vector[N] | None` field is a nullable vector column, so saving a node without a vector no longer fails with "cannot be null".
 - **OGM:** `SparseVector[N]` fields are saved as `uni_db.SparseVector`; a `TypeMappingError` is raised if the bindings lack that class.
 - **OGM:** `tx.create_edge` accepts nodes added to the same transaction (sync and async). A failed commit clears the vid, session and identity-map entry of the nodes it had created.

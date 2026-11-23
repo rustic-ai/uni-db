@@ -1,8 +1,9 @@
 Feature: Module Composition (MODULE / USE)
 
-  Tests MODULE declaration and USE import syntax.
-  Note: module resolution is parsed but not yet wired into the compiler
-  pipeline (see LOCY_IMPL_GAPS.md).
+  Tests MODULE declaration and USE import syntax, and USE resolution against
+  modules registered with `rules().register`. A `MODULE a.b` program's rules
+  are registered as `a.b.<rule>`; `USE a.b` imports all of them under their
+  short names and `USE a.b { r }` only the listed ones.
 
   Background:
     Given an empty graph
@@ -74,3 +75,83 @@ Feature: Module Composition (MODULE / USE)
       CREATE RULE flagged AS MATCH (n) WHERE n IS control YIELD KEY n
       """
     Then the program should parse successfully
+
+  # ── Resolution against registered modules ───────────────────────────────
+
+  Scenario: Glob USE resolves a registered module
+    Given having executed:
+      """
+      CREATE (:Company {name: 'Parent'})-[:OWNS]->(:Company {name: 'Child'})
+      """
+    And the following Locy rules are registered:
+      """
+      MODULE acme.compliance
+      CREATE RULE control AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY a, KEY b
+      """
+    When evaluating the following Locy program:
+      """
+      USE acme.compliance
+      CREATE RULE controller AS MATCH (a:Company)-[:OWNS]->(b:Company) WHERE (a, b) IS control YIELD KEY a
+      QUERY controller RETURN a.name AS name
+      """
+    Then evaluation should succeed
+    And the command result 0 should be a Query with 1 rows
+    And the command result 0 should be a Query containing row where name = 'Parent'
+
+  Scenario: Selective USE resolves the listed rule
+    Given having executed:
+      """
+      CREATE (:Company {name: 'Parent'})-[:OWNS]->(:Company {name: 'Child'})
+      """
+    And the following Locy rules are registered:
+      """
+      MODULE acme.compliance
+      CREATE RULE control AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY a, KEY b
+      CREATE RULE owned AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY b
+      """
+    When evaluating the following Locy program:
+      """
+      USE acme.compliance { owned }
+      QUERY owned RETURN b.name AS name
+      """
+    Then evaluation should succeed
+    And the command result 0 should be a Query with 1 rows
+    And the command result 0 should be a Query containing row where name = 'Child'
+
+  Scenario: Selective USE does not import unlisted rules
+    Given the following Locy rules are registered:
+      """
+      MODULE acme.compliance
+      CREATE RULE control AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY a, KEY b
+      CREATE RULE owned AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY b
+      """
+    When evaluating the following Locy program:
+      """
+      USE acme.compliance { owned }
+      QUERY control RETURN a.name AS name
+      """
+    Then evaluation should fail
+    And the evaluation error should mention "control"
+
+  Scenario: USE of an unknown rule is an error
+    Given the following Locy rules are registered:
+      """
+      MODULE acme.compliance
+      CREATE RULE control AS MATCH (a:Company)-[:OWNS]->(b:Company) YIELD KEY a, KEY b
+      """
+    When evaluating the following Locy program:
+      """
+      USE acme.compliance { sanctioned }
+      QUERY control RETURN a.name AS name
+      """
+    Then evaluation should fail
+    And the evaluation error should mention "sanctioned"
+
+  Scenario: USE of an unknown module is an error
+    When evaluating the following Locy program:
+      """
+      USE acme.sanctions
+      CREATE RULE flagged AS MATCH (n) YIELD KEY n
+      """
+    Then evaluation should fail
+    And the evaluation error should mention "acme.sanctions"

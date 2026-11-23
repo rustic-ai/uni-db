@@ -2269,13 +2269,14 @@ impl<'a> LocyPlanBuilder<'a> {
                 },
                 CompiledCommand::Cypher(q) => LocyCommand::Cypher { query: q.clone() },
                 CompiledCommand::Calibrate(cc) => {
-                    let inputs = model_catalog
+                    let (inputs, features) = model_catalog
                         .get(&cc.model_name)
-                        .map(|m| m.inputs.clone())
+                        .map(|m| (m.inputs.clone(), m.features.clone()))
                         .unwrap_or_default();
                     LocyCommand::Calibrate {
                         calibrate: cc.clone(),
                         model_inputs: inputs,
+                        model_features: features,
                     }
                 }
                 CompiledCommand::Validate(cv) => LocyCommand::Validate {
@@ -3233,7 +3234,10 @@ impl<'a> LocyPlanBuilder<'a> {
             .filter_map(|fb| {
                 // Extract the first argument from the aggregate function call
                 if let Expr::FunctionCall { args, .. } = &fb.aggregate {
-                    args.first().map(|arg| (fb.name.as_str(), arg))
+                    // `COUNT(*)` counts rows and reads no input column.
+                    args.first()
+                        .filter(|arg| !matches!(arg, Expr::Wildcard))
+                        .map(|arg| (fb.name.as_str(), arg))
                 } else {
                     None
                 }

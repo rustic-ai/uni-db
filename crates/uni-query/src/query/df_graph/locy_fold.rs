@@ -86,6 +86,26 @@ pub fn locy_monotonicity_verdict(
     is_monotonic_aggregate(registry, name).or_else(|| uni_locy::default_monotonicity_oracle(name))
 }
 
+/// The direction a recursive `REQUIRE` bound over `name` is checked against.
+///
+/// The sibling of [`locy_monotonicity_verdict`], composed the same way: the
+/// registry's [`direction`](uni_plugin::traits::locy::LocyAggregate::direction)
+/// first, then [`uni_locy::default_direction_oracle`] when the registry has no
+/// entry or the entry declares none. The fallback keeps the built-in `M*`
+/// folds working in a plugin-less embedding; consulting the registry first is
+/// what lets `MAX`, `MIN`, `COUNT` and a plugin aggregate carry a bound.
+#[must_use]
+pub fn locy_direction_verdict(
+    registry: &uni_plugin::PluginRegistry,
+    name: &str,
+) -> uni_common::locy::FoldDirection {
+    use uni_common::locy::FoldDirection;
+    match resolve_locy_aggregate(registry, name).map(|e| e.aggregate.direction()) {
+        Some(direction) if direction != FoldDirection::Unknown => direction,
+        _ => uni_locy::default_direction_oracle(name),
+    }
+}
+
 #[must_use]
 pub fn resolve_locy_aggregate(
     registry: &uni_plugin::PluginRegistry,

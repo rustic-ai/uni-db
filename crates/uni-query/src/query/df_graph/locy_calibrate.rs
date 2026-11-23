@@ -49,6 +49,12 @@ pub enum CalibrateRuntimeError {
     EmptyDataset {
         model_name: String,
     },
+    /// An INPUT's value was null on every collected row, so the classifier
+    /// would be fitted on no information.
+    NullFeature {
+        model_name: String,
+        input: String,
+    },
     InsufficientData {
         model_name: String,
         train: usize,
@@ -80,6 +86,11 @@ impl std::fmt::Display for CalibrateRuntimeError {
                 "CALIBRATE: model '{}' MATCH pattern produced zero rows",
                 model_name
             ),
+            Self::NullFeature { model_name, input } => write!(
+                f,
+                "CALIBRATE: model '{model_name}' INPUT '{input}' is null on every row; \
+                 check the model's FEATURES expression for it against the MATCH pattern"
+            ),
             Self::InsufficientData {
                 model_name,
                 train,
@@ -103,16 +114,25 @@ impl std::fmt::Display for CalibrateRuntimeError {
 impl std::error::Error for CalibrateRuntimeError {}
 
 /// Build a Cypher `Query` from the CALIBRATE command's pattern + WHERE +
-/// projected variables. The projection returns one node-variable per
-/// model INPUT binding followed by the TARGET expression.
+/// projected values. The projection returns one column per model INPUT
+/// binding, named after it, followed by the TARGET expression.
+///
+/// An INPUT's value is the model's FEATURES expression at its position, as a
+/// call site `model(n.score)` passes its arguments; a model without FEATURES
+/// passes the INPUT variable itself.
 fn build_collection_query(
     cmd: &CompiledCalibrate,
     model: &CompiledModel,
 ) -> uni_cypher::ast::Query {
     let mut items: Vec<ReturnItem> = Vec::with_capacity(model.inputs.len() + 1);
-    for binding in &model.inputs {
+    for (i, binding) in model.inputs.iter().enumerate() {
+        let expr = model
+            .features
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| Expr::Variable(binding.variable.clone()));
         items.push(ReturnItem::Expr {
-            expr: Expr::Variable(binding.variable.clone()),
+            expr,
             alias: Some(binding.variable.clone()),
             source_text: None,
         });
@@ -150,7 +170,9 @@ fn row_to_feature(row: &FactRow, name: &str) -> FeatureValue {
         Some(Value::String(s)) => FeatureValue::String(s.clone()),
         Some(Value::Bool(b)) => FeatureValue::Bool(*b),
         Some(Value::Null) | None => FeatureValue::Null,
-        // Other Value variants (List, Map, Node, Edge, …) fall back to
+        // A node is passed as its vid, as it is at a rule's call site.
+        Some(Value::Node(node)) => FeatureValue::Int(node.vid.as_u64() as i64),
+        // Other Value variants (List, Map, Edge, …) fall back to
         // Null in this slice — Slice 3+ may extend FeatureValue.
         Some(_) => FeatureValue::Null,
     }
@@ -158,13 +180,18 @@ fn row_to_feature(row: &FactRow, name: &str) -> FeatureValue {
 
 /// Convert a target Value to a bool label. Non-null truthy values
 /// (true, non-zero numbers, non-empty strings) become 1; null /
-/// false / 0 become 0.
-fn target_to_label(v: Option<&Value>) -> bool {
+/// false / 0 become 0. A string spelling a false boolean (`'false'`, `'0'`,
+/// any case) is false: a label column loaded as text would otherwise read
+/// every row as positive.
+pub(crate) fn target_to_label(v: Option<&Value>) -> bool {
     match v {
         Some(Value::Bool(b)) => *b,
         Some(Value::Int(i)) => *i != 0,
         Some(Value::Float(f)) => *f != 0.0,
-        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            !(s.is_empty() || s == "0" || s.eq_ignore_ascii_case("false"))
+        }
         Some(Value::Null) | None => false,
         Some(_) => false,
     }
@@ -271,6 +298,17 @@ pub async fn run_calibrate(
         }
         inputs.push(ClassifyInput { features });
         labels.push(target_to_label(row.get("__calibrate_target")));
+    }
+    for binding in &model.inputs {
+        if inputs
+            .iter()
+            .all(|i| matches!(i.features.get(&binding.variable), Some(FeatureValue::Null)))
+        {
+            return Err(CalibrateRuntimeError::NullFeature {
+                model_name: cmd.model_name.clone(),
+                input: binding.variable.clone(),
+            });
+        }
     }
     // Classify everything once — same primitive Slice 3 uses for rule-body invocation.
     let predictions =
@@ -446,6 +484,109 @@ mod tests {
             "Platt should reduce ECE by ≥50%: raw={} cal={}",
             result.raw_ece,
             result.calibrated_ece
+        );
+    }
+
+    fn scored_model() -> CompiledModel {
+        CompiledModel {
+            features: vec![Expr::Property(
+                Box::new(Expr::Variable("s".into())),
+                "score".into(),
+            )],
+            ..model_with_one_input()
+        }
+    }
+
+    #[test]
+    fn collection_query_projects_features_under_input_names() {
+        let query = build_collection_query(&cmd(AstCalibration::PlattScaling), &scored_model());
+        let uni_cypher::ast::Query::Single(stmt) = query else {
+            panic!("expected a single statement");
+        };
+        let Clause::Return(ret) = &stmt.clauses[1] else {
+            panic!("expected RETURN");
+        };
+        match &ret.items[0] {
+            ReturnItem::Expr { expr, alias, .. } => {
+                assert_eq!(alias.as_deref(), Some("s"));
+                assert!(
+                    matches!(expr, Expr::Property(base, p) if p == "score"
+                        && matches!(base.as_ref(), Expr::Variable(v) if v == "s")),
+                    "the FEATURES expression supplies INPUT s: {expr:?}"
+                );
+            }
+            other => panic!("unexpected item {other:?}"),
+        }
+        // Without FEATURES the INPUT variable itself is projected.
+        let query =
+            build_collection_query(&cmd(AstCalibration::PlattScaling), &model_with_one_input());
+        let uni_cypher::ast::Query::Single(stmt) = query else {
+            panic!("expected a single statement");
+        };
+        let Clause::Return(ret) = &stmt.clauses[1] else {
+            panic!("expected RETURN");
+        };
+        assert!(matches!(
+            &ret.items[0],
+            ReturnItem::Expr { expr: Expr::Variable(v), .. } if v == "s"
+        ));
+    }
+
+    #[test]
+    fn a_node_feature_is_its_vid() {
+        let node = uni_common::Node {
+            vid: uni_common::core::id::Vid::new(42),
+            labels: vec!["Supplier".into()],
+            properties: Default::default(),
+        };
+        let row = fact_row(&[("s", Value::Node(node))]);
+        assert!(matches!(row_to_feature(&row, "s"), FeatureValue::Int(42)));
+    }
+
+    #[test]
+    fn a_false_string_target_is_a_negative_label() {
+        for (text, label) in [
+            ("true", true),
+            ("FALSE", false),
+            ("0", false),
+            ("", false),
+            ("yes", true),
+        ] {
+            assert_eq!(
+                target_to_label(Some(&Value::String(text.into()))),
+                label,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn calibrate_rejects_an_all_null_feature() {
+        let mut catalog = HashMap::new();
+        catalog.insert("scorer".to_string(), scored_model());
+        let mut registry = ClassifierRegistry::new();
+        let c: Arc<dyn NeuralClassifier> = Arc::new(MockClassifier::constant("classify/test", 0.5));
+        registry.insert("scorer".into(), c);
+        let registry = Arc::new(registry);
+        let rows: Vec<FactRow> = (0..10)
+            .map(|i| {
+                fact_row(&[
+                    ("s", Value::Null),
+                    ("__calibrate_target", Value::Bool(i % 2 == 0)),
+                ])
+            })
+            .collect();
+        let err = run_calibrate(
+            &cmd(AstCalibration::PlattScaling),
+            &catalog,
+            &registry,
+            rows,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, CalibrateRuntimeError::NullFeature { input, .. } if input == "s"),
+            "{err}"
         );
     }
 

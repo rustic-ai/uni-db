@@ -3614,33 +3614,45 @@ pub(crate) fn yield_positions_in(
     schema: &SchemaRef,
 ) -> DFResult<(Vec<usize>, Vec<usize>)> {
     let yield_fields = rule.yield_schema.fields();
-    let all = yield_fields
+    // A row count (`COUNT()`, `COUNT(*)`, `MCOUNT()`) reads no input column, so
+    // a pre-fold batch carries nothing for it; it is left out of the
+    // positions, as a fold output is not part of a pre-fold fact.
+    let counts_rows = |name: &str| {
+        rule.fold_bindings
+            .iter()
+            .any(|fb| fb.input_col_name.is_none() && fb.output_name == name)
+    };
+    let positions = yield_fields
         .iter()
         .enumerate()
         .map(|(pos, field)| {
-            pre_fold_column_name(rule, pos)
+            let found = pre_fold_column_name(rule, pos)
                 .and_then(|name| schema.index_of(name).ok())
-                .or_else(|| schema.index_of(field.name()).ok())
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(format!(
-                        "rule '{}': yield column '{}' missing from the fact batch \
+                .or_else(|| schema.index_of(field.name()).ok());
+            if found.is_none() && counts_rows(field.name()) {
+                return Ok(None);
+            }
+            found.map(Some).ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(format!(
+                    "rule '{}': yield column '{}' missing from the fact batch \
                          (columns: {:?})",
-                        rule.name,
-                        field.name(),
-                        schema
-                            .fields()
-                            .iter()
-                            .map(|f| f.name().as_str())
-                            .collect::<Vec<_>>()
-                    ))
-                })
+                    rule.name,
+                    field.name(),
+                    schema
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().as_str())
+                        .collect::<Vec<_>>()
+                ))
+            })
         })
-        .collect::<DFResult<Vec<usize>>>()?;
+        .collect::<DFResult<Vec<Option<usize>>>>()?;
+    let all: Vec<usize> = positions.iter().flatten().copied().collect();
     let key = rule
         .key_column_indices
         .iter()
         .map(|&i| {
-            all.get(i).copied().ok_or_else(|| {
+            positions.get(i).copied().flatten().ok_or_else(|| {
                 datafusion::error::DataFusionError::Internal(format!(
                     "rule '{}': KEY column index {i} out of range for {} yield columns",
                     rule.name,
@@ -5235,6 +5247,11 @@ fn extract_feature_value(col: &dyn arrow_array::Array, row_idx: usize) -> uni_lo
     }
     if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
         return uni_locy::FeatureValue::Int(a.value(row_idx));
+    }
+    // A node variable's column holds its vid. A node is passed as its vid, as
+    // CALIBRATE and the EXPLAIN reconstruction pass it.
+    if let Some(a) = col.as_any().downcast_ref::<arrow_array::UInt64Array>() {
+        return uni_locy::FeatureValue::Int(a.value(row_idx) as i64);
     }
     if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() {
         return uni_locy::FeatureValue::Bool(a.value(row_idx));

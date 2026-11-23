@@ -311,3 +311,41 @@ async fn apply_replays_with_the_programs_params() -> Result<()> {
     );
     Ok(())
 }
+
+/// Session parameters reach a Locy program as `$session.<key>`, as they reach
+/// Cypher, through `locy`, `locy_with(..).run()` and `profile()`; a `session`
+/// map bound on the builder takes precedence key by key.
+#[tokio::test]
+async fn session_params_reach_locy_programs() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+    tx.execute("CREATE (:N {v: 1, tenant: 'A'}), (:N {v: 2, tenant: 'B'})")
+        .await?;
+    tx.commit().await?;
+    session.params().set("tenant", "A");
+
+    let program = "CREATE RULE r AS MATCH (n:N) WHERE n.tenant = $session.tenant \
+                   YIELD KEY n, n.v AS v\nQUERY r RETURN v";
+    assert_eq!(
+        query_values(&session.locy(program).await?),
+        vec![Value::Int(1)]
+    );
+    assert_eq!(
+        query_values(&session.locy_with(program).run().await?),
+        vec![Value::Int(1)]
+    );
+    let (profiled, _) = session.locy_with(program).profile().await?;
+    assert_eq!(query_values(&profiled), vec![Value::Int(1)]);
+
+    let overridden = session
+        .locy_with(program)
+        .param(
+            "session",
+            Value::Map([("tenant".to_string(), Value::from("B"))].into()),
+        )
+        .run()
+        .await?;
+    assert_eq!(query_values(&overridden), vec![Value::Int(2)]);
+    Ok(())
+}

@@ -465,8 +465,18 @@ fn extract_from_pattern(
         .cloned()
         .unwrap_or_else(|| node_label_from_binding(&target.variable, row));
 
-    let source_props = node_properties_from_binding(&source.variable, row);
-    let target_props = node_properties_from_binding(&target.variable, row);
+    // A NEW node has no binding in the row: its properties are the ones it
+    // is created with.
+    let source_props = if source.is_new {
+        super::locy_ast_builder::new_node_properties(source, row)?
+    } else {
+        node_properties_from_binding(&source.variable, row)
+    };
+    let target_props = if target.is_new {
+        super::locy_ast_builder::new_node_properties(target, row)?
+    } else {
+        node_properties_from_binding(&target.variable, row)
+    };
 
     if source.is_new {
         vertices
@@ -516,16 +526,19 @@ fn node_label_from_binding(var: &str, row: &FactRow) -> String {
     }
 }
 
-/// Evaluates a derived edge's property map.
+/// Evaluates a derived edge's or `NEW` node's property map against a row.
 ///
 /// An evaluation error, or a value that is not a map, is an error; both used to
 /// report the derived edge with no properties at all.
-fn eval_map_expr(expr: &uni_cypher::ast::Expr, row: &FactRow) -> Result<Properties, LocyError> {
+pub(crate) fn eval_map_expr(
+    expr: &uni_cypher::ast::Expr,
+    row: &FactRow,
+) -> Result<Properties, LocyError> {
     use uni_common::Value;
     match eval_expr(expr, row)? {
         Value::Map(m) => Ok(m),
         other => Err(LocyError::TypeError {
-            message: format!("DERIVE edge properties must be a map, got {other:?}"),
+            message: format!("DERIVE properties must be a map, got {other:?}"),
         }),
     }
 }

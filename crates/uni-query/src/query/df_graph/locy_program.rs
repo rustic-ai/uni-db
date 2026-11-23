@@ -1593,6 +1593,7 @@ async fn run_program(
             LocyCommand::Calibrate {
                 calibrate,
                 model_inputs,
+                model_features,
             } => {
                 // Phase C C2: dispatch a CALIBRATE command. Build a
                 // Cypher MATCH+RETURN query that projects the model's
@@ -1602,14 +1603,14 @@ async fn run_program(
                 // surface as `CommandResult::Calibrate(...)`.
                 //
                 // Synthesize a CompiledModel snapshot from the carried
-                // model_inputs so we can build the collection query
+                // model_inputs and model_features so we can build the collection query
                 // without lugging the full catalog through this call
                 // site. Other fields the runtime doesn't read are
                 // filled with defaults.
                 let model_snapshot = uni_locy::CompiledModel {
                     name: calibrate.model_name.clone(),
                     inputs: model_inputs.clone(),
-                    features: vec![],
+                    features: model_features.clone(),
                     path_context: None,
                     output_type: uni_cypher::locy_ast::OutputType::Prob,
                     output_name: String::new(),
@@ -2022,7 +2023,7 @@ fn parse_fold_aggregate(expr: &Expr) -> DFResult<(smol_str::SmolStr, String)> {
             let is_count = matches!(upper.as_str(), "COUNT" | "MCOUNT");
 
             // COUNT/MCOUNT with zero args → CountAll (like SQL COUNT(*))
-            if is_count && args.is_empty() {
+            if is_count && (args.is_empty() || matches!(args.as_slice(), [Expr::Wildcard])) {
                 return Ok((smol_str::SmolStr::new_static("COUNTALL"), String::new()));
             }
 

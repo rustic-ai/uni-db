@@ -215,8 +215,22 @@ impl<'a> LocyBuilder<'a> {
         self
     }
 
+    /// The builder's config with the session's parameters merged in.
+    ///
+    /// As for Cypher, session parameters are visible as `$session.<key>`,
+    /// and a `session` parameter bound on this builder takes precedence key by
+    /// key.
+    fn config_with_session_params(&self) -> LocyConfig {
+        let mut config = self.config.clone();
+        config.params = self
+            .session
+            .merge_params(std::mem::take(&mut config.params));
+        config
+    }
+
     /// Evaluate the program and return the full [`LocyResult`].
     pub async fn run(self) -> Result<LocyResult> {
+        let config = self.config_with_session_params();
         // Expose a plugin registry (and principal) as task-locals so in-memory
         // Locy dispatch — e.g. `LocyGenerator` / `LocyPredicate` via
         // `eval_function` on the SLG path — can resolve registered plugins.
@@ -233,7 +247,7 @@ impl<'a> LocyBuilder<'a> {
             crate::api::impl_locy::evaluate_with_db_and_config(
                 &self.session.db,
                 &self.program,
-                &self.config,
+                &config,
                 self.session.rule_registry(),
                 self.session.cancel_scope(self.cancellation_token.clone()),
                 self.max_memory,
@@ -248,9 +262,10 @@ impl<'a> LocyBuilder<'a> {
     /// Compiles the program and returns plan introspection data (strata,
     /// rule names, recursion info, compiler warnings).
     pub fn explain(self) -> Result<crate::api::locy_result::LocyExplainOutput> {
+        let config = self.config_with_session_params();
         let compiled = self
             .session
-            .compile_locy_with_config(&self.program, &self.config)?;
+            .compile_locy_with_config(&self.program, &config)?;
         Ok(crate::api::locy_result::LocyExplainOutput::from_compiled(
             &compiled,
         ))
@@ -260,10 +275,11 @@ impl<'a> LocyBuilder<'a> {
     /// profile (per-stratum / per-rule / per-iteration timing, fact deltas, and
     /// per-operator metrics). The Locy analog of Cypher's `query.profile()`.
     pub async fn profile(self) -> Result<(LocyResult, crate::api::locy_result::LocyProfileOutput)> {
+        let config = self.config_with_session_params();
         let explain = crate::api::locy_result::LocyExplainOutput::from_compiled(
             &self
                 .session
-                .compile_locy_with_config(&self.program, &self.config)?,
+                .compile_locy_with_config(&self.program, &config)?,
         );
         let capture = std::sync::Arc::new(std::sync::Mutex::new(None));
         // The same task-local scope `run` installs: profiling executes the
@@ -274,7 +290,7 @@ impl<'a> LocyBuilder<'a> {
             crate::api::impl_locy::evaluate_with_db_and_config_capturing(
                 &self.session.db,
                 &self.program,
-                &self.config,
+                &config,
                 self.session.rule_registry(),
                 Some(&capture),
                 self.session.cancel_scope(self.cancellation_token.clone()),

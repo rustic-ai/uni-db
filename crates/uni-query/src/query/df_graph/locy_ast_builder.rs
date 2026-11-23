@@ -5,8 +5,6 @@
 //!
 //! Relocated from `uni-locy/src/orchestrator/ast_builder.rs` during Phase 7.
 
-use std::collections::HashMap;
-
 use uni_common::Value;
 use uni_cypher::ast::{
     BinaryOp, Clause, CreateClause, CypherLiteral, Direction, Expr, LabelExpr, MatchClause,
@@ -120,7 +118,7 @@ fn build_create_from_derive_pattern(
             where_clause: None,
         }
     } else {
-        node_spec_to_pattern(source, bindings)
+        node_spec_to_pattern(source, bindings)?
     };
 
     let target_create = if target_is_existing {
@@ -131,7 +129,7 @@ fn build_create_from_derive_pattern(
             where_clause: None,
         }
     } else {
-        node_spec_to_pattern(target, bindings)
+        node_spec_to_pattern(target, bindings)?
     };
 
     let rel = PatternElement::Relationship(RelationshipPattern {
@@ -276,29 +274,101 @@ pub fn build_merge_query(a: &str, b: &str, bindings: &FactRow) -> Result<Query, 
     }))
 }
 
-fn node_spec_to_pattern(spec: &DeriveNodeSpec, bindings: &FactRow) -> NodePattern {
+fn node_spec_to_pattern(
+    spec: &DeriveNodeSpec,
+    bindings: &FactRow,
+) -> Result<NodePattern, LocyError> {
     let variable = Some(spec.variable.clone());
     let labels = LabelExpr::from_conjunction(spec.labels.iter().cloned());
 
     let properties = if spec.is_new {
-        let skolem_id = generate_skolem_id(&spec.variable, bindings);
-        let mut props = HashMap::new();
-        props.insert("_skolem_id".to_string(), Value::String(skolem_id));
+        let props = new_node_properties(spec, bindings)?;
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
         Some(Expr::Map(
-            props
-                .into_iter()
-                .map(|(k, v)| (k, value_to_expr(&v)))
+            keys.into_iter()
+                .map(|k| (k.clone(), property_value_to_expr(&props[k])))
                 .collect(),
         ))
     } else {
         spec.properties.clone()
     };
 
-    NodePattern {
+    Ok(NodePattern {
         variable,
         labels,
         properties,
         where_clause: None,
+    })
+}
+
+/// The properties a `NEW` node is created with: its declared property map
+/// evaluated against the matched row, plus its Skolem id.
+///
+/// The map is evaluated here rather than handed to the CREATE as an
+/// expression because it may name any variable of the row, while the CREATE
+/// binds only the pattern's existing endpoints. A `_skolem_id` the map names
+/// itself is replaced by the generated one, which is the node's identity.
+///
+/// # Errors
+///
+/// [`LocyError`] when the map does not evaluate, or evaluates to a non-map.
+pub(crate) fn new_node_properties(
+    spec: &DeriveNodeSpec,
+    bindings: &FactRow,
+) -> Result<uni_common::Properties, LocyError> {
+    let mut props = match &spec.properties {
+        Some(expr) => super::locy_derive::eval_map_expr(expr, bindings)?,
+        None => uni_common::Properties::new(),
+    };
+    props.retain(|_, v| !matches!(v, Value::Null));
+    props.insert(
+        "_skolem_id".to_string(),
+        Value::String(generate_skolem_id(&spec.variable, bindings)),
+    );
+    Ok(props)
+}
+
+/// A property value as the literal a CREATE stores it from.
+///
+/// Unlike [`value_to_expr`], collections and temporals keep their type: a
+/// list stays a list, so a vector-typed property is converted to its declared
+/// form by the write path as any Cypher-written list is.
+fn property_value_to_expr(v: &Value) -> Expr {
+    use uni_common::TemporalValue;
+    let call = |name: &str, text: String| Expr::FunctionCall {
+        name: name.to_string(),
+        args: vec![Expr::Literal(CypherLiteral::String(text))],
+        distinct: false,
+        window_spec: None,
+    };
+    match v {
+        Value::List(items) => Expr::List(items.iter().map(property_value_to_expr).collect()),
+        Value::Map(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Expr::Map(
+                keys.into_iter()
+                    .map(|k| (k.clone(), property_value_to_expr(&map[k])))
+                    .collect(),
+            )
+        }
+        Value::Vector(values) => Expr::List(
+            values
+                .iter()
+                .map(|f| Expr::Literal(CypherLiteral::Float(f64::from(*f))))
+                .collect(),
+        ),
+        Value::Temporal(t) => match t {
+            TemporalValue::Date { .. } => call("date", t.to_string()),
+            TemporalValue::LocalTime { .. } => call("localtime", t.to_string()),
+            TemporalValue::Time { .. } => call("time", t.to_string()),
+            TemporalValue::LocalDateTime { .. } => call("localdatetime", t.to_string()),
+            TemporalValue::DateTime { .. } => call("datetime", t.to_string()),
+            TemporalValue::Duration { .. } => call("duration", t.to_string()),
+            _ => value_to_expr(v),
+        },
+        other => value_to_expr(other),
     }
 }
 

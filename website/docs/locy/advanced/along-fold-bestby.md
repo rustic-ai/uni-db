@@ -185,9 +185,11 @@ CREATE RULE exposure AS
 MATCH (a:Account)-[t:TRANSFER]->(b:Account)
 WHERE b IS suspicious
 FOLD total = MSUM(t.amount),
-     transfer_count = MCOUNT()
+     transfer_count = MCOUNT(*)
 YIELD KEY a, total, transfer_count
 ```
+
+A row count is written `MCOUNT(*)` or `MCOUNT()` (`COUNT(*)` and `COUNT()` outside recursion work the same way); `MCOUNT(x)` counts the rows where `x` is not null.
 
 ## Post-FOLD WHERE (HAVING)
 
@@ -300,7 +302,7 @@ On the graph above this answers `{S, A}`: `B`, held at 11%, is excluded, so noth
 
 Both clauses may appear on one rule, `REQUIRE` first — constrain the derivation, then filter what is shown.
 
-**`REQUIRE` must be one-way.** In a recursive rule it is rejected at compile time unless the comparison can only ever turn from false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a non-decreasing fold (`MSUM` over non-negative values, `MMAX`, `MCOUNT`, `MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MMIN`, `MPROD`). Only these M-aggregates have a direction: a `REQUIRE` over plain `MAX`, `MIN` or `COUNT` in a recursive rule is rejected, so write `MMAX`, `MMIN` or `MCOUNT` there. Equality is never admissible. The reverse pairings would let a fact be derived and then withdrawn, which the fixpoint reads as progress rather than oscillation, so the rule would run to the iteration limit instead of converging.
+**`REQUIRE` must be one-way.** In a recursive rule it is rejected at compile time unless the comparison can only ever turn from false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a non-decreasing fold (`MSUM` over non-negative values, `MAX`/`MMAX`, `COUNT`/`MCOUNT`, `MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MIN`/`MMIN`, `MPROD`). The direction is the one the aggregate declares in the registry, so a plugin aggregate that declares one is checked the same way, and one that declares none is rejected. Equality is never admissible. The reverse pairings would let a fact be derived and then withdrawn, which the fixpoint reads as progress rather than oscillation, so the rule would run to the iteration limit instead of converging.
 
 Outside recursion the direction is not policed and `REQUIRE` means exactly what the post-FOLD `WHERE` means — there is one pass, so nothing can flip. That makes it safe to reach for from the start: a rule keeps the meaning its author wrote if a self-reference is added later.
 

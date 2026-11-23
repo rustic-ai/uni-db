@@ -107,13 +107,15 @@ fn is_declared_lattice_fold(name: &str) -> bool {
 ///
 /// `is_monotonic` resolves aggregate function names to a tri-state
 /// monotonicity verdict used for the recursive-stratum check (see
-/// [`MonotonicityOracle`]).
+/// [`MonotonicityOracle`]); `direction_of` resolves them to the direction a
+/// recursive `REQUIRE` bound is checked against (see [`DirectionOracle`]).
 pub fn check(
     rule_groups: &HashMap<String, Vec<&RuleDefinition>>,
     strat: &StratificationResult,
     model_catalog: &HashMap<String, CompiledModel>,
     module_ctx: &super::modules::ModuleContext,
     is_monotonic: MonotonicityOracle<'_>,
+    direction_of: DirectionOracle<'_>,
 ) -> Result<(HashMap<String, CompiledRule>, Vec<CompilerWarning>), LocyCompileError> {
     let mut compiled_rules = HashMap::new();
     let mut warnings = Vec::new();
@@ -235,7 +237,7 @@ pub fn check(
                 check_having_in_recursive_path(rule_name, def, scc_rules, &mut warnings);
                 // #265: REQUIRE constrains the recursion, so its threshold
                 // must be provably one-way or the fixpoint cannot terminate.
-                check_require_direction(rule_name, def, &default_direction_oracle)?;
+                check_require_direction(rule_name, def, direction_of)?;
             }
 
             // NB: deliberately outside the `is_recursive` block above — a

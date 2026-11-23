@@ -287,7 +287,8 @@ let session = db.session();
 session.params().set("tenant", 42);
 session.params().set("region", "us-east");
 
-// Parameters are auto-merged into queries as $session.tenant, $session.region
+// Parameters are auto-merged into queries and Locy programs as
+// $session.tenant, $session.region
 let rows = session.query("MATCH (n) WHERE n.tenant = $session.tenant RETURN n").await?;
 ```
 

@@ -402,11 +402,12 @@ tx = session.tx_with().timeout(30.0).isolation("serialized").start()
 | `session.rules()` | `RuleRegistry` | Session-scoped rule registry |
 | `session.params()` | `Params` | Session-scoped parameter store |
 
-Cypher reads a session parameter as `$session.<key>`:
+Cypher and Locy read a session parameter as `$session.<key>`:
 
 ```python
 session.params().set("tenant", "acme")
 session.query("MATCH (n:Person) WHERE n.tenant = $session.tenant RETURN n")
+session.locy("CREATE RULE t AS MATCH (n:Person) WHERE n.tenant = $session.tenant YIELD KEY n")
 ```
 
 #### Version Pinning

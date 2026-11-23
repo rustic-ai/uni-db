@@ -69,6 +69,12 @@ pub struct LocyWorld {
     /// should have been called N times` assertions.
     pub classifier_call_counts:
         std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Per-model record of every input a `recording mock classifier`
+    /// received, for assertions on what the runtime passed it.
+    pub classifier_inputs: std::collections::HashMap<
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<uni_locy::ClassifyInput>>>,
+    >,
 }
 
 impl std::fmt::Debug for LocyWorld {
@@ -107,6 +113,7 @@ impl LocyWorld {
             params: HashMap::new(),
             classifier_registry: uni_locy::ClassifierRegistry::new(),
             classifier_call_counts: std::collections::HashMap::new(),
+            classifier_inputs: std::collections::HashMap::new(),
         }
     }
 

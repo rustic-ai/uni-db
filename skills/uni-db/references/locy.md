@@ -21,7 +21,7 @@ Locy (Logic + Cypher) is a Datalog-inspired logic programming language extending
 
 ```
 MODULE namespace.path              -- Optional module namespace (at most one)
-USE other.module { rule1, rule2 }  -- Parsed, but not wired yet (see §13)
+USE other.module { rule1, rule2 }  -- Import a registered module's rules (see §13)
 
 -- Statements: rules and commands (any order, any count)
 CREATE RULE ... AS ...
@@ -320,6 +320,7 @@ aggregates reload normally.
 | `MMAX(expr)` | `max(acc, val)` | Non-decreasing | -infinity | None |
 | `MMIN(expr)` | `min(acc, val)` | Non-increasing | +infinity | None |
 | `MCOUNT(expr)` | `acc + 1` | Non-decreasing | 0 | None |
+| `MCOUNT(*)` / `MCOUNT()` | `acc + 1` per row | Non-decreasing | 0 | None |
 | `MNOR(expr)` | `1 - (1-acc)(1-val)` | Non-decreasing | 0.0 | [0, 1] |
 | `MPROD(expr)` | `acc * val` | Non-increasing | 1.0 | [0, 1] |
 
@@ -421,9 +422,11 @@ Both may appear on one rule; `REQUIRE` is written first, and reads as
 **`REQUIRE` must be one-way.** It is rejected at compile time
 (`NonMonotonicFilterInRecursion`) unless the comparison can only ever turn from
 false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a
-non-decreasing fold (`MSUM` over non-negative values, `MMAX`, `MCOUNT`,
-`MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MMIN`,
-`MPROD`). Equality is never admissible. The reverse pairings would let a fact be
+non-decreasing fold (`MSUM` over non-negative values, `MAX`/`MMAX`,
+`COUNT`/`MCOUNT`, `MNOR`), or an **upper** bound (`<=`, `<`) over a
+non-increasing one (`MIN`/`MMIN`, `MPROD`). The direction is the one the
+aggregate declares in the plugin registry (`LocyAggregate::direction`), so a
+plugin aggregate is checked the same way. Equality is never admissible. The reverse pairings would let a fact be
 derived and then withdrawn, which the fixpoint reads as progress rather than
 oscillation, so it would run to the iteration limit instead of converging.
 
@@ -599,7 +602,7 @@ DERIVE (NEW cat:Category {name: a.type})<-[:BELONGS_TO]-(a)  -- NEW node (Skolem
 DERIVE MERGE a, b                                             -- MERGED_WITH edge a->b
 ```
 
-`DERIVE MERGE a, b` creates a `MERGED_WITH` edge from `a` to `b`; it does not combine the two nodes. Properties on a `NEW` node are not stored yet (only its `_skolem_id`), and one `NEW` node is created per matched row; edge properties are stored.
+`DERIVE MERGE a, b` creates a `MERGED_WITH` edge from `a` to `b`; it does not combine the two nodes. Properties on a `NEW` node are evaluated against the matched row and stored (with an internal `_skolem_id`), and one `NEW` node is created per matched row; edge properties are stored too.
 
 NEW node wardedness constraint: companion node must be bound by MATCH, not solely by IS references (error: `WardednessViolation`).
 
@@ -674,6 +677,10 @@ result = session.locy_with("QUERY r WHERE x = $val") \
     .max_iterations(500) \
     .with_config({"exact_probability": True}) \
     .run()
+
+# Session parameters are visible as $session.<key>, as in Cypher
+session.params().set("tenant", "acme")
+result = session.locy("CREATE RULE t AS MATCH (n:Doc) WHERE n.tenant = $session.tenant YIELD KEY n")
 
 # Compilation-only introspection
 explain = session.locy_with("CREATE RULE r AS ...").explain()
@@ -803,7 +810,13 @@ USE acme.common                       -- Glob import
 USE acme.common { control, reachable } -- Selective import
 ```
 
-`USE` imports are not wired yet: they parse, but compilation fails with `module not found`, including for modules registered with `rules().register`. Declare the rules in the same program (with `MODULE`) instead.
+`USE` imports rules from a module registered with `rules().register` (a `MODULE a.b` program's rules are registered as `a.b.<rule>`): the glob form imports all of them under their short names, the selective form only the listed ones. An unregistered module fails with `ModuleNotFound`, a listed rule the module lacks with `ImportNotFound`. A program sees the database's registered modules plus its session's.
+
+```
+-- registered once: db.rules().register("MODULE acme.common CREATE RULE control AS MATCH (a)-[:OWNS]->(b) YIELD KEY a, KEY b")
+USE acme.common { control }
+QUERY control RETURN a, b
+```
 
 ### Qualified Names
 
@@ -938,7 +951,7 @@ CREATE RULE infer_categories AS
 DERIVE infer_categories
 ```
 
-This creates one `Category` node and `BELONGS_TO` edge per matching product; the `name` property on the `NEW` node is not stored yet.
+This creates one `Category` node (with `name: 'Premium'`) and `BELONGS_TO` edge per matching product.
 
 ### What-If Analysis with ASSUME
 

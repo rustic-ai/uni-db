@@ -181,3 +181,73 @@ Feature: CALIBRATE statement (Phase C C2)
     Then evaluation should succeed
     And the result at path 0 should be a Calibrate of 40 samples with 10 held out
     And the result at path 2 should be a Calibrate of 80 samples with 20 held out
+
+  # ── The model's FEATURES supply its INPUT values ───────────────────────
+  #
+  # `INPUT (s) FEATURES s.score` passes `{s: <score>}` to the classifier, as a
+  # call site `scorer(s.score)` does. A classifier that echoes its input then
+  # predicts the label exactly, so the raw Brier score is near zero.
+
+  Scenario: CALIBRATE passes each FEATURES value under its INPUT name
+    Given having executed:
+      """
+      UNWIND range(0, 39) AS i
+      CREATE (:Sample {idx: i, label: i % 2 = 0, score: CASE WHEN i % 2 = 0 THEN 0.9 ELSE 0.1 END})
+      """
+    And a registered recording mock classifier "scorer" echoing Float feature "s"
+    When evaluating the following Locy program with neural_predicates_preview:
+      """
+      CREATE MODEL scorer AS
+        INPUT (s)
+        FEATURES s.score
+        OUTPUT PROB risk
+        USING xervo('classify/scorer')
+
+      CALIBRATE scorer
+        ON MATCH (s:Sample)
+        TARGET s.label
+        METHOD platt_scaling
+        HOLDOUT 0.25
+      """
+    Then evaluation should succeed
+    And classifier "scorer" should have received Float feature "s" values 0.1, 0.9
+    And the calibration result for "scorer" should have raw_brier less than 0.05
+
+  Scenario: CALIBRATE refuses a model whose FEATURES and INPUTs differ in number
+    When evaluating the following Locy program with neural_predicates_preview:
+      """
+      CREATE MODEL scorer AS
+        INPUT (s)
+        FEATURES s.score, s.idx
+        OUTPUT PROB risk
+        USING xervo('classify/scorer')
+
+      CALIBRATE scorer
+        ON MATCH (s:Sample)
+        TARGET s.label
+        METHOD platt_scaling
+      """
+    Then evaluation should fail
+    And the evaluation error should mention "FEATURES"
+
+  Scenario: CALIBRATE refuses a feature that is null on every row
+    Given having executed:
+      """
+      UNWIND range(0, 9) AS i CREATE (:Sample {idx: i, label: i % 2 = 0})
+      """
+    And a registered mock classifier "scorer" returning 0.5
+    When evaluating the following Locy program with neural_predicates_preview:
+      """
+      CREATE MODEL scorer AS
+        INPUT (s)
+        FEATURES s.missing
+        OUTPUT PROB risk
+        USING xervo('classify/scorer')
+
+      CALIBRATE scorer
+        ON MATCH (s:Sample)
+        TARGET s.label
+        METHOD platt_scaling
+      """
+    Then evaluation should fail
+    And the evaluation error should mention "null on every row"

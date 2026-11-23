@@ -426,3 +426,115 @@ async fn test_session_derive_isolation_between_sessions() -> Result<()> {
 }
 
 // Rust guideline compliant
+
+// ── Group 5: NEW node properties ─────────────────────────────────────────
+
+const NEW_NODE_RULE: &str = "CREATE RULE categorize AS \
+       MATCH (c:City) \
+       DERIVE (NEW x:Country {name: c.country, tags: [c.name, 'derived'], size: c.pop * 2})\
+       <-[:IN]-(c) \n\
+     DERIVE categorize";
+
+async fn cities(session: &uni_db::Session) -> Result<()> {
+    let tx = session.tx().await?;
+    tx.execute(
+        "CREATE (:City {name: 'Paris', country: 'France', pop: 2}), \
+                (:City {name: 'Lyon', country: 'France', pop: 1})",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A NEW node's properties are evaluated against the matched row and stored,
+/// one node per matched row.
+#[tokio::test]
+async fn test_derive_new_node_stores_its_properties() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let session = db.session();
+    cities(&session).await?;
+
+    // Visible to the program's trailing Cypher.
+    let result = session
+        .locy(&format!(
+            "{NEW_NODE_RULE} \n\
+             MATCH (x:Country)<-[:IN]-(c:City) \
+             RETURN x.name AS name, x.tags AS tags, x.size AS size, c.name AS city \
+             ORDER BY city"
+        ))
+        .await?;
+    let rows = cypher_rows(&result);
+    assert_eq!(rows.len(), 2, "one NEW node per matched row: {rows:?}");
+    assert_eq!(rows[0].get("name"), Some(&Value::String("France".into())));
+    assert_eq!(
+        rows[0].get("tags"),
+        Some(&Value::List(vec![
+            Value::String("Lyon".into()),
+            Value::String("derived".into())
+        ]))
+    );
+    assert_eq!(rows[0].get("size"), Some(&Value::Int(2)));
+    assert_eq!(rows[1].get("size"), Some(&Value::Int(4)));
+
+    // Reported in the derived fact set and persisted by `tx.apply`.
+    let result = session.locy(NEW_NODE_RULE).await?;
+    let derived = result
+        .derived_fact_set
+        .clone()
+        .expect("session DERIVE should produce DerivedFactSet");
+    let countries = derived
+        .vertices
+        .get("Country")
+        .expect("NEW Country vertices");
+    assert_eq!(countries.len(), 2);
+    assert!(
+        countries
+            .iter()
+            .all(|p| p.get("name") == Some(&Value::String("France".into()))),
+        "derived vertices carry their properties: {countries:?}"
+    );
+    let tx = session.tx().await?;
+    tx.apply(derived).await?;
+    tx.commit().await?;
+    let check = session
+        .query("MATCH (x:Country) RETURN x.name AS name, x.size AS size ORDER BY size")
+        .await?;
+    let rows = check.rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<String>("name")?, "France");
+    assert_eq!(rows[1].get::<i64>("size")?, 4);
+    Ok(())
+}
+
+/// The transaction path writes the properties directly.
+#[tokio::test]
+async fn test_tx_derive_new_node_stores_its_properties() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let session = db.session();
+    cities(&session).await?;
+
+    let tx = session.tx().await?;
+    tx.locy(NEW_NODE_RULE).await?;
+    // A temporal value keeps its type.
+    tx.execute("MATCH (c:City {name: 'Paris'}) SET c.founded = date('0300-01-01')")
+        .await?;
+    tx.locy(
+        "CREATE RULE founding AS MATCH (c:City) WHERE c.founded IS NOT NULL \
+           DERIVE (NEW f:Founding {on: c.founded})<-[:FOUNDED]-(c) \n\
+         DERIVE founding",
+    )
+    .await?;
+    tx.commit().await?;
+    let check = session
+        .query("MATCH (f:Founding) RETURN f.on = date('0300-01-01') AS same")
+        .await?;
+    assert!(check.rows()[0].get::<bool>("same")?);
+    let check = session
+        .query("MATCH (x:Country) RETURN x.name AS name, x.size AS size ORDER BY size")
+        .await?;
+    let rows = check.rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<String>("name")?, "France");
+    assert_eq!(rows[0].get::<i64>("size")?, 2);
+    Ok(())
+}

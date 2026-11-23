@@ -50,6 +50,7 @@ Defaults taken where the choice was minor:
 |---|---|
 | C2, C13, C14, C17, C18/C25, C19, C22, C27 | Fixed (temporal subtraction, BTIC range, pow and shifts, schemaless hop warning, windows in `WITH` and over groups, index and constraint listings, `similar_to` sparse and multi-vector, vector dimension required). C22's cause was the sparse parameter encoding in `value_to_scalar`. |
 | C3, C4, C15, C16 | Fixed (DDL `DEFAULT` for new writes, with an explicit `NULL` kept; sparse map literals canonicalized; timestamps ordered and present on schemaless labels and edges; DROP refused while data exists, counted by a query over the statement's own view) |
+| C5, C9, C10, C23/C33, C26, C31, C34 (rule removal) | Fixed (`USE` resolves registered modules; NEW node properties stored; REQUIRE direction from the registry; CALIBRATE features by position and node inputs as vids; session params in Locy; `MCOUNT(*)`; removal names dependents). Also fixed: C37, C38. |
 | C36 | Open: a `SET` on a flushed vertex resets its `created_at` |
 | C6, C7, C8, C30 | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
 | C21 | Not a defect: ids are intended; declared yield type corrected |
@@ -104,6 +105,8 @@ Found while fixing the docs (reported once, not reproduced a second time unless 
 | C33 | Because of C23, the CALIBRATE-fitted calibrators in the drug-drug-interaction and predictive-maintenance notebooks come out inverted, and calibrated Brier scores are worse than raw. Those notebooks now rank on the raw classifier score; restore the calibrated ranking once C23 is fixed. | notebook runs |
 | C34 | A WASM or Extism load with an empty grant list reports the missing `ScalarFn` as `UniInternalError`, not a typed capability error. `rules().remove(name)` while another rule depends on it fails with `undefined rule: name` without naming the dependent. | probe |
 | C36 | A `SET` on an already-flushed vertex resets its `created_at` to the time of the SET (declared and schemaless labels): the new L0 entry stamps `created_at` with `or_insert(now)` and flush and scan take the L0 value. Edges are unaffected (their read takes the earliest value across rows). | probe |
+| C37 | `EXPLAIN RULE` over a rule whose FOLD has a zero-argument row count beside another fold failed with "yield column missing from the fact batch". | `locy_fixpoint.rs` `yield_positions_in` |
+| C38 | CALIBRATE and VALIDATE read a `TARGET` string `'false'` as a positive label. | `locy_calibrate.rs` `target_to_label` |
 | C35 | Fork tags are named `fork_{tag}_{dataset}` with no fork id, but Lance tags are dataset-wide: two forks tagging `audit` collide, `list_fork_tags` lists another fork's tags, and `untag_fork` can delete them. | `crates/uni/src/api/fork_admin.rs:734,755,809,859-864` |
 
 Review findings the code showed to be wrong (the docs were left as they were):

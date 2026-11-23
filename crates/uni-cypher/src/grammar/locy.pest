@@ -358,7 +358,12 @@ fold_clause = { FOLD ~ fold_declaration ~ ("," ~ fold_declaration)* }
 
 fold_declaration = { locy_identifier ~ eq ~ fold_expression }
 
-fold_expression = { expression }
+// `MCOUNT(*)` counts rows, as `MCOUNT()` does.  Cypher's `count_args` accepts
+// `*` only after the COUNT keyword, so the Locy spelling of the monotone count
+// needs its own alternative.
+fold_expression = { fold_count_star | expression }
+
+fold_count_star = { ^"MCOUNT" ~ "(" ~ "*" ~ ")" }
 
 // Post-FOLD definitional threshold (issue #265).  Unlike fold_having_clause
 // below, REQUIRE is part of the rule's DEFINITION: it is applied to each

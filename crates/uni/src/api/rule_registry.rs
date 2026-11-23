@@ -125,7 +125,8 @@ impl<'a> RuleRegistry<'a> {
     /// # Errors
     ///
     /// Returns [`UniError::Query`] if `name` shares its source program with
-    /// other rules, or an I/O error if persistence fails.
+    /// other rules or another registered rule depends on it (the registry is
+    /// then left unchanged), or an I/O error if persistence fails.
     pub async fn remove(&self, name: &str) -> Result<bool> {
         // Hold the WRITE lock across snapshot → rebuild → assign so a concurrent
         // `register` cannot slip a rule in between the read and the write and be
@@ -164,7 +165,19 @@ impl<'a> RuleRegistry<'a> {
                 .cloned()
                 .collect::<Vec<_>>();
             let plugins = self.effective_plugin_registry();
-            let rebuilt = super::impl_locy::rebuild_registry_from_sources(&new_sources, &plugins)?;
+            // Every remaining source compiled before, so one that no longer
+            // does needed the removed rule. Refused, leaving the registry as
+            // it was.
+            let rebuilt =
+                super::impl_locy::rebuild_registry_reporting_source(&new_sources, &plugins)
+                    .map_err(|failed| UniError::Query {
+                        message: format!(
+                            "cannot remove rule '{name}': rule(s) {:?} depend on it. Remove \
+                             them first. ({})",
+                            failed.rule_names, failed.error
+                        ),
+                        query: None,
+                    })?;
             *registry = rebuilt;
         }
         if let Some(persister) = self.persister {

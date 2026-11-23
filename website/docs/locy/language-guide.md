@@ -245,8 +245,18 @@ CREATE RULE link AS MATCH (a:Host)-[:CONNECTS]->(b:Host) YIELD KEY a, KEY b
 QUERY acme.security.link RETURN b.name AS target
 ```
 
-`USE other.module` parses, but importing rules from another module is not wired
-yet: every `USE` currently fails with `ModuleNotFound`. Keep the rules a program
-uses in that program.
+`USE` imports the rules of a module registered with `rules().register`, so a
+program can name them by their short names. `USE acme.security` imports every
+rule of the module; `USE acme.security { link }` only the listed ones:
+
+```locy
+USE acme.security { link }
+CREATE RULE exposed AS MATCH (a:Host)-[:CONNECTS]->(b:Host) WHERE (a, b) IS link YIELD KEY b
+QUERY exposed RETURN b.name AS name
+```
+
+A module or rule that is not registered is a compile error (`ModuleNotFound`,
+`ImportNotFound`). A program sees the modules registered on the database, plus
+those registered on its session.
 
 For advanced semantics of `ALONG`, `FOLD`, `BEST BY`, and mutation reasoning, continue to the advanced pages.

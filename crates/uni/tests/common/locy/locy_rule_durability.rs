@@ -267,3 +267,33 @@ async fn non_compiling_persisted_rule_fails_or_skips() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn remove_refuses_a_rule_another_rule_depends_on() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    apply_schema(&db).await?;
+    db.rules()
+        .register("CREATE RULE named AS MATCH (a:Node) WHERE a.name = 'A' YIELD KEY a")
+        .await?;
+    db.rules()
+        .register("CREATE RULE dep AS MATCH (a:Node) WHERE a IS named YIELD KEY a")
+        .await?;
+
+    let err = db.rules().remove("named").await.unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("cannot remove rule 'named'") && message.contains("\"dep\""),
+        "the refusal must name the dependent rule, got: {message}"
+    );
+    // Refused, so the registry is unchanged.
+    assert_eq!(
+        db.rules().list(),
+        vec!["dep".to_string(), "named".to_string()]
+    );
+
+    // Removing the dependent first, then the rule it needed, works.
+    assert!(db.rules().remove("dep").await?);
+    assert!(db.rules().remove("named").await?);
+    assert_eq!(db.rules().count(), 0);
+    Ok(())
+}

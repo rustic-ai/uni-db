@@ -647,6 +647,70 @@ Feature: FOLD Execution Paths — All 6 FOLD Operators Across Execution Paths
     And the derived relation 'team_size' should have 1 facts
     And the derived relation 'team_size' should contain a fact where cnt = 3.0
 
+  Scenario: MCOUNT(*) counts rows as MCOUNT() does
+    Given having executed:
+      """
+      CREATE (:Team {name: 'Alpha'}), (:Member {name: 'Alice'}), (:Member {name: 'Bob'}), (:Member {name: 'Carol'})
+      """
+    And having executed:
+      """
+      MATCH (m:Member), (t:Team {name: 'Alpha'})
+      CREATE (m)-[:BELONGS_TO]->(t)
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE team_size AS
+        MATCH (m:Member)-[:BELONGS_TO]->(t:Team)
+        FOLD cnt = MCOUNT(*)
+        YIELD KEY t, cnt
+      """
+    Then evaluation should succeed
+    And the derived relation 'team_size' should have 1 facts
+    And the derived relation 'team_size' should contain a fact where cnt = 3.0
+
+  Scenario: COUNT(*) counts rows as MCOUNT() does
+    Given having executed:
+      """
+      CREATE (:Team {name: 'Alpha'}), (:Member {name: 'Alice'}), (:Member {name: 'Bob'}), (:Member {name: 'Carol'})
+      """
+    And having executed:
+      """
+      MATCH (m:Member), (t:Team {name: 'Alpha'})
+      CREATE (m)-[:BELONGS_TO]->(t)
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE team_size AS
+        MATCH (m:Member)-[:BELONGS_TO]->(t:Team)
+        FOLD cnt = COUNT(*)
+        YIELD KEY t, cnt
+      """
+    Then evaluation should succeed
+    And the derived relation 'team_size' should have 1 facts
+    And the derived relation 'team_size' should contain a fact where cnt = 3.0
+
+  Scenario: a row count beside another fold survives EXPLAIN
+    Given having executed:
+      """
+      CREATE (:Team {name: 'Alpha'}), (:Member {name: 'Alice'}), (:Member {name: 'Bob'}), (:Member {name: 'Carol'})
+      """
+    And having executed:
+      """
+      MATCH (m:Member), (t:Team {name: 'Alpha'})
+      CREATE (m)-[:BELONGS_TO]->(t)
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE team_size AS
+        MATCH (m:Member)-[:BELONGS_TO]->(t:Team)
+        FOLD cnt = COUNT(*), names = COLLECT(m.name)
+        YIELD KEY t, cnt, names
+      EXPLAIN RULE team_size WHERE t.name = 'Alpha'
+      QUERY team_size RETURN t.name AS team, cnt
+      """
+    Then evaluation should succeed
+    And the command result 1 should be a Query containing row where cnt = 3
+
   Scenario: MCOUNT via QUERY returns correct value
     Given having executed:
       """
