@@ -43,6 +43,11 @@ Add new changes here.
 - **Indexes:** dropping the last JSON full-text index on a column unregisters its hidden `__jfts_` text column.
 - **Forks:** promote upsert reads the `created_at` of the vertices it updates in one batch instead of once per vertex.
 - **Examples:** the WASM and Extism plugin examples use arrow 58.
+- **OGM:** a rollback after a successful `commit()` (an error raised later in the `with` block) no longer detaches the committed nodes or replaces the error with `UniTransactionAlreadyCompletedError`.
+- **Forks:** promote looks up the UIDs the UID index misses among primary's unflushed rows only, instead of scanning the whole label.
+- **Forks:** recovery finishes a tombstoned drop whose dataset no longer exists instead of keeping the fork Tombstoned.
+- **Schema:** a dropped label's or edge type's DDL `DEFAULT`s no longer apply to writes that reuse the name.
+- **Locy:** a vector or list-of-numbers feature reaches the classifier as a vector (at call sites, in CALIBRATE and in EXPLAIN), instead of as null.
 - **Search:** the planner serves `ANY(x IN n.p WHERE x IN <list|$param>)` from an Online inverted index as a candidate prefilter, unflushed rows included, with the predicate re-applied. New `CREATE INVERTED INDEX ... OPTIONS {normalize, max_terms_per_doc}` DDL.
 - **Search:** unknown OPTIONS keys on FULLTEXT, INVERTED and JSON FULLTEXT indexes are refused, and `IF NOT EXISTS` no longer replaces an inverted, JSON full-text or sparse index.
 - **Search:** `uni.fts.query` interprets `AND`, `OR`, `NOT`/`-term`, quoted phrases and parentheses, on flushed, unflushed and schemaless rows. A blank query matches nothing; an all-negated or malformed query is an error, as is a phrase on an index without positions. FULLTEXT accepts `with_positions`.

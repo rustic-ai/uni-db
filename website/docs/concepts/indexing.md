@@ -506,7 +506,7 @@ WHERE a.doc.title CONTAINS 'Graph' AND a.status = 'published'
 RETURN a.title
 ```
 
-`CONTAINS` on a JSON path is a case-sensitive substring match on the value at that path. With a JSON full-text index on the column, the scan first narrows to the rows whose indexed text contains the term (flushed rows from the index's text column, unflushed rows from their documents), and the predicate is then applied to those rows, so the answer is the same as without the index. `EXPLAIN` reports the index as `JSON_FTS`. A path outside the index's `paths` is evaluated without the prefilter.
+`CONTAINS` on a JSON path is a case-sensitive substring match on the value at that path. With a JSON full-text index on the column, the scan first narrows to the rows whose indexed text contains the term (flushed rows from the index's text column, unflushed rows from their documents), and the predicate is then applied to those rows, so the answer is the same as without the index. One difference: without the index, a path into a document that is not a map (`a.doc.title` where `doc` is a string) is a type error, while with the index such a row is not among the candidates, so it is skipped instead of raising the error. `EXPLAIN` reports the index as `JSON_FTS`. A path outside the index's `paths` is evaluated without the prefilter.
 
 `uni.fts.query` on a `JSON` column searches the index's text, with the full query syntax:
 
