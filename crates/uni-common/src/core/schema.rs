@@ -1213,6 +1213,9 @@ impl Schema {
     ) -> bool {
         let mut filled = false;
         for entity in entities {
+            if !self.declares_active(entity) {
+                continue;
+            }
             let Some(declared) = self.properties.get(entity) else {
                 continue;
             };
@@ -1232,10 +1235,24 @@ impl Schema {
     /// Whether any property of `entities` declares a DDL `DEFAULT`.
     pub fn has_property_defaults<'a>(&self, entities: impl IntoIterator<Item = &'a str>) -> bool {
         entities.into_iter().any(|entity| {
-            self.properties
-                .get(entity)
-                .is_some_and(|props| props.values().any(|m| m.default.is_some()))
+            self.declares_active(entity)
+                && self
+                    .properties
+                    .get(entity)
+                    .is_some_and(|props| props.values().any(|m| m.default.is_some()))
         })
+    }
+
+    /// Whether `entity` is a label or edge type whose declaration is live.
+    /// A dropped one keeps its properties in the catalog (they are tombstoned
+    /// with it), but its defaults no longer apply to writes under the name.
+    fn declares_active(&self, entity: &str) -> bool {
+        let live = |state: &SchemaElementState| matches!(state, SchemaElementState::Active);
+        match (self.labels.get(entity), self.edge_types.get(entity)) {
+            (Some(label), _) => live(&label.state),
+            (None, Some(edge_type)) => live(&edge_type.state),
+            (None, None) => true,
+        }
     }
 
     /// Bumps `schema_version` to invalidate cached query plans.
@@ -3159,6 +3176,33 @@ mod tests {
         let mut null = HashMap::from([("q".to_string(), Value::Null)]);
         assert!(!schema.apply_property_defaults(["L"], &mut null));
         assert_eq!(null.get("q"), Some(&Value::Null));
+    }
+
+    /// A dropped (tombstoned) label's defaults are not applied: the name may
+    /// be reused schemalessly, and the old declaration no longer speaks for it.
+    #[tokio::test]
+    async fn apply_property_defaults_skips_a_dropped_label() {
+        use crate::value::Value;
+        let dir = tempdir().unwrap();
+        let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let manager = SchemaManager::load_from_store(store, &ObjectStorePath::from("schema.json"))
+            .await
+            .unwrap();
+        manager.add_label("L").unwrap();
+        manager
+            .add_property("L", "q", DataType::Int64, true)
+            .unwrap();
+        manager
+            .set_property_default("L", "q", Some(Value::Int(1)))
+            .unwrap();
+        let mut props = HashMap::new();
+        assert!(manager.schema().apply_property_defaults(["L"], &mut props));
+        manager.drop_label("L", false).unwrap();
+        let mut props = HashMap::new();
+        let schema = manager.schema();
+        assert!(!schema.has_property_defaults(["L"]));
+        assert!(!schema.apply_property_defaults(["L"], &mut props));
+        assert!(props.is_empty(), "{props:?}");
     }
 
     /// A declaration types a property only on the labels in scope. `F` and
