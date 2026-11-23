@@ -38,6 +38,11 @@ Add new changes here.
 - **Python:** `PromoteReport.vertices_skipped_no_uid` is removed; it was always 0.
 - **Plugins:** a WASM or Extism load the registrar refuses raises `InvalidArgument` naming the capability, as other loaders do.
 - **Examples:** the PyO3 and Rhai plugin examples build against the current pyo3, arrow and datafusion.
+- **Full-text search:** before a label's first flush, unflushed rows are tokenized by the declared FULLTEXT or JSON full-text index's analyzer, so `quick` finds `Quick` as it will after the flush.
+- **Indexes:** a flush replaces an updated vertex's inverted-index postings, so a list changed, emptied or set to null no longer leaves the vertex under its old terms; a sparse vector set to null leaves no postings.
+- **Indexes:** dropping the last JSON full-text index on a column unregisters its hidden `__jfts_` text column.
+- **Forks:** promote upsert reads the `created_at` of the vertices it updates in one batch instead of once per vertex.
+- **Examples:** the WASM and Extism plugin examples use arrow 58.
 - **Search:** the planner serves `ANY(x IN n.p WHERE x IN <list|$param>)` from an Online inverted index as a candidate prefilter, unflushed rows included, with the predicate re-applied. New `CREATE INVERTED INDEX ... OPTIONS {normalize, max_terms_per_doc}` DDL.
 - **Search:** unknown OPTIONS keys on FULLTEXT, INVERTED and JSON FULLTEXT indexes are refused, and `IF NOT EXISTS` no longer replaces an inverted, JSON full-text or sparse index.
 - **Search:** `uni.fts.query` interprets `AND`, `OR`, `NOT`/`-term`, quoted phrases and parentheses, on flushed, unflushed and schemaless rows. A blank query matches nothing; an all-negated or malformed query is an error, as is a phrase on an index without positions. FULLTEXT accepts `with_positions`.

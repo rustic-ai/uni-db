@@ -80,22 +80,31 @@ Run on the final code:
   `ruff format --check` failed on `bindings/uni-db/tests/test_neural_classifier.py`, which is now
   reformatted.
 
-### Open follow-ups
+### Follow-ups
 
-Not defects from section 1; found while fixing them:
-- Before a label's table exists, unflushed rows are scored by Lance's bare tokenizer, which
-  does not fold case, even when a FULLTEXT or JSON full-text index is declared.
-- The inverted index keeps a vid under terms it no longer holds until the vid is deleted.
-  That is correct for a prefilter, but the postings grow on updates that change terms.
-- Dropping a JSON full-text index leaves its hidden `__jfts_` column registered, no longer
-  filled; re-creating the index backfills it.
-- `LogicalPlan::InvertedIndexLookup` is still never constructed (the prefilter uses the scan
-  path instead).
-- The WASM and Extism example crates still pin arrow 57.
-- An update to a flushed vertex through a path with no prefetch (promote upsert,
-  `insert_vertex_partial` callers) does one point lookup to carry `created_at`.
-- The PdM notebook's calibrated holdout Brier is 0.043 worse than raw, within the notebook's
-  tolerance.
+Not defects from section 1; found while fixing them. All are resolved:
+- **Unflushed full-text rows before a table exists** were scored by Lance's bare tokenizer,
+  which does not fold case, even with a FULLTEXT or JSON full-text index declared. Fixed: the
+  declared index's analyzer is passed to `full_text_search_with_unstored` and `score_documents`,
+  and used wherever no index segment exists yet.
+- **Inverted-index postings** kept a vid under terms it no longer held. Fixed: a flushed row that
+  carries the property replaces the vid's postings (remove, then add), so a list changed, emptied
+  or set to null leaves none behind. The sparse index had the same gap for a vector set to null,
+  also fixed.
+- **Dropping a JSON full-text index** left its `__jfts_` column registered and unfilled. Fixed:
+  the last index on a column unregisters the column. The Lance column stays, invisible to the
+  catalog; re-creating the index backfills it.
+- **`LogicalPlan::InvertedIndexLookup`** was never constructed, and the physical planner refused
+  it. Removed; the prefilter on the scan path is the design.
+- **The WASM and Extism examples** pinned arrow 57. Moved to 58.4.1; all six build, and the
+  loader tests pass against the rebuilt fixtures.
+- **`created_at` on promote upsert** was read once per updated vertex. Promote now reads the
+  stamps of every vertex a pattern may update in one batch (`ForkPromoteSink::prepare_vertex_updates`),
+  as Cypher's `SET` does. `insert_vertex_partial` has no production caller.
+- **The PdM notebook's calibrated holdout Brier** (0.212 vs 0.169 raw) is not a defect. On the
+  45 training rows the raw classifier scores 0.259, no better than a constant (0.25), so Platt
+  fits an almost flat curve. On the 15 holdout rows the same classifier happens to score well.
+  A reference Platt fit on the same split also gives about 0.22.
 
 ## 1. Code defects found (the docs describe the intended behaviour)
 
