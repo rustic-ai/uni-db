@@ -53,6 +53,15 @@ pub trait ForkPromoteSink: Send + Sync {
         props: Properties,
     ) -> Result<()>;
 
+    /// Called once before a batch of [`Self::update_vertex_properties`]
+    /// calls with every vid the batch may update, so the sink can read what
+    /// the updates need (each vertex's stored `created_at`) in one go
+    /// instead of once per update. The default does nothing.
+    async fn prepare_vertex_updates(&self, vids: &[Vid]) -> Result<()> {
+        let _ = vids;
+        Ok(())
+    }
+
     /// Soft-delete an existing primary vertex. Used by delete-promotion
     /// when a vertex present at the fork point was removed on the fork.
     async fn delete_vertex(&self, label: &str, vid: Vid) -> Result<()>;

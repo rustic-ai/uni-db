@@ -960,6 +960,10 @@ where
 
                 // Per-label fork-point baseline (merge mode only).
                 let label_baseline = baseline.and_then(|b| b.ext.get(label));
+                if !ext_resolved.is_empty() {
+                    let vids: Vec<Vid> = ext_resolved.values().map(|(vid, _)| *vid).collect();
+                    primary_tx.prepare_vertex_updates(&vids).await?;
+                }
 
                 // Partition: ext_id matches become in-place upserts; every
                 // other candidate flows through the content-UID

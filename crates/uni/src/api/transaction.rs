@@ -2403,6 +2403,18 @@ impl uni_fork::ForkPromoteSink for Transaction {
         Transaction::update_vertex_properties(self, label, vid, props).await
     }
 
+    async fn prepare_vertex_updates(&self, vids: &[uni_common::core::id::Vid]) -> Result<()> {
+        self.check_completed()?;
+        let writer_lock = self.db.writer.as_ref().ok_or_else(|| UniError::ReadOnly {
+            operation: "update_vertex_properties".to_string(),
+        })?;
+        let writer: &uni_store::Writer = writer_lock.as_ref();
+        writer
+            .carry_stored_created_at(vids, Some(&self.tx_l0))
+            .await
+            .map_err(writer_error)
+    }
+
     async fn delete_vertex(&self, label: &str, vid: uni_common::core::id::Vid) -> Result<()> {
         Transaction::delete_vertex_by_vid(self, label, vid).await
     }

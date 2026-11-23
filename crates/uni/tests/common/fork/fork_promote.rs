@@ -196,6 +196,17 @@ async fn promote_upsert_updates_existing_by_ext_id() -> Result<()> {
         .await?;
     tx.commit().await?;
     db.flush().await?;
+    let created = |db: &Uni| {
+        let session = db.session();
+        async move {
+            let rows = session
+                .query("MATCH (p:Person {name: 'Alice'}) RETURN created_at(p) AS c")
+                .await?;
+            anyhow::Ok(rows.rows()[0].value("c").cloned())
+        }
+    };
+    let created_before = created(&db).await?;
+    assert!(created_before.is_some(), "Alice has a created_at");
 
     let report = db
         .promote_from_fork_with_options(
@@ -204,6 +215,10 @@ async fn promote_upsert_updates_existing_by_ext_id() -> Result<()> {
             &PromoteOptions::with_upsert(),
         )
         .await?;
+    // The in-place update keeps the vertex's creation stamp.
+    assert_eq!(created(&db).await?, created_before, "unflushed");
+    db.flush().await?;
+    assert_eq!(created(&db).await?, created_before, "flushed");
     assert_eq!(
         report.vertices_updated, 1,
         "fork value should update the existing primary vertex: {report:?}"
