@@ -251,3 +251,24 @@ Feature: CALIBRATE statement (Phase C C2)
       """
     Then evaluation should fail
     And the evaluation error should mention "null on every row"
+
+  Scenario: CALIBRATE passes a list-of-numbers feature as a vector
+    Given having executed:
+      """
+      UNWIND range(0, 9) AS i CREATE (:Sample {idx: i, emb: [i * 1.0, 1.0], label: i % 2 = 0})
+      """
+    And a registered mock classifier "scorer" returning 0.5
+    When evaluating the following Locy program with neural_predicates_preview:
+      """
+      CREATE MODEL scorer AS
+        INPUT (s)
+        FEATURES s.emb
+        OUTPUT PROB risk
+        USING xervo('classify/scorer')
+
+      CALIBRATE scorer
+        ON MATCH (s:Sample)
+        TARGET s.label
+        METHOD platt_scaling
+      """
+    Then evaluation should succeed

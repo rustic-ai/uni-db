@@ -88,7 +88,8 @@ impl std::fmt::Display for CalibrateRuntimeError {
             ),
             Self::NullFeature { model_name, input } => write!(
                 f,
-                "CALIBRATE: model '{model_name}' INPUT '{input}' is null on every row; \
+                "CALIBRATE: model '{model_name}' INPUT '{input}' is null on every row, or of a \
+                 type a classifier cannot take (a map, an edge, a list of non-numbers); \
                  check the model's FEATURES expression for it against the MATCH pattern"
             ),
             Self::InsufficientData {
@@ -164,17 +165,33 @@ fn build_collection_query(
 
 /// Pull the FactRow value for column `name` and convert to FeatureValue.
 fn row_to_feature(row: &FactRow, name: &str) -> FeatureValue {
-    match row.get(name) {
-        Some(Value::Float(f)) => FeatureValue::Float(*f),
-        Some(Value::Int(i)) => FeatureValue::Int(*i),
-        Some(Value::String(s)) => FeatureValue::String(s.clone()),
-        Some(Value::Bool(b)) => FeatureValue::Bool(*b),
-        Some(Value::Null) | None => FeatureValue::Null,
-        // A node is passed as its vid, as it is at a rule's call site.
-        Some(Value::Node(node)) => FeatureValue::Int(node.vid.as_u64() as i64),
-        // Other Value variants (List, Map, Edge, …) fall back to
-        // Null in this slice — Slice 3+ may extend FeatureValue.
-        Some(_) => FeatureValue::Null,
+    row.get(name).map_or(FeatureValue::Null, value_to_feature)
+}
+
+/// A value as the feature a classifier receives, the same at a rule's call
+/// site, in CALIBRATE and in EXPLAIN's reconstruction.
+///
+/// Scalars map to their kind, a node to its vid, and a vector or a list of
+/// numbers to `FeatureValue::Vector`. Anything else (a map, an edge, a list
+/// holding a non-number) has no feature form and is `Null`.
+pub(crate) fn value_to_feature(v: &Value) -> FeatureValue {
+    match v {
+        Value::Float(f) => FeatureValue::Float(*f),
+        Value::Int(i) => FeatureValue::Int(*i),
+        Value::String(s) => FeatureValue::String(s.clone()),
+        Value::Bool(b) => FeatureValue::Bool(*b),
+        Value::Node(node) => FeatureValue::Int(node.vid.as_u64() as i64),
+        Value::Vector(values) => FeatureValue::Vector(values.clone()),
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Float(f) => Some(*f as f32),
+                Value::Int(i) => Some(*i as f32),
+                _ => None,
+            })
+            .collect::<Option<Vec<f32>>>()
+            .map_or(FeatureValue::Null, FeatureValue::Vector),
+        _ => FeatureValue::Null,
     }
 }
 
@@ -541,6 +558,23 @@ mod tests {
         };
         let row = fact_row(&[("s", Value::Node(node))]);
         assert!(matches!(row_to_feature(&row, "s"), FeatureValue::Int(42)));
+    }
+
+    #[test]
+    fn a_vector_feature_is_a_vector() {
+        let row = fact_row(&[("v", Value::Vector(vec![0.5, 1.5]))]);
+        assert_eq!(
+            row_to_feature(&row, "v"),
+            FeatureValue::Vector(vec![0.5, 1.5])
+        );
+        let row = fact_row(&[("v", Value::List(vec![Value::Int(1), Value::Float(2.5)]))]);
+        assert_eq!(
+            row_to_feature(&row, "v"),
+            FeatureValue::Vector(vec![1.0, 2.5])
+        );
+        // A list that is not all numbers has no feature form.
+        let row = fact_row(&[("v", Value::List(vec![Value::String("x".into())]))]);
+        assert_eq!(row_to_feature(&row, "v"), FeatureValue::Null);
     }
 
     #[test]

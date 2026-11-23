@@ -3189,18 +3189,9 @@ fn eval_feature_expr_against_fact_row(
 ) -> uni_locy::FeatureValue {
     use uni_cypher::ast::Expr;
     use uni_locy::FeatureValue;
+    // Encodes a node by its vid (`scorer(s)`), a vector as a vector.
     let value_to_feature = |v: Option<&uni_common::Value>| -> FeatureValue {
-        match v {
-            Some(uni_common::Value::Float(f)) => FeatureValue::Float(*f),
-            Some(uni_common::Value::Int(i)) => FeatureValue::Int(*i),
-            Some(uni_common::Value::Bool(b)) => FeatureValue::Bool(*b),
-            Some(uni_common::Value::String(s)) => FeatureValue::String(s.clone()),
-            Some(uni_common::Value::Node(n)) => {
-                // Encode node by vid for `scorer(s)` style.
-                FeatureValue::Int(n.vid.as_u64() as i64)
-            }
-            _ => FeatureValue::Null,
-        }
+        v.map_or(FeatureValue::Null, super::locy_calibrate::value_to_feature)
     };
     // Phase D D1: resolve a sub-expression to its raw `uni_common::Value`
     // for the `similar_to` UDF input. Falls back to the node's property
@@ -5238,7 +5229,9 @@ fn extract_common_value(col: &dyn arrow_array::Array, row_idx: usize) -> uni_com
 }
 
 fn extract_feature_value(col: &dyn arrow_array::Array, row_idx: usize) -> uni_locy::FeatureValue {
-    use arrow_array::{BooleanArray, Float64Array, Int64Array, LargeStringArray, StringArray};
+    use arrow_array::{
+        Array, BooleanArray, Float64Array, Int64Array, LargeStringArray, StringArray,
+    };
     if col.is_null(row_idx) {
         return uni_locy::FeatureValue::Null;
     }
@@ -5266,6 +5259,34 @@ fn extract_feature_value(col: &dyn arrow_array::Array, row_idx: usize) -> uni_lo
     if let Some(a) = col.as_any().downcast_ref::<arrow_array::StringViewArray>() {
         return uni_locy::FeatureValue::String(a.value(row_idx).to_string());
     }
+    // A declared `VECTOR(N)` column, or a list of numbers.
+    let float_values = |values: arrow_array::ArrayRef| -> Option<Vec<f32>> {
+        if let Some(f) = values.as_any().downcast_ref::<arrow_array::Float32Array>() {
+            return (f.null_count() == 0).then(|| f.values().to_vec());
+        }
+        if let Some(f) = values.as_any().downcast_ref::<Float64Array>() {
+            return (f.null_count() == 0).then(|| f.values().iter().map(|x| *x as f32).collect());
+        }
+        if let Some(i) = values.as_any().downcast_ref::<Int64Array>() {
+            return (i.null_count() == 0).then(|| i.values().iter().map(|x| *x as f32).collect());
+        }
+        None
+    };
+    if let Some(a) = col
+        .as_any()
+        .downcast_ref::<arrow_array::FixedSizeListArray>()
+    {
+        return float_values(a.value(row_idx))
+            .map_or(uni_locy::FeatureValue::Null, uni_locy::FeatureValue::Vector);
+    }
+    if let Some(a) = col.as_any().downcast_ref::<arrow_array::ListArray>() {
+        return float_values(a.value(row_idx))
+            .map_or(uni_locy::FeatureValue::Null, uni_locy::FeatureValue::Vector);
+    }
+    if let Some(a) = col.as_any().downcast_ref::<arrow_array::LargeListArray>() {
+        return float_values(a.value(row_idx))
+            .map_or(uni_locy::FeatureValue::Null, uni_locy::FeatureValue::Vector);
+    }
     // Schema-less property storage: values arrive as LargeBinary
     // MessagePack-encoded `CypherValue`. Decode via the standard codec
     // and project the result to the matching `FeatureValue` variant.
@@ -5283,14 +5304,7 @@ fn extract_feature_value(col: &dyn arrow_array::Array, row_idx: usize) -> uni_lo
                 uni_common::Value::Null
             }
         };
-        return match v {
-            uni_common::Value::Float(f) => uni_locy::FeatureValue::Float(f),
-            uni_common::Value::Int(i) => uni_locy::FeatureValue::Int(i),
-            uni_common::Value::Bool(b) => uni_locy::FeatureValue::Bool(b),
-            uni_common::Value::String(s) => uni_locy::FeatureValue::String(s),
-            uni_common::Value::Null => uni_locy::FeatureValue::Null,
-            _ => uni_locy::FeatureValue::Null,
-        };
+        return super::locy_calibrate::value_to_feature(&v);
     }
     uni_locy::FeatureValue::Null
 }
