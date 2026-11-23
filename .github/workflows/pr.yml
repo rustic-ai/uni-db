@@ -71,6 +71,19 @@ jobs:
             --exclude uni-python-onnx-metal \
             --all-targets -- -D warnings
 
+      # The PyO3 and Rhai plugin examples opt out of the workspace and keep
+      # their own lock files, so no workspace build compiles them, and a
+      # dependency bump elsewhere once left them pinned to versions that no
+      # longer resolved. Check them against the target directory the clippy
+      # step has just warmed; `--locked` also catches a stale lock file.
+      - name: Check standalone plugin examples
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          PYO3_PYTHON: python3
+        run: |
+          cargo check --locked --manifest-path examples/example-rhai-geo/Cargo.toml
+          cargo check --locked --manifest-path examples/example-pyo3-geo/Cargo.toml
+
   # Supply-chain policy. Until 2026-08-13 no such gate existed, and the first
   # run found 24 advisories — 10 of them vulnerabilities or unsoundness. Three
   # were fixed outright by an in-semver `cargo update`; the rest are pinned

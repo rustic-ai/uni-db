@@ -62,6 +62,17 @@ use super::types::{FilterExpr, TextSearch, VectorQueryOpts};
 ///   [`Self::current_version_on_branch`] back into a create call.
 ///
 /// [`StorageBackend::branching`]: super::traits::StorageBackend::branching
+/// One tag on a table, as [`ForkBranching::list_tags`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchTag {
+    /// The tag's name, unique across the whole table.
+    pub name: String,
+    /// The branch whose version the tag pins; `None` for the trunk.
+    pub branch: Option<String>,
+    /// The pinned version.
+    pub version: u64,
+}
+
 #[async_trait]
 pub trait ForkBranching: Send + Sync + 'static {
     // ========================
@@ -120,8 +131,11 @@ pub trait ForkBranching: Send + Sync + 'static {
     /// Delete `tag` from `table`.
     async fn delete_tag(&self, table: &str, tag: &str) -> Result<()>;
 
-    /// List `(tag, pinned_version)` for `table`.
-    async fn list_tags(&self, table: &str) -> Result<Vec<(String, u64)>>;
+    /// List every tag on `table`, with the branch and version it pins.
+    ///
+    /// Tags are table-wide, not per branch: callers that care about one
+    /// branch filter on [`BranchTag::branch`].
+    async fn list_tags(&self, table: &str) -> Result<Vec<BranchTag>>;
 
     // ========================
     // Writes against a branch

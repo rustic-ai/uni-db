@@ -4466,7 +4466,8 @@ impl PyDiffVertex {
     }
 }
 
-/// A vertex property change (paired across both sides by UID).
+/// A vertex property change: one vertex on both sides, paired by
+/// `(label, ext_id)` or, under shared lineage, by its inherited VID.
 #[pyclass(name = "VertexPropertyChange", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyVertexPropertyChange {
@@ -4480,9 +4481,28 @@ impl PyVertexPropertyChange {
         &self.inner.label
     }
 
+    /// Content UID on the *before* side.
     #[getter]
     fn uid(&self) -> String {
         self.inner.uid.to_string()
+    }
+
+    /// Content UID on the *after* side.
+    #[getter]
+    fn after_uid(&self) -> String {
+        self.inner.after_uid.to_string()
+    }
+
+    /// The vertex's `ext_id` when both sides carry the same one.
+    #[getter]
+    fn ext_id(&self) -> Option<String> {
+        self.inner.ext_id.clone()
+    }
+
+    /// The vertex's VID when it is the same on both sides.
+    #[getter]
+    fn vid(&self) -> Option<u64> {
+        self.inner.vid.map(|v| v.as_u64())
     }
 
     #[getter]
@@ -4555,8 +4575,8 @@ impl PyDiffEdge {
     }
 }
 
-/// An edge property change (paired across both sides by `(src_uid,
-/// dst_uid, edge_type)`).
+/// An edge property change: one edge on both sides, paired by its
+/// inherited EID under shared lineage.
 #[pyclass(name = "EdgePropertyChange", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyEdgePropertyChange {
@@ -4570,14 +4590,34 @@ impl PyEdgePropertyChange {
         &self.inner.edge_type
     }
 
+    /// The edge's EID, the same on both sides.
+    #[getter]
+    fn eid(&self) -> u64 {
+        self.inner.eid.as_u64()
+    }
+
+    /// Source vertex UID on the *before* side.
     #[getter]
     fn src_uid(&self) -> String {
         self.inner.src_uid.to_string()
     }
 
+    /// Destination vertex UID on the *before* side.
     #[getter]
     fn dst_uid(&self) -> String {
         self.inner.dst_uid.to_string()
+    }
+
+    /// Source vertex UID on the *after* side.
+    #[getter]
+    fn after_src_uid(&self) -> String {
+        self.inner.after_src_uid.to_string()
+    }
+
+    /// Destination vertex UID on the *after* side.
+    #[getter]
+    fn after_dst_uid(&self) -> String {
+        self.inner.after_dst_uid.to_string()
     }
 
     #[getter]
@@ -4685,7 +4725,7 @@ diff_pyclass! {
     element = PyDiffVertex, change = PyVertexPropertyChange,
     added = "Rows present in `b` but not `a`.",
     deleted = "Rows present in `a` but not `b`.",
-    changed = "Rows with matching UID and differing properties.",
+    changed = "Vertices on both sides with differing properties, paired by `(label, ext_id)` or, under shared lineage, by VID.",
 }
 
 diff_pyclass! {
@@ -4694,7 +4734,7 @@ diff_pyclass! {
     element = PyDiffEdge, change = PyEdgePropertyChange,
     added = "Edges present in `b` but not `a`.",
     deleted = "Edges present in `a` but not `b`.",
-    changed = "Edges with matching endpoints and differing properties.",
+    changed = "Edges on both sides with differing properties, paired by EID under shared lineage.",
 }
 
 /// Structural delta between two fork views (or a fork and primary).
@@ -4904,7 +4944,6 @@ pub struct PyPromoteReport {
     pub vertices_skipped_no_ext_id_for_delete: usize,
     pub vertices_conflicting: usize,
     pub vertices_skipped_uid_conflict: usize,
-    pub vertices_skipped_no_uid: usize,
     pub edges_inserted: usize,
     pub edges_skipped_duplicate: usize,
     pub edges_skipped_no_endpoint: usize,
@@ -4945,9 +4984,6 @@ impl PyPromoteReport {
             vertices_skipped_no_ext_id_for_delete: r.vertices_skipped_no_ext_id_for_delete,
             vertices_conflicting: r.vertices_conflicting,
             vertices_skipped_uid_conflict: r.vertices_skipped_uid_conflict,
-            // Reserved field on the Python side — the Rust `PromoteReport`
-            // no longer carries it; it was always 0.
-            vertices_skipped_no_uid: 0,
             edges_inserted: r.edges_inserted,
             edges_skipped_duplicate: r.edges_skipped_duplicate,
             edges_skipped_no_endpoint: r.edges_skipped_no_endpoint,

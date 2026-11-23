@@ -156,10 +156,29 @@ from each phase for deeper context.
 - **Diff identity is content UID, not VID.** Vertex pairing is by
   `compute_vertex_uid(label, ext_id, properties)`; edge pairing is
   by `compute_edge_uid(src_uid, dst_uid, type, properties)`. Both keys
-  hash every property, so an edited row diffs as one deleted plus one
-  added and `changed` stays empty. VIDs on `DiffVertex`
-  are informational. Two unrelated forks with overlapping VIDs
-  still pair correctly.
+  hash every property, so an edited row has a new UID on the side that
+  edited it. VIDs on `DiffVertex` are informational. Two unrelated
+  forks with overlapping VIDs still pair correctly.
+- **Edited rows pair into `changed` by `(label, ext_id)`, and by id
+  only under shared lineage.** `compute_diff_with_lineage` pairs an
+  added and a deleted row by VID / EID only when one side is the
+  other's ancestor, and only for ids below the fork-point marks
+  (`ForkInfo::fork_point_vid_hwm` / `_eid_hwm`) of the fork directly
+  below the ancestor: siblings, and primary's post-fork rows against a
+  fork's own, reuse ids from the same high-water mark.
+  `Uni::shared_lineage` derives the floors from the registry; never
+  pass a `SharedLineage` for views that do not descend from one another.
+  A fork created before the marks existed has zero floors (ext_id
+  pairing only).
+- **A tagged fork cannot be dropped.** Lance refuses to delete a branch
+  a tag references, even forced, so `drop_fork` / `drop_fork_cascade`
+  check for tags before `begin_drop` and return `ForkTagged`; nothing is
+  tombstoned. Recovery leaves a Tombstoned fork in place (no
+  `finish_drop`) when any branch delete fails, and logs the blocking
+  tags. Lance tags are dataset-wide: every fork tag operation filters on
+  the tag's branch (`BranchTag::branch`), and new tags are named
+  `fork_{fork_id}_{tag}_{dataset}` while the older `fork_{tag}_{dataset}`
+  is still read.
 - **Promote is atomic across patterns.** `Uni::promote_from_fork`
   opens one primary transaction, runs every pattern (vertex first,
   then edge — within-call vertex inserts feed the edge endpoint
@@ -261,8 +280,9 @@ from each phase for deeper context.
 - **`StorageManager::at_fork_with_schema` must receive the merged schema.** `at_fork` (no-schema variant) clones primary's `schema_manager` into the fork's storage, which means `uni-query`'s strict-schema check sees primary's view, not the fork's. Always use `at_fork_with_schema(scope, merged_schema)` from `UniInner::at_fork` so the fork's storage and its `UniInner` share the same `Arc<SchemaManager>` and a fork-local `add_label` is visible to subsequent writes.
 
 ## Fork invariants (Phase 6b — diff & promote)
-- **Diff identity is content-addressed UID, not VID.** `compute_diff` in `crates/uni-fork/src/diff.rs` (driven from `crates/uni/src/api/fork_admin.rs`) buckets vertex rows by `compute_vertex_uid(label, ext_id, properties)` and edge rows by `compute_edge_uid(src_uid, dst_uid, type, properties)` — siblings off the same parent and totally unrelated forks compare correctly even when VIDs collide. `DiffVertex.vid` survives as an informational `Option<Vid>`; never branch on it for pairing.
+- **Diff identity is content-addressed UID, not VID.** `compute_diff` in `crates/uni-fork/src/diff.rs` (driven from `crates/uni/src/api/fork_admin.rs`) buckets vertex rows by `compute_vertex_uid(label, ext_id, properties)` and edge rows by `compute_edge_uid(src_uid, dst_uid, type, properties)` — siblings off the same parent and totally unrelated forks compare correctly even when VIDs collide. `DiffVertex.vid` survives as an informational `Option<Vid>`; never pair on it outside a `SharedLineage` (ids pair only below the fork-point marks, and only when one side is the other's ancestor — see the current-invariants block).
 - **Promote runs inside one primary transaction.** `Uni::promote_from_fork` opens a single `Session::tx()` against primary, runs every pattern, and commits at the end. Partial-failure semantics inherit from the underlying tx — a failure on pattern N rolls back patterns 1..N-1. Don't refactor into per-pattern transactions without preserving that atomicity.
+- **Promote dedup covers unflushed primary rows.** `batch_resolve_primary_vids` resolves through the flushed UidIndex, then looks up the UIDs it missed by a content scan of the label on primary (`resolve_primary_vids_by_scan`), which reads L0. Without the scan, a vertex primary committed after the fork point but has not flushed is promoted again as a duplicate.
 - **Edge endpoints must exist on primary at edge-promote time.** `run_promote` checks the `just_inserted` cache (vertices added earlier in the same call) before falling back to `batch_resolve_primary_vids` (`crates/uni-fork/src/diff.rs`) (UidIndex + Cypher MATCH-by-VID verify on primary). Fork-only endpoints surface as `edges_skipped_no_endpoint`; mix `PromotePattern::label(...)` and `PromotePattern::edge_type(...)` in one call to promote endpoints together with their edges.
 - **The shared `UidIndex` is not branch-isolated.** Both primary and the fork write UID→VID entries into the same Lance dataset under `indexes/uni_id_to_vid/{label}/index.lance`. `get_vid` returns *any* registered VID (fork or primary), so always verify via `MATCH (n:Label) WHERE id(n) = $vid` on a primary session before treating the result as a primary endpoint. The helper `batch_resolve_primary_vids` (`crates/uni-fork/src/diff.rs`) does this round-trip; route every primary UID lookup through it.
 - **Promote flushes the fork before scanning.** `Uni::promote_from_fork` calls `fork.flush().await?` immediately after opening the fresh fork session. Without this, edges committed via a now-dropped earlier fork session aren't visible to the new session's read path. Vertices happen to be visible without flush in practice, but edges depend on it — relying on that asymmetry would silently miss edge promotion targets.
@@ -294,7 +314,7 @@ from each phase for deeper context.
 
 ## Fork invariants (Phase 4a — lifecycle & admin)
 - **`UniConfig::disable_fork_sweeper` must be `true` in tests that race against TTL.** The sweeper runs every `fork_sweeper_interval` (default 60s) and calls `drop_fork_cascade` on any fork whose `ttl_expires_at` is in the past. Tests that don't disable the sweeper *and* set short intervals will produce flakes when timing slips. The Phase 4a TTL tests (`fork_ttl.rs`) intentionally exercise the sweeper end-to-end and use the multi-threaded tokio flavor so the sweeper makes progress.
-- **`Uni::tag_fork` writes Lance tags namespaced `fork_{tag}_{dataset}`.** Each tag pins the fork branch's *current* version; subsequent fork writes do not move the tag. Tagged refs survive Lance compaction's GC sweep while the fork exists. A tagged branch cannot be deleted, so `drop_fork` on a tagged fork fails at `delete_branch` and leaves it Tombstoned: untag first. Tags are not listed once the fork is dropped. Never strip the namespace prefix when listing user-visible tags; `Uni::list_fork_tags` already does this.
+- **`Uni::tag_fork` writes Lance tags namespaced `fork_{fork_id}_{tag}_{dataset}`** (earlier releases wrote `fork_{tag}_{dataset}`, which is still read). It flushes the fork first and errors at stage `tag` when the fork has no branched datasets. Each tag pins the fork branch's version at that point; subsequent fork writes do not move the tag. Tagged refs survive Lance compaction's GC sweep. A tagged branch cannot be deleted, so `drop_fork` refuses a tagged fork with `ForkTagged` before tombstoning: untag first. Never strip the namespace prefix when listing user-visible tags; `Uni::list_fork_tags` already does this.
 - **`max_forks` budget counts Active + Pending + Tombstoned.** Tombstoned forks still hold branch state on disk until recovery completes, so counting them prevents create/drop churn from slipping past the cap.
 - **Cancellation: forked sessions hold `parent_token.child_token()` — never rebuild the token from scratch in a forked-session code path.** Cancelling the parent cascades to children; cancelling a child does not affect the parent. `Session::cancel()` cancels the currently-held token and replaces it with a fresh one — to observe propagation in tests, capture token clones BEFORE calling cancel.
 - **`StorageManager::pinned()` now preserves `fork_scope`.** Phase 4a lifted the Phase 1 debug_assert that forbade pin+fork. A pinned forked session reads through both the fork's branches (`fork_scope`) and at the pinned version (`pinned_snapshot`); writes are gated by `Session::is_pinned` at the API layer.

@@ -272,3 +272,49 @@ def test_promote_merge_delete_promotion(tmp_path):
         for r in primary.query("MATCH (p:Person) RETURN p.name AS name").rows
     )
     assert names == ["Bob", "Carol"], names  # Alice deleted; Carol survives
+
+
+def _seed_doc_with_ext_id(db):
+    db.schema().label("Doc").property("title", "string").apply()
+    s = db.session()
+    tx = s.tx()
+    tx.execute("CREATE (:Doc {ext_id: 'd1', title: 'Draft'})")
+    tx.commit()
+    db.flush()
+    return s
+
+
+def test_diff_pairs_edited_vertex_into_changed():
+    db = _make_db()
+    primary = _seed_doc_with_ext_id(db)
+    fork = primary.fork("edit").build()
+    tx = fork.tx()
+    tx.execute("MATCH (d:Doc {ext_id: 'd1'}) SET d.title = 'Final'")
+    tx.commit()
+    del fork
+
+    diff = db.diff_fork_primary("edit")
+    assert diff.vertices.added == []
+    assert diff.vertices.deleted == []
+    assert len(diff.vertices.changed) == 1
+    change = diff.vertices.changed[0]
+    assert change.label == "Doc"
+    assert change.ext_id == "d1"
+    assert change.vid is not None
+    assert change.uid != change.after_uid
+    title = next(c for c in change.changes if c.key == "title")
+    assert (title.before, title.after) == ("Draft", "Final")
+
+    inverse = diff.invert().vertices.changed[0]
+    title = next(c for c in inverse.changes if c.key == "title")
+    assert (title.before, title.after) == ("Final", "Draft")
+    assert inverse.uid == change.after_uid
+
+
+def test_promote_report_has_no_vertices_skipped_no_uid():
+    db = _make_db()
+    _seed_person_schema(db)
+    fork = db.session().fork("p").build()
+    del fork
+    report = db.promote_from_fork("p", [uni_db.PromotePattern.label("Person")])
+    assert not hasattr(report, "vertices_skipped_no_uid")

@@ -967,20 +967,23 @@ session.is_forked()      # False on the primary session
 |---|---|---|
 | `list_forks()` | `list[ForkInfo]` | Every known fork |
 | `fork_info(name)` | `ForkInfo \| None` | One fork's metadata |
-| `drop_fork(name)` | `None` | Drop a leaf fork. **Refuses a fork with children** |
-| `drop_fork_cascade(name)` | `None` | Drop a fork and its whole subtree |
+| `drop_fork(name)` | `None` | Drop a leaf fork. **Refuses a fork with children or tags** |
+| `drop_fork_cascade(name)` | `None` | Drop a fork and its whole subtree; refuses if any fork in it has tags |
 
 ### Tags
 
-Tags pin the fork branch's *current* version. Remove a fork's tags with
-`untag_fork` before dropping it; once the fork is dropped its tags are no longer
-listed.
+Tags pin the fork branch's version. `tag_fork` flushes the fork first, so its
+unflushed writes are in the tagged version, and raises `UniForkLifecycleError`
+(stage `tag`) for a fork that has branched nothing yet. A tagged fork cannot be
+dropped: `drop_fork` raises `UniForkTaggedError` (with `name` and `tags`) and
+leaves the fork as it was, so `untag_fork` each tag first. Tags belong to their
+fork: two forks can use the same tag name, and each lists and removes only its own.
 
 | Method | Returns | Description |
 |---|---|---|
-| `tag_fork(fork_name, tag)` | `None` | Pin the fork's current version |
-| `untag_fork(fork_name, tag)` | `None` | Remove a tag |
-| `list_fork_tags(fork_name)` | `list[str]` | Tags for a fork |
+| `tag_fork(fork_name, tag)` | `None` | Flush the fork and pin its current version |
+| `untag_fork(fork_name, tag)` | `None` | Remove this fork's tag |
+| `list_fork_tags(fork_name)` | `list[str]` | This fork's tags |
 
 ```python
 db.tag_fork("scenario_1", "audit-2026-q1")
@@ -1002,7 +1005,19 @@ db.drop_fork("scenario_1")
 | `promote_from_fork_with_options(fork_name, patterns, ...)` | `PromoteReport` | As above, with options |
 
 Diff identity is a **content-addressed UID**, not a VID, so sibling forks and
-entirely unrelated forks compare correctly even when their VIDs collide.
+entirely unrelated forks compare correctly even when their VIDs collide. An
+edited row pairs back into `changed` (a `VertexPropertyChange` /
+`EdgePropertyChange` with one `PropertyChange(key, before, after)` per
+property): vertices by `(label, ext_id)` always, and, when one side is the
+other's ancestor (primary against a fork, or a fork against its descendant),
+vertices by inherited `vid` and edges by inherited `eid` too. Ids never pair
+between unrelated forks.
+
+```python
+diff = db.diff_fork_primary("scenario_1")
+for c in diff.vertices.changed:
+    print(c.label, c.ext_id, c.vid, [(p.key, p.before, p.after) for p in c.changes])
+```
 
 Promote runs inside **one** primary transaction across every pattern, so a
 failure on pattern *N* rolls back patterns 1..*N*-1. Mix vertex and edge patterns
@@ -1942,6 +1957,7 @@ except uni_db.UniError as e:
 | `UniForkInflightTxError` | Drop refused while a transaction on the fork has uncommitted mutations; `name` |
 | `UniForkHasChildrenError` | `drop_fork` refused because the fork has nested children; `name`, `children` |
 | `UniForkSubtreeInUseError` | `drop_fork_cascade` refused because the subtree has live sessions or open transactions; `blockers` |
+| `UniForkTaggedError` | `drop_fork` / `drop_fork_cascade` refused because a fork has tags; nothing is dropped. `name`, `tags` |
 | `UniForkBudgetExceededError` | Fork creation refused at the `max_forks` cap; `current`, `max` |
 | `UniForkCorruptRegistryError` | The fork registry on disk is malformed |
 | `UniForkLifecycleError` | A step of a fork create, open or drop failed; `name`, `stage` |

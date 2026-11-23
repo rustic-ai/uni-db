@@ -142,3 +142,43 @@ async fn cross_abi_haversine_results_match() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// A load whose registrar grants do not cover a surface the plugin registers
+/// fails the same way on both ABIs, and as a native load does: the
+/// registrar's `CapabilityRequired` reaches the caller as a typed
+/// `InvalidArgument` naming the capability, not as an internal error.
+#[tokio::test]
+async fn missing_registration_capability_is_a_typed_error_on_both_abis() -> anyhow::Result<()> {
+    use uni_db::UniError;
+
+    let uni_extism = Uni::in_memory().build().await?;
+    let uni_component = Uni::in_memory().build().await?;
+    let no_caps = CapabilitySet::new();
+
+    let ext_err = uni_extism
+        .load_wasm_extism(
+            &ExtismLoader::new(),
+            &read_artifact(EXTISM_WASM),
+            &no_caps,
+            &no_caps,
+        )
+        .expect_err("extism load without ScalarFn must fail");
+    let comp_err = uni_component
+        .load_wasm_component(
+            &WasmLoader::new(),
+            &read_artifact(COMPONENT_WASM),
+            &no_caps,
+            &no_caps,
+        )
+        .expect_err("component load without ScalarFn must fail");
+    for err in [&ext_err, &comp_err] {
+        match err {
+            UniError::InvalidArgument { message, .. } => assert!(
+                message.contains("ScalarFn"),
+                "the error names the missing capability: {message}"
+            ),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+    Ok(())
+}

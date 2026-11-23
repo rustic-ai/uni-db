@@ -541,9 +541,7 @@ impl ExtismLoader {
                     ));
                     registrar
                         .scalar_fn(parsed_qname, sig, adapter)
-                        .map_err(|e| {
-                            ExtismError::Internal(format!("registrar.scalar_fn `{qname}`: {e}"))
-                        })?;
+                        .map_err(ExtismError::Registration)?;
                     scalars_registered.push(qname);
                 }
                 crate::exports::RegistrationEntry::Aggregate {
@@ -561,9 +559,7 @@ impl ExtismLoader {
                         ));
                     registrar
                         .aggregate_fn(parsed_qname, sig, adapter)
-                        .map_err(|e| {
-                            ExtismError::Internal(format!("registrar.aggregate_fn `{qname}`: {e}"))
-                        })?;
+                        .map_err(ExtismError::Registration)?;
                     aggregates_registered.push(qname);
                 }
                 crate::exports::RegistrationEntry::Procedure {
@@ -583,9 +579,7 @@ impl ExtismLoader {
                         ));
                     registrar
                         .procedure(parsed_qname, sig, adapter)
-                        .map_err(|e| {
-                            ExtismError::Internal(format!("registrar.procedure `{qname}`: {e}"))
-                        })?;
+                        .map_err(ExtismError::Registration)?;
                     procedures_registered.push(qname);
                 }
                 crate::exports::RegistrationEntry::Algorithm {
@@ -608,9 +602,9 @@ impl ExtismLoader {
                             parsed_qname.clone(),
                             sig,
                         ));
-                    registrar.algorithm(parsed_qname, adapter).map_err(|e| {
-                        ExtismError::Internal(format!("registrar.algorithm `{qname}`: {e}"))
-                    })?;
+                    registrar
+                        .algorithm(parsed_qname, adapter)
+                        .map_err(ExtismError::Registration)?;
                     algorithms_registered.push(qname);
                 }
             }

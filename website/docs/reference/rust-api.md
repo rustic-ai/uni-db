@@ -124,11 +124,11 @@ All `async`. Forks are created and opened through `Session::fork`.
 |--------|---------|-------------|
 | `list_forks()` | `Vec<ForkInfo>` | Every known fork. |
 | `fork_info(name)` | `Result<ForkInfo>` | One fork's metadata (`UniError::ForkNotFound` if absent). |
-| `drop_fork(name)` / `drop_fork_cascade(name)` | `Result<()>` | Drop a leaf fork / a fork and its subtree. |
-| `tag_fork(fork, tag)` / `untag_fork(fork, tag)` | `Result<()>` | Pin / unpin the fork's current version. Untag before dropping. |
-| `list_fork_tags(fork)` | `Result<Vec<String>>` | Tags of a live fork. |
-| `diff_fork_primary(fork)` / `diff_forks(a, b)` | `Result<ForkDiff>` | Content diff against primary or another fork. |
-| `promote_from_fork(fork, &patterns)` | `Result<PromoteReport>` | Apply fork changes to primary in one transaction. |
+| `drop_fork(name)` / `drop_fork_cascade(name)` | `Result<()>` | Drop a leaf fork / a fork and its subtree. A tagged fork (anywhere in the subtree) is refused with `UniError::ForkTagged { name, tags }`, and nothing is tombstoned. |
+| `tag_fork(fork, tag)` / `untag_fork(fork, tag)` | `Result<()>` | Flush the fork and pin its current version / remove the fork's own tag. A tagged fork cannot be dropped: untag first. `tag_fork` errors with `ForkLifecycle { stage: "tag" }` on a fork with no branched datasets. |
+| `list_fork_tags(fork)` | `Result<Vec<String>>` | This fork's tags; never another fork's tag of the same name. |
+| `diff_fork_primary(fork)` / `diff_forks(a, b)` | `Result<ForkDiff>` | Content diff against primary or another fork. Edited rows pair into `changed` by `(label, ext_id)`, and by inherited VID / EID when one side is the other's ancestor. |
+| `promote_from_fork(fork, &patterns)` | `Result<PromoteReport>` | Apply fork changes to primary in one transaction. `ReadOnly` on a read-only handle. |
 | `promote_from_fork_with_options(fork, &patterns, &options)` | `Result<PromoteReport>` | As above, with `PromoteOptions` (conflict policy). |
 
 ### Plugins

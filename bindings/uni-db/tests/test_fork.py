@@ -308,6 +308,45 @@ def test_fork_tag_roundtrip():
     db.drop_fork("audit")
 
 
+def test_drop_of_tagged_fork_raises_fork_tagged():
+    db = _make_db(disable_fork_sweeper=True)
+    primary = _seed_person_schema(db)
+    fork = primary.fork("held").build()
+    tx = fork.tx()
+    tx.execute("CREATE (:Person {name: 'in-fork'})")
+    tx.commit()
+    del fork  # unflushed: tag_fork flushes it
+
+    db.tag_fork("held", "keep")
+    with pytest.raises(uni_db.UniForkTaggedError) as excinfo:
+        db.drop_fork("held")
+    assert excinfo.value.name == "held"
+    assert excinfo.value.tags == ["keep"]
+    # Nothing was dropped.
+    assert db.list_fork_tags("held") == ["keep"]
+    with pytest.raises(uni_db.UniForkTaggedError):
+        db.drop_fork_cascade("held")
+
+    db.untag_fork("held", "keep")
+    db.drop_fork("held")
+
+
+def test_fork_tags_are_per_fork():
+    db = _make_db(disable_fork_sweeper=True)
+    primary = _seed_person_schema(db)
+    for name in ("a", "b"):
+        fork = primary.fork(name).build()
+        tx = fork.tx()
+        tx.execute(f"CREATE (:Person {{name: '{name}'}})")
+        tx.commit()
+        del fork
+        db.tag_fork(name, "audit")
+    db.untag_fork("a", "audit")
+    assert db.list_fork_tags("a") == []
+    assert db.list_fork_tags("b") == ["audit"]
+    db.untag_fork("b", "audit")
+
+
 def test_tag_unknown_fork_raises_not_found():
     db = _make_db(disable_fork_sweeper=True)
     with pytest.raises(uni_db.UniForkNotFoundError):

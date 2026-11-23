@@ -605,3 +605,47 @@ async fn lease_skew_does_not_refuse_a_local_store() -> Result<()> {
     db.shutdown().await?;
     Ok(())
 }
+
+/// Promote writes primary, so a read-only handle refuses it as `ReadOnly`, and
+/// a read-only fork's flush is refused with the same typed error rather than
+/// an internal one.
+#[tokio::test]
+async fn a_read_only_handle_refuses_promote_with_a_typed_error() -> Result<()> {
+    use uni_db::PromotePattern;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("db");
+    let path = path.to_str().unwrap();
+    let writer = seeded(path).await?;
+    {
+        let fork = writer.session().fork("kept").await?;
+        let tx = fork.tx().await?;
+        tx.execute("CREATE (:Person {name: 'Bob'})").await?;
+        tx.commit().await?;
+        fork.flush().await?;
+    }
+    let reader = Uni::open(path).read_only().build().await?;
+    let err = reader
+        .promote_from_fork("kept", &[PromotePattern::label("Person")])
+        .await
+        .expect_err("a read-only handle promoted");
+    assert!(matches!(err, UniError::ReadOnly { .. }), "{err:?}");
+
+    // A flush that fails says why in a typed error, never `Internal`.
+    let fork = reader.session().fork("kept").await?;
+    if let Err(err) = fork.flush().await {
+        assert!(
+            matches!(
+                err,
+                UniError::ReadOnly { .. } | UniError::WriterFenced { .. }
+            ),
+            "{err:?}"
+        );
+    }
+    drop(fork);
+    reader.shutdown().await?;
+
+    assert_eq!(count(&writer).await?, 1, "primary is unchanged");
+    writer.shutdown().await?;
+    Ok(())
+}

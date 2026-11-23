@@ -679,6 +679,7 @@ UniError (base)
   +-- UniBulkCommitOutcomeUnknownError    (reopen, then check bulk_load_applied(load_id))
   +-- UniForkNotFoundError / UniForkAlreadyExistsError / UniForkInUseError
   +-- UniForkInflightTxError / UniForkHasChildrenError / UniForkSubtreeInUseError
+  +-- UniForkTaggedError                  (drop refused while the fork has tags; .name, .tags)
   +-- UniForkBudgetExceededError / UniForkLifecycleError (.name, .stage) / UniForkCorruptRegistryError
 ```
 

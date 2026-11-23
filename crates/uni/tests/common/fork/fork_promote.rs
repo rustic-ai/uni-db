@@ -707,3 +707,50 @@ async fn names(s: &uni_db::Session, cypher: &str) -> Result<Vec<String>> {
     out.sort();
     Ok(out)
 }
+
+/// The dedup must see primary rows that are not flushed yet: the UidIndex
+/// covers flushed rows only, so a vertex primary committed after the fork point
+/// and still holds in L0 was not found, and promoting the same content from the
+/// fork inserted a duplicate.
+#[tokio::test]
+async fn promote_dedups_against_unflushed_primary_rows() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = Uni::open(dir.path().to_str().unwrap()).build().await?;
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .apply()
+        .await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Alice'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let fork = session.fork("same").await?;
+    // Primary writes Carol after the fork point and does not flush.
+    let tx = session.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Carol'})").await?;
+    tx.commit().await?;
+    // The fork writes the same content, after another row, so the fork's
+    // Carol does not happen to get the vid primary's Carol has.
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Dave'})").await?;
+    tx.execute("CREATE (:Person {name: 'Carol'})").await?;
+    tx.commit().await?;
+    drop(fork);
+
+    let report = db
+        .promote_from_fork("same", &[PromotePattern::label("Person")])
+        .await?;
+    assert_eq!(
+        report.vertices_inserted, 1,
+        "only Dave is new; Carol is already on primary (unflushed); got {report:?}"
+    );
+    let rows = session
+        .query("MATCH (p:Person {name: 'Carol'}) RETURN count(p) AS c")
+        .await?;
+    assert_eq!(rows.rows()[0].get::<i64>("c")?, 1);
+    db.shutdown().await?;
+    Ok(())
+}

@@ -420,6 +420,16 @@ pub enum UniError {
     )]
     ForkHasChildren { name: String, children: Vec<String> },
 
+    /// Drop refused because the fork has tags (applied with `tag_fork`).
+    ///
+    /// A tag pins a version of the fork's branch, and a tagged branch cannot
+    /// be deleted, so the drop is refused before anything is tombstoned.
+    /// `name` is the tagged fork (for `drop_fork_cascade`, the first tagged
+    /// node of the subtree) and `tags` its tag names. Untag the fork with
+    /// `untag_fork`, then retry.
+    #[error("Fork '{name}' has tags {tags:?}; untag it with untag_fork before dropping")]
+    ForkTagged { name: String, tags: Vec<String> },
+
     /// `drop_fork_cascade` refused because at least one fork in the
     /// subtree has live sessions or in-flight transactions. No branch
     /// has been deleted yet — the cascade is atomic at the validation

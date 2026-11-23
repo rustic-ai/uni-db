@@ -40,7 +40,7 @@ pub mod table_names;
 pub mod traits;
 pub mod types;
 
-pub use branching::ForkBranching;
+pub use branching::{BranchTag, ForkBranching};
 pub use capabilities::{FullTextSearchCapability, ScalarIndexCapability, VectorSearchCapability};
 pub use traits::StorageBackend;
 pub use types::*;

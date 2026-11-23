@@ -27,6 +27,17 @@ Add new changes here.
 - **Locy:** programs see session params as `$session.<key>`, as Cypher does.
 - **Locy:** `MCOUNT(*)` parses, and `COUNT(*)` in a FOLD is the zero-argument row count. `EXPLAIN RULE` over a rule with a row-count fold beside another fold no longer fails.
 - **Locy:** `rules().remove(name)` is refused while other rules depend on it, naming them.
+- **Forks:** dropping a tagged fork is refused with `ForkTagged` (Python `UniForkTaggedError`, with `name` and `tags`) instead of leaving it Tombstoned; untag first. `drop_fork_cascade` checks the whole subtree.
+- **Forks:** recovery no longer finishes a tombstoned drop whose branch could not be deleted; the fork stays Tombstoned and the log names the blocking tags.
+- **Forks:** tags are per fork, so two forks can use the same tag name, and `list_fork_tags` / `untag_fork` see only the fork's own. New tags are named `fork_{fork_id}_{tag}_{dataset}`; existing tags are still read.
+- **Forks:** `tag_fork` flushes the fork first, and errors (`ForkLifecycle`, stage `tag`) on a fork with nothing branched.
+- **Forks:** diff fills `changed`, pairing an edited row by `(label, ext_id)` always, and by inherited VID / EID when one side is the other's ancestor. `VertexPropertyChange` and `EdgePropertyChange` gain fields for the paired row.
+- **Forks:** promote no longer duplicates a vertex primary committed but has not flushed.
+- **Forks:** promote on a read-only handle raises `ReadOnly`, and `Session.flush` errors are typed.
+- **Forks:** `tag_fork`, `promote_from_fork` and the diff functions return `ForkNotFound` for an unknown name instead of creating the fork.
+- **Python:** `PromoteReport.vertices_skipped_no_uid` is removed; it was always 0.
+- **Plugins:** a WASM or Extism load the registrar refuses raises `InvalidArgument` naming the capability, as other loaders do.
+- **Examples:** the PyO3 and Rhai plugin examples build against the current pyo3, arrow and datafusion.
 - **OGM:** a `Vector[N] | None` field is a nullable vector column, so saving a node without a vector no longer fails with "cannot be null".
 - **OGM:** `SparseVector[N]` fields are saved as `uni_db.SparseVector`; a `TypeMappingError` is raised if the bindings lack that class.
 - **OGM:** `tx.create_edge` accepts nodes added to the same transaction (sync and async). A failed commit clears the vid, session and identity-map entry of the nodes it had created.

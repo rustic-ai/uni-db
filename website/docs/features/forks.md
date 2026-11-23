@@ -72,10 +72,10 @@ assert_eq!(
 |---|---|
 | `Uni::list_forks()` | All Active forks. |
 | `Uni::fork_info(name)` | Metadata for a single fork. |
-| `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkHasChildren` while nested children exist. Waits up to `UniConfig::drop_fork_drain_timeout` (default `10s`) for released sessions to drain before failing with `ForkInUse`. |
-| `Uni::drop_fork_cascade(name)` | Drop the fork and every descendant; pre-validates the subtree for live sessions / open transactions and surfaces `ForkSubtreeInUse` on any blocker before tombstoning anything. |
-| `Uni::diff_fork_primary(name)` | Structural diff `diff(primary, fork)` returning a `ForkDiff` of added and deleted vertices and edges, paired by content UID. An edited row appears as one deleted plus one added; `changed` is not populated. |
-| `Uni::diff_forks(a, b)` | Structural diff between two named forks. `diff(a, b).invert() == diff(b, a)`. |
+| `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkHasChildren` while nested children exist, and with `ForkTagged` while the fork has tags (nothing is tombstoned; untag first). Waits up to `UniConfig::drop_fork_drain_timeout` (default `10s`) for released sessions to drain before failing with `ForkInUse`. |
+| `Uni::drop_fork_cascade(name)` | Drop the fork and every descendant; pre-validates the subtree for live sessions / open transactions and tags, and surfaces `ForkSubtreeInUse` or `ForkTagged` on any blocker before tombstoning anything. |
+| `Uni::diff_fork_primary(name)` | Structural diff `diff(primary, fork)` returning a `ForkDiff` of added, deleted and changed vertices and edges. Rows pair by content UID; an edited row pairs into `changed` by `(label, ext_id)` or by the id the fork inherited. See [Diff](#diff). |
+| `Uni::diff_forks(a, b)` | Structural diff between two named forks. `diff(a, b).invert() == diff(b, a)`. Ids pair only when one fork is the other's ancestor. |
 | `Uni::promote_from_fork(name, &[PromotePattern])` | Scan the fork per pattern, dedup by content UID, insert matches on primary in one transaction. Mix vertex and edge patterns in one call. |
 | `Uni::promote_from_fork_with_options(name, &[PromotePattern], &PromoteOptions)` | Promote with explicit merge options: `ext_id`-keyed upsert, delete-promotion, and a `ConflictPolicy`. See [Promote options](#promote-options). |
 | `Session::flush()` | Flush the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches. Fork creation auto-flushes the parent (primary or a parent fork) first, so most users never call this directly. |
@@ -116,12 +116,13 @@ Fork-related errors are mostly `UniError::Fork*` variants. Most map to a dedicat
 | `ForkInflightTx` | `name` | `UniForkInflightTxError` | `drop_fork` while a `Transaction` is still open on the fork. |
 | `ForkHasChildren` | `name`, `children` | `UniForkHasChildrenError` | `drop_fork` while nested children exist — drop them first or use `drop_fork_cascade`. |
 | `ForkSubtreeInUse` | `blockers` | `UniForkSubtreeInUseError` | `drop_fork_cascade` blocked by live sessions / open transactions in the subtree. No branch is deleted. |
+| `ForkTagged` | `name`, `tags` | `UniForkTaggedError` | `drop_fork` (or `drop_fork_cascade`, naming the first tagged fork of the subtree) on a fork that has tags. Nothing is tombstoned; `untag_fork` each tag, then drop. |
 | `ForkBudgetExceeded` | `current`, `max` | `UniForkBudgetExceededError` | Fork creation would exceed `UniConfig::max_forks`. |
 | `PendingFlushTimeout` | `name` | (timeout `UniError`) | `drop_fork` could not drain pending async flushes within `UniConfig::drop_fork_drain_timeout` (default `10s`). |
 | `ForkCorruptRegistry` | `message` | `UniForkCorruptRegistryError` | The on-disk fork registry failed to parse or validate. |
-| `ForkLifecycle` | `name`, `stage`, `source` | `UniForkLifecycleError` | A create, open, drop, schema-overlay, tag, untag or list-tags step failed at the named `stage` (for example `create_branch`, `tombstoned_open`, `delete_branch`, `overlay_persist`, `tag`). |
+| `ForkLifecycle` | `name`, `stage`, `source` | `UniForkLifecycleError` | A create, open, drop, schema-overlay, tag, untag or list-tags step failed at the named `stage` (for example `create_branch`, `tombstoned_open`, `delete_branch`, `overlay_persist`, `tag`). `tag_fork` also raises it (stage `tag`) for a fork that has branched no datasets, which has nothing to tag. |
 | `RestoreBlockedByForks` | `forks` | `UniRestoreBlockedByForksError` | `restore_snapshot` while any fork exists; drop them first. |
-| `ReadOnly` | `operation` | `UniReadOnlyError` | Fork create, drop or tag on a read-only handle, or a write on a pinned forked session. |
+| `ReadOnly` | `operation` | `UniReadOnlyError` | Fork create, drop, tag or promote on a read-only handle, a flush of a read-only handle's fork, or a write on a pinned forked session. |
 
 `ForkInflightTx` fires when `drop_fork` is called while at least one `Transaction` is alive on the fork — commit or roll back first, then retry. `forked.tx()` is fully writable; there is no read-only-fork restriction.
 
@@ -159,6 +160,8 @@ tx.commit().await?;
 
 Promotion and diff close the write-audit-publish loop. Identity is **content-addressed UID** for vertices (`SHA3-256(label, ext_id, properties)`) and an edge UID over `(src_uid, dst_uid, edge_type, properties)` for edges — so siblings off a shared parent, or two unrelated forks that happened to roll the same VIDs, compare correctly.
 
+Promote's dedup finds primary rows whether or not primary has flushed them: UIDs the flushed UID index does not resolve are looked up again by a content scan of the label on primary.
+
 ### Diff
 
 ```rust
@@ -173,9 +176,16 @@ for v in &diff.vertices.added {
 }
 ```
 
-Because the UID folds in the properties, an edited vertex or edge has a different UID on each side: it appears once in `deleted` (the old row) and once in `added` (the new row). `changed` is not populated.
+Because the UID folds in the properties, an edited vertex or edge has a different UID on each side. The diff pairs the before and after rows back into one `changed` entry, with a `PropertyChange { key, before, after }` per differing property:
 
-`ForkDiff::invert()` swaps `added` ↔ `deleted` so `diff(a, b).invert() == diff(b, a)` by construction.
+- **By `(label, ext_id)`, always.** An added and a deleted vertex with the same label and `ext_id` are one vertex edited, whatever the two views are.
+- **By id, under shared lineage only.** When one side is the other's ancestor — primary against any fork (`diff_fork_primary`), or a fork against a descendant on its parent chain (`diff_forks`) — the descendant's rows with ids it inherited at its fork point are the ancestor's rows, so an added and a deleted vertex with the same inherited VID pair, and edges likewise by EID into `edges.changed`. An edge whose properties are unchanged but whose endpoint was edited is not reported: the endpoint's own entry in `vertices.changed` says it.
+
+Ids never pair between unrelated views (sibling forks, or forks of different parents): each side allocates ids on its own, so an equal id says nothing. There an edit to a vertex without an `ext_id`, and any edge edit, still appears as one `deleted` plus one `added` row. Forks created before this release recorded no fork-point id marks and pair by `(label, ext_id)` only.
+
+`VertexPropertyChange` carries `uid` (before) and `after_uid`, plus `ext_id` and `vid` when they are the same on both sides; `EdgePropertyChange` carries the `eid`, the before endpoint UIDs and the `after_*` ones.
+
+`ForkDiff::invert()` swaps `added` ↔ `deleted` and before ↔ after in every change, so `diff(a, b).invert() == diff(b, a)` by construction.
 
 ### Promote
 
@@ -287,6 +297,8 @@ The same surface is available via `uni_db` in Python, sync and async.
     print(diff)  # ForkDiff(vertices=added=2/deleted=1/changed=0, edges=...)
     for v in diff.vertices.added:
         print(v.label, v.uid, v.properties)
+    for c in diff.vertices.changed:  # edited rows, paired by ext_id or inherited vid
+        print(c.label, c.ext_id, [(p.key, p.before, p.after) for p in c.changes])
 
     report = db.promote_from_fork(
         "publish_q2",
@@ -437,7 +449,9 @@ let cfg = UniConfig { max_forks: Some(100), ..UniConfig::default() };
 
 Hitting the cap surfaces `ForkBudgetExceeded { current, max }`. Counts include `Active + Pending + Tombstoned` so create/drop churn cannot slip past while tombstones await recovery.
 
-**Tags.** Pin a Lance tag to the fork's current branch tip per dataset. While the fork exists, tagged versions are GC-exempt: they survive Lance compaction, and later fork writes do not move the tag. Remove a fork's tags before dropping it; `drop_fork` on a tagged fork fails with `ForkLifecycle { stage: "delete_branch" }` and leaves the fork Tombstoned. Tag operations look the fork up in the registry, so after a drop `list_fork_tags` and `untag_fork` return `ForkNotFound`.
+**Tags.** Pin a Lance tag to the fork's branch tip per dataset. `tag_fork` flushes the fork first, so rows still buffered in its L0 are in the tagged versions; a fork that has branched nothing yet (no writes, and no data on its parent) has nothing to tag and fails with `ForkLifecycle { stage: "tag" }`. Tagged versions are GC-exempt: they survive Lance compaction, and later fork writes do not move the tag.
+
+A tag pins its branch, and a tagged branch cannot be deleted, so **a tagged fork cannot be dropped**: `drop_fork` refuses it with `ForkTagged { name, tags }` before tombstoning anything, and `drop_fork_cascade` checks every fork in the subtree the same way. Untag the fork, then drop it.
 
 ```rust
 db.tag_fork("audit-fork", "2026-q1-close").await?;
@@ -446,7 +460,7 @@ db.untag_fork("audit-fork", "2026-q1-close").await?;  // idempotent
 db.drop_fork("audit-fork").await?;
 ```
 
-The on-disk tag is `fork_{tag}_{dataset}`. `list_fork_tags` returns the deduplicated user-visible tag names.
+Tags belong to their fork: two forks can each carry a tag of the same name, `list_fork_tags` lists only the fork's own (the tags on its branches), and `untag_fork` removes only the fork's own. The on-disk Lance tag is `fork_{fork_id}_{tag}_{dataset}`; tags written by earlier releases as `fork_{tag}_{dataset}` are still listed, block a drop and are removed by `untag_fork`. `list_fork_tags` returns the deduplicated user-visible tag names.
 
 **Cancellation.** Forked sessions inherit a child cancellation token from their parent. Cancelling a parent cascades to every descendant; cancelling a child does not affect the parent. Each level is independent of its siblings:
 
@@ -473,7 +487,7 @@ assert!(b_token.is_cancelled());        // cascade reached the grandchild
 Recovery runs in `Uni::open` before any session is exposed.
 
 - **Pending fork** (create crashed before completion) → rolled back. Branches force-deleted via the missing-branch-tolerant `lance_branch::delete_branch` wrapper.
-- **Tombstoned fork** (drop crashed mid-2PC) → completed. Branches deleted, registry entry removed, tombstone + overlay files cleaned.
+- **Tombstoned fork** (drop crashed mid-2PC) → completed. Branches deleted, registry entry removed, tombstone + overlay files cleaned. If a branch cannot be deleted — a tag added to it while the fork was Tombstoned blocks the delete — the fork stays Tombstoned, with a warning naming the blocking tags, and the next open retries once they are removed.
 
 Recovery is idempotent — running it twice is a no-op the second time.
 

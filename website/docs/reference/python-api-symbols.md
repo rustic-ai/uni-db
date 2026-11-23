@@ -8,7 +8,7 @@ Complete symbol surface of the `uni_db` Python bindings, **generated from `bindi
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**202 classes.**
+**203 classes.**
 
 ---
 
@@ -1079,15 +1079,18 @@ The edge side of a `ForkDiff`.
 
 ## `EdgePropertyChange`
 
-An edge's property changes (paired by src_uid, dst_uid, edge_type).
+An edge's property changes, paired by inherited EID under shared lineage.
 
 **Attributes**
 
 | Name | Type |
 |---|---|
 | `edge_type` | `str` |
+| `eid` | `int` |
 | `src_uid` | `str` |
 | `dst_uid` | `str` |
+| `after_src_uid` | `str` |
+| `after_dst_uid` | `str` |
 | `changes` | `list[PropertyChange]` |
 
 ---
@@ -1752,7 +1755,6 @@ Outcome counts from `Uni.promote_from_fork`.
 | `vertices_skipped_no_ext_id_for_delete` | `int` |
 | `vertices_conflicting` | `int` |
 | `vertices_skipped_uid_conflict` | `int` |
-| `vertices_skipped_no_uid` | `int` |
 | `edges_inserted` | `int` |
 | `edges_skipped` | `int` |
 | `edges_skipped_duplicate` | `int` |
@@ -2634,6 +2636,19 @@ Fork with the given name does not exist.
 
 ---
 
+## `UniForkTaggedError` — extends `UniError`
+
+`drop_fork` / `drop_fork_cascade` refused because a fork has tags.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `name` | `str` |
+| `tags` | `list[str]` |
+
+---
+
 ## `UniHookRejectedError` — extends `UniError`
 
 A session hook rejected the operation.
@@ -3000,7 +3015,7 @@ The vertex side of a `ForkDiff`.
 
 ## `VertexPropertyChange`
 
-A vertex's property changes (paired by UID).
+A vertex's property changes.
 
 **Attributes**
 
@@ -3008,6 +3023,9 @@ A vertex's property changes (paired by UID).
 |---|---|
 | `label` | `str` |
 | `uid` | `str` |
+| `after_uid` | `str` |
+| `ext_id` | `str | None` |
+| `vid` | `int | None` |
 | `changes` | `list[PropertyChange]` |
 
 ---

@@ -71,6 +71,14 @@ pub enum ExtismError {
     #[error("extism plugin exceeded resource limit: {0}")]
     ResourceLimit(String),
 
+    /// The host registrar refused one of the plugin's registrations: a
+    /// surface the registrar grants do not cover
+    /// (`PluginError::CapabilityRequired`), or a qname already taken.
+    /// Carried as the registrar's own error so the host reports it with
+    /// the same kind a native or Rhai load does.
+    #[error("plugin registration refused: {0}")]
+    Registration(#[from] uni_plugin::PluginError),
+
     /// Internal / unexpected error.
     #[error("uni-plugin-extism internal error: {0}")]
     Internal(String),

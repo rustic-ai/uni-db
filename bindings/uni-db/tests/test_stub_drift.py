@@ -71,6 +71,7 @@ _EXC_INSTANCE_ATTRS: dict[str, set[str]] = {
     "UniForkInUseError": {"name", "holder_count"},
     "UniForkInflightTxError": {"name"},
     "UniForkHasChildrenError": {"name", "children"},
+    "UniForkTaggedError": {"name", "tags"},
     "UniForkSubtreeInUseError": {"blockers"},
     "UniRestoreBlockedByForksError": {"forks"},
     "UniSnapshotNotFoundError": {"snapshot_id"},

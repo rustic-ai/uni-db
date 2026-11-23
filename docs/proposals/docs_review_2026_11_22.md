@@ -55,6 +55,7 @@ Defaults taken where the choice was minor:
 | C6, C7, C8, C30 | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
 | C21 | Not a defect: ids are intended; declared yield type corrected |
 | C20 `fork_info` | Kept as documented (Python returns `None`) |
+| C1, C20 (promote), C28, C29, C32, C34 (load error), C35; fork diff pairing | Fixed (tagged drop refused with `ForkTagged` and recovery keeps the tombstone; promote on a read-only handle raises `ReadOnly`; `tag_fork` flushes first; promote dedups unflushed primary rows; plugin examples build; WASM and Extism registrar refusals typed; tags scoped to their fork; diff pairs edits by `(label, ext_id)` and by id under lineage). C29's cause was not the one recorded below: the gap was a vertex primary committed after the fork point but had not flushed, with the same content written on the fork, whose flush registered its own vid for the UID. |
 | All others | Open |
 
 ## 1. Code defects found (the docs describe the intended behaviour)

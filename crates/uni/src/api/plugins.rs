@@ -612,8 +612,10 @@ impl Uni {
     /// # Errors
     ///
     /// Wraps [`uni_plugin_extism::ExtismError`] in
-    /// [`UniError::InvalidArgument`] for plugin-side faults and
-    /// [`UniError::Internal`] for host-side faults.
+    /// [`UniError::InvalidArgument`] for plugin-side faults and for a
+    /// registration the registrar refuses (a surface `registrar_caps` does
+    /// not grant, a taken qname), and [`UniError::Internal`] for host-side
+    /// faults.
     ///
     /// # Feature
     ///
@@ -655,6 +657,9 @@ impl Uni {
                             message: format!("extism plugin: {m}"),
                         }
                     }
+                    // The registrar's own refusal (a surface the grants do not
+                    // cover, a taken qname): reported as every loader does.
+                    uni_plugin_extism::ExtismError::Registration(e) => plugin_err_to_uni(e),
                     other => UniError::Internal(anyhow::anyhow!(other.to_string())),
                 })
             },
@@ -680,8 +685,10 @@ impl Uni {
     ///
     /// Wraps [`uni_plugin_wasm::WasmError`] in
     /// [`UniError::InvalidArgument`] for plugin-side faults
-    /// (invalid wasm, missing required exports, manifest parse) and
-    /// [`UniError::Internal`] for host-side faults.
+    /// (invalid wasm, missing required exports, manifest parse) and for a
+    /// registration the registrar refuses (a surface `registrar_caps` does
+    /// not grant, a taken qname), and [`UniError::Internal`] for host-side
+    /// faults.
     ///
     /// # Feature
     ///
@@ -713,6 +720,9 @@ impl Uni {
                         arg: "bytes".to_owned(),
                         message: format!("wasm component: {m}"),
                     },
+                    // The registrar's own refusal (a surface the grants do not
+                    // cover, a taken qname): reported as every loader does.
+                    uni_plugin_wasm::WasmError::Registration(e) => plugin_err_to_uni(e),
                     other => UniError::Internal(anyhow::anyhow!(other.to_string())),
                 })
             },

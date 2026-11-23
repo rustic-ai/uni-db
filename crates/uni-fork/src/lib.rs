@@ -23,7 +23,7 @@ pub mod host;
 pub mod maintenance;
 pub mod types;
 
-pub use diff::{compute_diff, run_promote};
+pub use diff::{SharedLineage, compute_diff, compute_diff_with_lineage, run_promote};
 pub use host::{ForkPromoteSink, ForkQueryHost};
 pub use maintenance::{ForkMaintenanceHost, spawn_index_builder, spawn_sweeper};
 pub use types::{

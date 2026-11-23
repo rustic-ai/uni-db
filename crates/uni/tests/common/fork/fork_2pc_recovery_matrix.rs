@@ -713,3 +713,93 @@ async fn fork_2pc_abort_between_finish_create_puts_is_usable() -> Result<()> {
     db.shutdown().await?;
     Ok(())
 }
+
+/// A tombstoned drop whose branch cannot be deleted stays Tombstoned.
+///
+/// A tag pins a branch, and Lance refuses to delete a tagged branch even
+/// forced. Recovery used to ignore that failure and `finish_drop` anyway,
+/// deleting the tombstone and orphaning the branch and its tag for good. Now
+/// the fork stays Tombstoned, and once the tag is gone the next open finishes
+/// the drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "failpoint crash injection; run with --features failpoints"]
+async fn fork_2pc_recovery_keeps_a_tombstone_whose_branch_is_tagged() -> Result<()> {
+    use uni_store::backend::lance_branch;
+
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().to_str().unwrap().to_string();
+    let (fork_id, datasets) = {
+        let db = seeded(&uri).await?;
+        let f = db.session().fork("pinned").await?;
+        let tx = f.tx().await?;
+        tx.execute("CREATE (:A {i: 10})").await?;
+        tx.commit().await?;
+        f.flush().await?;
+        drop(f);
+        let info = db.fork_info("pinned").await?;
+        db.shutdown().await?;
+        (info.id.to_string(), info.datasets)
+    };
+    assert!(!datasets.is_empty());
+
+    crash_at(&uri, "fork::drop-after-begin", "panic", |db| async move {
+        let _ = db.drop_fork("pinned").await;
+    })
+    .await?;
+
+    // Pin one branch with a tag while the fork is Tombstoned. Find the
+    // dataset's directory under the store rather than assume its layout.
+    let find_dir = |name: &str| -> Option<std::path::PathBuf> {
+        let mut stack = vec![dir.path().to_path_buf()];
+        while let Some(p) = stack.pop() {
+            if p.file_name().is_some_and(|n| n == name) && p.is_dir() {
+                return Some(p);
+            }
+            if let Ok(rd) = std::fs::read_dir(&p) {
+                stack.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+            }
+        }
+        None
+    };
+    let (dataset_uri, branch) = datasets
+        .iter()
+        .find_map(|(dataset, branch)| {
+            find_dir(&format!("{dataset}.lance"))
+                .map(|p| (p.to_string_lossy().into_owned(), branch.clone()))
+        })
+        .expect("a branched dataset directory");
+    let branch = &branch;
+    lance_branch::create_tag(&dataset_uri, "held", branch).await?;
+
+    {
+        let db = Uni::open(&uri).config(sync_flush_config()).build().await?;
+        let info = db.fork_info("pinned").await?;
+        assert_eq!(
+            format!("{:?}", info.status),
+            "Tombstoned",
+            "a drop whose branch delete failed must stay Tombstoned"
+        );
+        assert!(
+            lance_branch::list_branches(&dataset_uri)
+                .await?
+                .contains(branch),
+            "the tagged branch is still on disk"
+        );
+        db.shutdown().await?;
+    }
+
+    lance_branch::delete_tag(&dataset_uri, "held").await?;
+    let db = Uni::open(&uri).config(sync_flush_config()).build().await?;
+    assert_no_torn_state(&db).await?;
+    assert!(
+        db.fork_info("pinned").await.is_err(),
+        "with the tag gone, recovery completes the drop"
+    );
+    assert!(
+        fork_residue(dir.path(), &fork_id).is_empty(),
+        "recovery left residue: {:?}",
+        fork_residue(dir.path(), &fork_id)
+    );
+    db.shutdown().await?;
+    Ok(())
+}

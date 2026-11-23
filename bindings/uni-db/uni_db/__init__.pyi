@@ -3261,18 +3261,28 @@ class DiffEdge:
     properties: dict[str, Any]
 
 class VertexPropertyChange:
-    """A vertex's property changes (paired by UID)."""
+    """A vertex's property changes.
+
+    Paired by ``(label, ext_id)``, or, when one side is the other's
+    ancestor, by the VID the descendant inherited.
+    """
 
     label: str
     uid: str
+    after_uid: str
+    ext_id: str | None
+    vid: int | None
     changes: list[PropertyChange]
 
 class EdgePropertyChange:
-    """An edge's property changes (paired by src_uid, dst_uid, edge_type)."""
+    """An edge's property changes, paired by inherited EID under shared lineage."""
 
     edge_type: str
+    eid: int
     src_uid: str
     dst_uid: str
+    after_src_uid: str
+    after_dst_uid: str
     changes: list[PropertyChange]
 
 class VertexDiff:
@@ -3342,7 +3352,6 @@ class PromoteReport:
     vertices_skipped_no_ext_id_for_delete: int
     vertices_conflicting: int
     vertices_skipped_uid_conflict: int
-    vertices_skipped_no_uid: int
     edges_inserted: int
     edges_skipped: int
     edges_skipped_duplicate: int
@@ -3389,6 +3398,15 @@ class UniRestoreBlockedByForksError(UniError):
     """
 
     forks: list[str]
+
+class UniForkTaggedError(UniError):
+    """`drop_fork` / `drop_fork_cascade` refused because a fork has tags.
+
+    Nothing was dropped. Remove each tag with ``untag_fork``, then retry.
+    """
+
+    name: str
+    tags: list[str]
 
 class UniForkSubtreeInUseError(UniError):
     """`drop_fork_cascade` refused because the subtree has live sessions / open tx."""

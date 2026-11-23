@@ -185,7 +185,11 @@ mechanism that keeps this surface from drifting.
 
 - **Registration surfaces** — a registrar method (e.g. `scalar_fn`) is rejected
   with `PluginError::CapabilityRequired` when the corresponding capability is not
-  in the effective set. This applies to every loader.
+  in the effective set. This applies to every loader, and every loader reports it
+  the same way: the load fails with `UniError::InvalidArgument` (Python
+  `UniInvalidArgumentError`) naming the missing capability, for a WASM component
+  or Extism plugin as for a native or Rhai one. (The WASM and Extism loaders
+  used to flatten it into `UniInternalError`.)
 - **Extism** — the host-function set is filtered at load: only the host functions
   for granted capabilities are linked into the plugin.
 - **WASM Component Model** — the loader computes the effective set and reports it

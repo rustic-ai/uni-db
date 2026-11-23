@@ -24,19 +24,19 @@ tx.commit().await?;
 | `Session::fork_schema()` | Fork-local schema mutation builder. Mirrors `db.schema()`. Adds labels and edge types to the fork's overlay only — primary is unaffected. Required under `strict_schema: true` to introduce fork-only labels. Errors with `InvalidArgument` on a non-forked session. |
 | `Uni::list_forks()` | All Active forks. |
 | `Uni::fork_info(name)` | Metadata for a single fork. |
-| `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkInUse` while sessions are alive, `ForkInflightTx` while a transaction is open on the fork, `ForkHasChildren` while nested children exist. |
-| `Uni::drop_fork_cascade(name)` | Drop the fork and every descendant. Pre-validates the whole subtree (every node must satisfy the `ForkInUse`/`ForkInflightTx` checks); errors with `ForkSubtreeInUse` before tombstoning anything. Drops deepest-first; crash mid-cascade resumes via tombstone recovery. |
+| `Uni::drop_fork(name)` | Full 2PC drop. Errors with `ForkInUse` while sessions are alive, `ForkInflightTx` while a transaction is open on the fork, `ForkHasChildren` while nested children exist, `ForkTagged { name, tags }` while the fork has tags (nothing is tombstoned). |
+| `Uni::drop_fork_cascade(name)` | Drop the fork and every descendant. Pre-validates the whole subtree (every node must satisfy the `ForkInUse`/`ForkInflightTx` checks and have no tags); errors with `ForkSubtreeInUse` or `ForkTagged` before tombstoning anything. Drops deepest-first; crash mid-cascade resumes via tombstone recovery. |
 | `Session::flush()` | Flush the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches. Fork creation auto-flushes the parent session's L0 (primary or fork), but `Session::flush()` is the explicit knob when you need it. |
 | `Session::fork(name).ttl(Duration)` | Phase 4a. Set a wall-clock TTL on the fork; the background sweeper drops it via cascade once expired. Has no effect when the fork already exists. |
-| `Uni::tag_fork(name, tag)` | Phase 4a. Tag a fork's branches with a Lance tag pinned to the current version. Tagged refs are GC-exempt while the fork exists. Untag a fork before dropping it: `drop_fork` on a tagged fork fails at stage `delete_branch` and leaves it Tombstoned, and tags are not readable after a drop. |
-| `Uni::untag_fork(name, tag)` | Phase 4a. Idempotent — missing tags are no-ops. |
-| `Uni::list_fork_tags(name)` | Phase 4a. Returns the unique tag names applied to this fork. |
+| `Uni::tag_fork(name, tag)` | Phase 4a. Flush the fork, then tag its branches with a Lance tag pinned to the current version. Tagged refs are GC-exempt. A fork with no branched datasets errors with `ForkLifecycle { stage: "tag" }`. A tagged fork cannot be dropped (`ForkTagged`): untag it first. |
+| `Uni::untag_fork(name, tag)` | Phase 4a. Removes this fork's tag only. Idempotent — missing tags are no-ops. |
+| `Uni::list_fork_tags(name)` | Phase 4a. Returns the unique tag names on this fork's branches; another fork's tag of the same name is not listed. |
 | `Session::pin_to_version(snapshot_id)` / `pin_to_timestamp(ts)` / `refresh()` | Phase 4a now works on forked sessions. Pinned forked sessions read through the fork's branches at the pinned version; writes return `ReadOnly`. Also the cheap **read-only** rollout primitive — see "Cheaper alternatives" below. |
 | `Session::scratch()` | Open an ephemeral, write-isolated transaction — the cheap **write** rollout primitive. Behaves like `tx()` (`execute`, `query` with read-your-writes incl. edge traversal, `rollback`, drop) but `commit()` is refused, so writes are always discarded. See "Cheaper alternatives" below. |
 
 ## Errors
 
-`UniError::Fork*`: `ForkNotFound`, `ForkAlreadyExists`, `ForkInUse { name, holder_count }`, `ForkInflightTx { name }`, `ForkHasChildren { name, children }`, `ForkSubtreeInUse { blockers }`, `ForkBudgetExceeded { current, max }`, `ForkCorruptRegistry`, `ForkLifecycle { name, stage, source }`.
+`UniError::Fork*`: `ForkNotFound`, `ForkAlreadyExists`, `ForkInUse { name, holder_count }`, `ForkInflightTx { name }`, `ForkHasChildren { name, children }`, `ForkTagged { name, tags }`, `ForkSubtreeInUse { blockers }`, `ForkBudgetExceeded { current, max }`, `ForkCorruptRegistry`, `ForkLifecycle { name, stage, source }`.
 
 ## Cheaper alternatives: pinned reads and scratch writes
 
@@ -136,7 +136,7 @@ Drop semantics:
 
 **Budget.** `UniConfig::max_forks: Option<usize>` caps total fork count (Active + Pending + Tombstoned). Hitting the cap surfaces `ForkBudgetExceeded { current, max }`. Tombstoned forks count because they still hold branch state on disk until recovery completes.
 
-**Tags.** `db.tag_fork(name, "audit-2026-q1").await?` creates one Lance tag per dataset, namespaced `fork_{tag}_{dataset}`, pinned to the branch's current version. Tags are GC-exempt while the fork exists. Untag before `drop_fork` (a tagged fork's drop fails at stage `delete_branch`); after a drop, `list_fork_tags` / `untag_fork` raise `ForkNotFound`. `db.list_fork_tags(name)` returns the deduplicated user-visible tag names; `db.untag_fork(name, tag)` is idempotent.
+**Tags.** `db.tag_fork(name, "audit-2026-q1").await?` flushes the fork, then creates one Lance tag per branched dataset, named `fork_{fork_id}_{tag}_{dataset}`, pinned to the branch's current version. Tags are GC-exempt. Tags belong to their fork: two forks can use the same tag name, and `list_fork_tags` / `untag_fork` see only the fork's own (tags written by earlier releases as `fork_{tag}_{dataset}` are still read). A tagged branch cannot be deleted, so `drop_fork` / `drop_fork_cascade` refuse a tagged fork with `ForkTagged { name, tags }` before tombstoning anything: untag first. `db.untag_fork(name, tag)` is idempotent.
 
 **Cancellation.** Forked sessions hold `parent_token.child_token()`. Cancelling a parent session cascades to every descendant; cancelling a child does not affect the parent. `Session::cancel()` cancels the currently-held token and replaces it with a fresh one — tests asserting propagation must capture token clones BEFORE calling cancel.
 
@@ -161,11 +161,9 @@ fork = primary.fork("scenario").ttl(timedelta(hours=1)).build()
 tx = fork.tx()
 tx.execute("CREATE (:Person {name: 'fork-only'})")
 tx.commit()
-fork.flush()                                # tags pin flushed branch versions
-
-db.tag_fork("scenario", "audit-2026-q1")    # GC-exempt while the fork exists
+db.tag_fork("scenario", "audit-2026-q1")    # flushes the fork, then pins it
 print(db.list_fork_tags("scenario"))       # ['audit-2026-q1']
-db.untag_fork("scenario", "audit-2026-q1")  # untag before dropping
+db.untag_fork("scenario", "audit-2026-q1")  # a tagged fork cannot be dropped
 del fork
 db.drop_fork("scenario")
 
@@ -180,6 +178,8 @@ try:
     db.drop_fork("a")
 except uni_db.UniForkHasChildrenError as e:
     print(e.children)             # ['b', 'c']
+except uni_db.UniForkTaggedError as e:
+    print(e.name, e.tags)         # 'a' ['audit-2026-q1']
 except uni_db.UniForkInUseError as e:
     print(e.holder_count)         # 1
 except uni_db.UniForkBudgetExceededError as e:
@@ -221,8 +221,13 @@ across primary-inherited and fork-local rows via Lance's
 between two views. Identity is **content UID**, not VID — two
 unrelated forks that happened to roll the same VIDs still pair
 correctly. The vertex UID hashes label, `ext_id` and properties;
-the edge key includes properties. `changed` is not populated: a
-property edit appears as one delete plus one add. `diff(a, b).invert() == diff(b, a)` by construction.
+the edge key includes properties, so an edited row has a new UID;
+the diff pairs it back into `changed` (per-property `before`/`after`)
+by `(label, ext_id)` always, and — when one side is the other's
+ancestor (primary vs a fork, or a fork vs its descendant) — by the
+VID / EID the descendant inherited. Ids never pair across unrelated
+forks; there an edit without `ext_id` is one delete plus one add.
+`diff(a, b).invert() == diff(b, a)` by construction.
 
 `db.promote_from_fork(name, &[PromotePattern])` scans the fork per
 pattern, dedups by `(label, uid)` for vertices and

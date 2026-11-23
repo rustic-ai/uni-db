@@ -170,3 +170,27 @@ async def test_async_promote_with_options_reports_new_fields():
     assert report.vertices_updated == 0
     assert report.vertices_conflicting == 0
     assert report.vertices_deleted == 0
+
+
+async def test_async_diff_pairs_edited_vertex_into_changed():
+    db = await _make_db(disable_fork_sweeper=True)
+    await db.schema().label("Doc").property("title", "string").apply()
+    s = db.session()
+    tx = await s.tx()
+    await tx.execute("CREATE (:Doc {ext_id: 'd1', title: 'Draft'})")
+    await tx.commit()
+    await db.flush()
+    fork = await s.fork("edit").build()
+    tx = await fork.tx()
+    await tx.execute("MATCH (d:Doc {ext_id: 'd1'}) SET d.title = 'Final'")
+    await tx.commit()
+    del fork
+
+    diff = await db.diff_fork_primary("edit")
+    assert diff.vertices.added == []
+    assert diff.vertices.deleted == []
+    assert len(diff.vertices.changed) == 1
+    change = diff.vertices.changed[0]
+    assert change.ext_id == "d1"
+    title = next(c for c in change.changes if c.key == "title")
+    assert (title.before, title.after) == ("Draft", "Final")

@@ -126,6 +126,19 @@ pub struct ForkInfo {
     #[serde(default)]
     pub fork_point_version_hwm: u64,
 
+    /// Parent's next vertex id at the fork point: the fork's own vertices
+    /// get ids at or above it, so a vid below it on the fork was inherited
+    /// from the parent. The diff pairs such vids with the parent's (and its
+    /// ancestors') rows. `0` for forks created before this field existed,
+    /// which turns that pairing off.
+    #[serde(default)]
+    pub fork_point_vid_hwm: u64,
+
+    /// Parent's next edge id at the fork point; the edge counterpart of
+    /// [`Self::fork_point_vid_hwm`].
+    #[serde(default)]
+    pub fork_point_eid_hwm: u64,
+
     /// Lifecycle state. See [`ForkStatus`].
     pub status: ForkStatus,
 }
@@ -149,6 +162,8 @@ impl ForkInfo {
             schema_version_at_creation: schema_version,
             datasets: BTreeMap::new(),
             fork_point_version_hwm: 0,
+            fork_point_vid_hwm: 0,
+            fork_point_eid_hwm: 0,
             status: ForkStatus::Pending,
         }
     }

@@ -1057,7 +1057,8 @@ impl Session {
     /// # Errors
     ///
     /// Returns [`UniError::ReadOnly`] when the session has no writer
-    /// (e.g. snapshot-pinned sessions).
+    /// (e.g. snapshot-pinned sessions) or belongs to a read-only handle,
+    /// and the storage layer's typed error when the flush itself fails.
     pub async fn flush(&self) -> Result<()> {
         if let Some(writer_lock) = &self.db.writer {
             let writer: &uni_store::Writer = writer_lock.as_ref();
@@ -1065,7 +1066,7 @@ impl Session {
                 .flush_to_l1(None)
                 .await
                 .map(|_| ())
-                .map_err(UniError::Internal)
+                .map_err(crate::api::storage_error)
         } else {
             Err(UniError::ReadOnly {
                 operation: "flush".to_string(),

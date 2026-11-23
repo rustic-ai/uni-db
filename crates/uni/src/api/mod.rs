@@ -35,7 +35,7 @@ pub mod fork;
 /// fork-engine extraction. `compute_diff`/`run_promote` are generic over the
 /// `uni_fork` host traits, which uni-db implements for `Session`/`Transaction`.
 pub mod fork_diff {
-    pub use uni_fork::diff::{compute_diff, run_promote};
+    pub use uni_fork::diff::{SharedLineage, compute_diff, compute_diff_with_lineage, run_promote};
     pub use uni_fork::types::*;
 }
 pub(crate) mod fork_admin;

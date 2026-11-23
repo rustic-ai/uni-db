@@ -26,7 +26,7 @@ path = "src/main.rs"
 uni-db = { path = "../../crates/uni" }
 uni-plugin = { path = "../../crates/uni-plugin" }
 uni-plugin-rhai = { path = "../../crates/uni-plugin-rhai" }
-arrow-array = "57"
-datafusion = "52"
+arrow-array = "58.4.1"
+datafusion = "54.1.0"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"

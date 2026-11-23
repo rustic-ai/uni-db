@@ -9602,9 +9602,9 @@ through it fail. A simulation fork comes from a writable handle.
 
 **Drop (5 steps).**
 
-1. Refuse if `holder_count > 0` (live forked sessions), `inflight_tx_count > 0` (open transactions), or `list_children(id)` is non-empty (Phase 3 nested-fork guard; surfaces `ForkHasChildren`).
+1. Refuse if `holder_count > 0` (live forked sessions), `inflight_tx_count > 0` (open transactions), `list_children(id)` is non-empty (Phase 3 nested-fork guard; surfaces `ForkHasChildren`), or any tag is pinned on one of the fork's branches (surfaces `ForkTagged { name, tags }`: Lance refuses to delete a tagged branch even forced, so a drop that went ahead would tombstone the fork and then fail at step 3).
 2. `ForkRegistryHandle::begin_drop(name)` writes `catalog/fork_tombstones/{id}.json` and flips the registry entry to `Tombstoned`.
-3. Walk the dataset→branch map and call `lance_branch::delete_branch(uri, branch)` for each. If any delete fails, the drop returns `UniError::ForkLifecycle { stage: "delete_branch" }` and leaves the fork Tombstoned; recovery (`delete_all_branches` + `finish_drop` on the next open) completes it.
+3. Walk the dataset→branch map and call `lance_branch::delete_branch(uri, branch)` for each. If any delete fails, the drop returns `UniError::ForkLifecycle { stage: "delete_branch" }` and leaves the fork Tombstoned; recovery (`delete_all_branches` + `finish_drop` on the next open) completes it. Recovery calls `finish_drop` only when every branch delete succeeded: otherwise it leaves the fork Tombstoned (tombstone included, the only record of the branches), logs the tags pinning the branch that failed, and the next open retries.
 4. `ForkRegistryHandle::finish_drop(&info)` removes the registry entry, deletes the tombstone, deletes the schema overlay.
 5. If a crash occurs between steps 2 and 4, `recover_forks` walks all `Tombstoned` entries on next open and finishes the drop.
 
@@ -9642,10 +9642,11 @@ The `BranchedBackend` decorator does not stack across nesting levels. A nested c
 - `ForkInUse { name, holder_count }` — forked sessions are still alive.
 - `ForkInflightTx { name }` — a `Transaction` is open on the fork's UniInner.
 - `ForkHasChildren { name, children }` — Phase 3 guard; refuses to orphan descendants.
+- `ForkTagged { name, tags }` — a tag pins one of the fork's branches; nothing is tombstoned. Untag first.
 
 Before `ForkInUse`, the drop waits up to `UniConfig::drop_fork_drain_timeout` (default 10s) for the fork's live sessions to be released and its pending flushes to drain (`PendingFlushTimeout` otherwise). A failed branch delete returns `ForkLifecycle { stage: "delete_branch" }`.
 
-`Uni::drop_fork_cascade(name)` removes a fork and every descendant. It walks the subtree depth-first via `ForkRegistryHandle::list_children`, then pre-validates every node in one pass — every node must satisfy the `ForkInUse` and `ForkInflightTx` checks. Any blocker surfaces an aggregate `ForkSubtreeInUse { blockers: Vec<String> }` *before* tombstoning anything, so a partial cascade never leaves orphans. On a clean pre-validation pass, the cascade drops deepest-first via the single-fork `drop_fork` path; a crash mid-cascade resumes through existing tombstone recovery on the next process boot.
+`Uni::drop_fork_cascade(name)` removes a fork and every descendant. It walks the subtree depth-first via `ForkRegistryHandle::list_children`, then pre-validates every node in one pass — every node must satisfy the `ForkInUse` and `ForkInflightTx` checks. Any blocker surfaces an aggregate `ForkSubtreeInUse { blockers: Vec<String> }` *before* tombstoning anything, so a partial cascade never leaves orphans. A tagged node then surfaces `ForkTagged` for the first one found, also before anything is tombstoned. On a clean pre-validation pass, the cascade drops deepest-first via the single-fork `drop_fork` path; a crash mid-cascade resumes through existing tombstone recovery on the next process boot.
 
 `Session::flush()` (Phase 3) flushes the session's writer to L1. On a forked session this flushes the fork's L0 to its Lance branches — equivalent to `Uni::flush()` on a primary session. Most users won't call this directly because nested-fork creation already auto-flushes the parent.
 
@@ -9659,7 +9660,7 @@ Phase 4a bolts a small operational layer onto the substrate so forks can be used
 
 **Budget.** `UniConfig::max_forks: Option<usize>` caps total fork count enforced at `ForkRegistryHandle::begin_create`. Counts include `Active + Pending + Tombstoned` — tombstoned forks still hold branch state on disk until recovery completes, so counting them prevents create/drop churn from slipping past the cap. Hitting the cap surfaces `UniError::ForkBudgetExceeded { current, max }` at the API layer.
 
-**Tags.** `Uni::tag_fork(name, tag)` walks the fork's `(dataset → branch)` map and creates one Lance tag per dataset, namespaced as `fork_{tag}_{dataset}`. Each tag pins the branch's *current* version — subsequent fork writes do not move the tag. Lance's compaction retention sweep preserves any version referenced by an active tag, so a tag holds the fork's state while the fork exists. Currently a tagged branch cannot be deleted: `drop_fork` on a tagged fork fails at stage `delete_branch` and leaves it Tombstoned, so untag before dropping. `list_fork_tags` and `untag_fork` read the registry and raise `ForkNotFound` once a fork is dropped. `Uni::untag_fork` is idempotent per-dataset (missing tags are no-ops). `Uni::list_fork_tags` deduplicates the user-visible tag names by stripping the namespace prefix.
+**Tags.** `Uni::tag_fork(name, tag)` first flushes the fork, so its L0 rows are in the tagged versions and a fork whose writes were only buffered has branched its datasets; a fork with no branched datasets even then fails with `ForkLifecycle { stage: "tag" }`. It then walks the fork's `(dataset → branch)` map and creates one Lance tag per dataset, named `fork_{fork_id}_{tag}_{dataset}`. Lance tags are dataset-wide, not per branch, so the fork id keeps two forks' tags of the same name apart, and every tag operation keeps only the tags whose `TagContents.branch` is one of the fork's branches (`ForkBranching::list_tags` returns it as `BranchTag::branch`). Tags written by earlier releases as `fork_{tag}_{dataset}` are still read, listed and untagged. Each tag pins the branch's version at that point — subsequent fork writes do not move the tag. Lance's compaction retention sweep preserves any version referenced by an active tag. A tag also pins its branch: Lance refuses to delete a branch a tag references, even with force, so `drop_fork` refuses a tagged fork up front with `ForkTagged` (see the drop steps). `Uni::untag_fork` is idempotent per-dataset (missing tags are no-ops). `Uni::list_fork_tags` deduplicates the user-visible tag names by stripping the namespace prefix.
 
 **Cancellation parent → child.** `Session::new_forked` stores `parent_token.child_token()` instead of a fresh `CancellationToken`. Cancelling a parent session fires every descendant's token; cancelling a child does not affect the parent. Sibling forks under the same parent are independent. This matches spec §4.6.
 
@@ -9720,10 +9721,30 @@ the second view only, `deleted` in the first only. Identity is the
 content UID: `compute_vertex_uid(label, ext_id, properties)` for
 vertices and `compute_edge_uid(src_uid, dst_uid, type, properties)`
 for edges, so two unrelated forks with overlapping VID allocation still
-pair correctly. Because the properties are part of the identity, a
-property edit appears as one `deleted` row plus one `added` row; the
-`changed` lists are always empty (kept in the API for a future
-identity that anchors on a stable id). `DiffVertex.vid` survives as informational metadata.
+pair correctly. Because the properties are part of the identity, an
+edited row has a new UID on the side that edited it, so after the UID
+partition the diff pairs the remaining added and deleted rows into
+`changed` (one `PropertyChange { key, before, after }` per differing
+property):
+
+- by `(label, ext_id)`, always — `ext_id` is the vertex's stable name;
+- by id, only under shared lineage (`compute_diff_with_lineage` with a
+  `SharedLineage`): when one side is the other's ancestor, the
+  descendant's VIDs below `vid_floor` and EIDs below `eid_floor` were
+  inherited at its fork point and are the ancestor's rows. The floors
+  are `ForkInfo::fork_point_vid_hwm` / `fork_point_eid_hwm` of the fork
+  directly below the ancestor on the parent chain — the allocator marks
+  the fork's own allocator starts from. Ids at or above them are
+  allocated independently on each side (a sibling, or primary after the
+  fork point, reuses the same ids), so they never pair, and unrelated
+  views get no `SharedLineage` at all. `Uni::diff_fork_primary` always
+  passes one; `Uni::diff_forks` passes one when either fork is on the
+  other's parent chain. Forks created before the marks were recorded
+  have zero floors.
+
+An edge pair whose properties are equal (only an endpoint's content
+changed) is dropped: the endpoint's own `vertices.changed` entry says it.
+`DiffVertex.vid` survives as informational metadata.
 The labels and edge types scanned are, per side, the declared ones
 plus those discovered in data (`MATCH (n) RETURN DISTINCT labels(n)`,
 `MATCH ()-[r]->() RETURN DISTINCT type(r)`), so schemaless labels and
@@ -9732,8 +9753,8 @@ returned an empty diff for them.
 
 `ForkDiff::invert()` is provided so the algebraic relation
 `diff(a, b).invert() == diff(b, a)` is enforced by construction; it
-swaps `added` ↔ `deleted` and `before` ↔ `after` in every
-`PropertyChange`.
+swaps `added` ↔ `deleted`, `before` ↔ `after` in every
+`PropertyChange`, and the before/after UIDs of every change.
 
 **Promote** — `Uni::promote_from_fork(name, &[PromotePattern])`
 scans the named fork per pattern and bulk-inserts matches on
@@ -9765,6 +9786,10 @@ excludes fork-only rows. Don't roll your own UID→primary-VID lookup
 without this round-trip. A label undeclared on primary has no
 `UidIndex` (the flush registers UIDs only for declared labels), so for
 it the helper hashes a content scan of the label on primary instead.
+The index also holds flushed rows only, so the UIDs it does not resolve
+are looked up again by the same content scan, which reads primary's L0:
+otherwise a vertex primary committed after the fork point and has not
+flushed was promoted a second time.
 
 **Schema growth interaction.** Promote does *not* auto-declare
 labels or edge types. A target declared on primary is inserted as

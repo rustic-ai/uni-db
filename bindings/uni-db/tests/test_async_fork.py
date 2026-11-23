@@ -236,6 +236,26 @@ async def test_fork_tag_roundtrip():
     await db.drop_fork("audit")
 
 
+async def test_drop_of_tagged_fork_raises_fork_tagged():
+    db = await _make_db(disable_fork_sweeper=True)
+    primary = await _seed_person_schema(db)
+    fork = await primary.fork("held").build()
+    tx = await fork.tx()
+    await tx.execute("CREATE (:Person {name: 'in-fork'})")
+    await tx.commit()
+    del fork
+
+    await db.tag_fork("held", "keep")
+    with pytest.raises(uni_db.UniForkTaggedError) as excinfo:
+        await db.drop_fork("held")
+    assert excinfo.value.name == "held"
+    assert excinfo.value.tags == ["keep"]
+    assert await db.list_fork_tags("held") == ["keep"]
+
+    await db.untag_fork("held", "keep")
+    await db.drop_fork("held")
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------

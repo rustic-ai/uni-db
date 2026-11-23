@@ -335,6 +335,13 @@ create_exception!(
 );
 create_exception!(
     _uni_db,
+    UniForkTaggedError,
+    UniError,
+    "drop_fork / drop_fork_cascade refused because a fork has tags; nothing \
+     was dropped. Untag it first. Carries `name: str` and `tags: list[str]`."
+);
+create_exception!(
+    _uni_db,
     UniForkSubtreeInUseError,
     UniError,
     "drop_fork_cascade refused because the subtree has live sessions / open txes. \
@@ -532,6 +539,11 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
                 Ok(())
             })
         }
+        ForkTagged { name, tags } => fork_err_with(UniForkTaggedError::new_err(msg), |py, val| {
+            val.setattr("name", name)?;
+            val.setattr("tags", pyo3::types::PyList::new(py, &tags)?)?;
+            Ok(())
+        }),
         ForkSubtreeInUse { blockers } => {
             fork_err_with(UniForkSubtreeInUseError::new_err(msg), |py, val| {
                 val.setattr("blockers", pyo3::types::PyList::new(py, &blockers)?)?;
@@ -763,6 +775,7 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         UniForkInUseError,
         UniForkInflightTxError,
         UniForkHasChildrenError,
+        UniForkTaggedError,
         UniForkSubtreeInUseError,
         UniRestoreBlockedByForksError,
         UniForkBudgetExceededError,
