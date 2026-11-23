@@ -370,9 +370,7 @@ CALIBRATE risk_scorer
 
     assert calibrate_calls, "CALIBRATE never called the classifier"
     assert all(r["n"] is not None for r in calibrate_calls), calibrate_calls
-    assert sorted(r["n"] for r in calibrate_calls) == sorted(
-        r["n"] for r in rule_calls
-    )
+    assert sorted(r["n"] for r in calibrate_calls) == sorted(r["n"] for r in rule_calls)
 
 
 def test_calibrate_passes_a_node_input_as_a_rule_call_does():
@@ -401,19 +399,17 @@ CREATE MODEL risk_scorer AS
     config = uni_db.LocyConfig()
     config.register_classifier("risk_scorer", recorder(rule_calls))
     session.locy_with(
-        model + "\nCREATE RULE risky AS MATCH (n:Asset) YIELD KEY n, risk_scorer(n) AS risk"
+        model
+        + "\nCREATE RULE risky AS MATCH (n:Asset) YIELD KEY n, risk_scorer(n) AS risk"
     ).with_config(config).run()
 
     calibrate_calls: list[dict[str, Any]] = []
     config = uni_db.LocyConfig()
     config.register_classifier("risk_scorer", recorder(calibrate_calls))
     session.locy_with(
-        model
-        + "\nCALIBRATE risk_scorer ON MATCH (n:Asset) TARGET n.bad "
+        model + "\nCALIBRATE risk_scorer ON MATCH (n:Asset) TARGET n.bad "
         "METHOD platt_scaling HOLDOUT 0.4"
     ).with_config(config).run()
 
     assert all(r["n"] is not None for r in calibrate_calls), calibrate_calls
-    assert sorted(r["n"] for r in calibrate_calls) == sorted(
-        r["n"] for r in rule_calls
-    )
+    assert sorted(r["n"] for r in calibrate_calls) == sorted(r["n"] for r in rule_calls)
