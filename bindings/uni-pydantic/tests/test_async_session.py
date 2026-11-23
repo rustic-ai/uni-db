@@ -315,6 +315,22 @@ class TestAsyncTransaction:
 
         assert alice.is_persisted
 
+    async def test_rollback_after_commit_keeps_committed_nodes(self, async_session):
+        """An error after an explicit commit does not detach committed nodes."""
+        async_session.register(Person)
+        await async_session.sync_schema()
+
+        tx = await async_session.transaction()
+        with pytest.raises(ValueError, match="after commit"):
+            async with tx:
+                alice = Person(name="Alice", email="alice@test.com")
+                tx.add(alice)
+                await tx.commit()
+                raise ValueError("after commit")
+
+        assert alice.is_persisted
+        assert alice.vid is not None
+
     async def test_create_edge_on_pending_nodes(self, async_session):
         """An edge may join nodes added earlier in the same transaction."""
         async_session.register(Person)

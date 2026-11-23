@@ -577,6 +577,23 @@ class TestTransaction:
         found = session.get(Person, email="alice@test.com")
         assert found is None
 
+    def test_rollback_after_commit_keeps_committed_nodes(self, session):
+        """An error after an explicit commit does not detach committed nodes."""
+        session.register(Person)
+        session.sync_schema()
+
+        with pytest.raises(ValueError, match="after commit"):
+            with session.transaction() as tx:
+                alice = Person(name="Alice", email="alice@test.com")
+                tx.add(alice)
+                tx.commit()
+                raise ValueError("after commit")
+
+        assert alice.is_persisted
+        assert alice.vid is not None
+        found = session.get(Person, email="alice@test.com")
+        assert found is alice
+
 
 class TestLifecycleHooks:
     """Tests for lifecycle hooks."""

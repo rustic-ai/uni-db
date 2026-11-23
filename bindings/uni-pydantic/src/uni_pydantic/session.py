@@ -191,6 +191,8 @@ class UniTransaction:
 
             self._tx.commit()
             self._committed = True
+            # Committed: a later rollback has nothing to undo.
+            self._created_nodes.clear()
 
             # Mark nodes as clean
             for node in self._pending_nodes:
@@ -201,8 +203,13 @@ class UniTransaction:
             raise TransactionError(f"Commit failed: {e}") from e
 
     def rollback(self) -> None:
-        """Rollback the transaction."""
-        if self._rolled_back:
+        """Rollback the transaction.
+
+        A no-op once the transaction has committed: an error raised after an
+        explicit ``commit()`` inside the ``with`` block leaves the committed
+        nodes as they are.
+        """
+        if self._rolled_back or self._committed:
             return
         try:
             if self._tx is not None:

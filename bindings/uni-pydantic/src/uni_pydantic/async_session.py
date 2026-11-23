@@ -130,6 +130,8 @@ class AsyncUniTransaction:
                 )
             await self._tx.commit()
             self._committed = True
+            # Committed: a later rollback has nothing to undo.
+            self._created_nodes.clear()
             for node in self._pending_nodes:
                 node._mark_clean()
         except Exception as e:
@@ -137,8 +139,13 @@ class AsyncUniTransaction:
             raise TransactionError(f"Commit failed: {e}") from e
 
     async def rollback(self) -> None:
-        """Rollback the transaction."""
-        if self._rolled_back:
+        """Rollback the transaction.
+
+        A no-op once the transaction has committed: an error raised after an
+        explicit ``commit()`` inside the ``with`` block leaves the committed
+        nodes as they are.
+        """
+        if self._rolled_back or self._committed:
             return
         try:
             if self._tx is not None:
