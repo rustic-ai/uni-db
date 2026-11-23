@@ -5997,9 +5997,67 @@ impl StorageManager {
         filter: Option<&str>,
         ctx: Option<&QueryContext>,
     ) -> Result<Vec<(Vid, f32)>> {
+        // Malformed queries are refused before any read; a blank one matches
+        // nothing (see `backend::fts_query`).
+        if crate::backend::fts_query::parse_fts_query(query)?.is_none() {
+            return Ok(Vec::new());
+        }
+        self.fts_search_parsed(label, property, query, k, filter, ctx)
+            .await
+            .map_err(|e| {
+                if format!("{e:#}").contains("position is not found") {
+                    anyhow!(
+                        "full-text phrase query on {label}.{property}: the index was built \
+                         without token positions, which phrases need (an n-gram tokenizer \
+                         stores none). Recreate the FULLTEXT index with a word tokenizer, \
+                         or search the words without quotes."
+                    )
+                } else {
+                    e
+                }
+            })
+    }
+
+    async fn fts_search_parsed(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+        filter: Option<&str>,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Vec<(Vid, f32)>> {
+        // A JSON column is searched through its full-text index's derived
+        // text column; unflushed documents are reduced to the same text.
+        let json_index = self
+            .schema_manager
+            .schema()
+            .indexes
+            .iter()
+            .find_map(|idx| match idx {
+                IndexDefinition::JsonFullText(cfg)
+                    if cfg.label == label && cfg.column == property =>
+                {
+                    Some(cfg.clone())
+                }
+                _ => None,
+            });
+        let derived = json_index.as_ref().map(|cfg| cfg.derived_column());
+        let source = property;
+        let property = derived.as_deref().unwrap_or(property);
+        let paths: Vec<String> = json_index.map(|cfg| cfg.paths).unwrap_or_default();
+        let is_json = derived.is_some();
+        let text_of = move |value: &uni_common::Value| -> Option<String> {
+            if is_json {
+                uni_common::core::schema::json_fts_text(value, &paths)
+            } else {
+                value.as_str().map(str::to_string)
+            }
+        };
+
         let backend = self.backend.as_ref();
         let name = table_names::vertex_table_name(label);
-        let schemaless = self.is_schemaless_property(label, property);
+        let schemaless = !is_json && self.is_schemaless_property(label, property);
         if schemaless {
             reject_schemaless_filter(label, property, filter)?;
         }
@@ -6010,14 +6068,12 @@ impl StorageManager {
         let unflushed = match ctx {
             Some(qctx) => {
                 let excluded = self.l0_rows_failing_filter(label, filter, qctx).await?;
-                let mut l0 = collect_l0_texts(qctx, label, property)?;
+                let mut l0 = collect_l0_texts_with(qctx, label, source, &text_of)?;
                 // A vertex an unflushed relabel put under the label has no L0
                 // property row; its text is its flushed one.
                 for (vid, props) in self.l0_label_joined_props(label, qctx).await? {
-                    if let Some(value) = props.get(property) {
-                        l0.texts
-                            .entry(vid)
-                            .or_insert_with(|| value.as_str().map(str::to_string));
+                    if let Some(value) = props.get(source) {
+                        l0.texts.entry(vid).or_insert_with(|| text_of(value));
                     }
                 }
                 Some((excluded, l0))
@@ -7185,7 +7241,19 @@ struct L0Texts {
 /// # Errors
 /// Returns the query's timeout or cancellation, checked every
 /// [`DeadlineTicker::EVERY`] rows.
+#[cfg(test)]
 fn collect_l0_texts(ctx: &QueryContext, label: &str, property: &str) -> Result<L0Texts> {
+    collect_l0_texts_with(ctx, label, property, &|v| v.as_str().map(str::to_string))
+}
+
+/// [`collect_l0_texts`], with each value's searched text given by `text_of`
+/// (a JSON full-text index's text of a document, for one).
+fn collect_l0_texts_with(
+    ctx: &QueryContext,
+    label: &str,
+    property: &str,
+    text_of: &dyn Fn(&uni_common::Value) -> Option<String>,
+) -> Result<L0Texts> {
     let mut deadline = DeadlineTicker::new(ctx);
     let mut out = L0Texts::default();
     // Whether each relabeled vid still carries the label, newest buffer last.
@@ -7210,7 +7278,7 @@ fn collect_l0_texts(ctx: &QueryContext, label: &str, property: &str) -> Result<L
                 continue;
             };
             let text = match props.get(property) {
-                Some(value) => value.as_str().map(str::to_string),
+                Some(value) => text_of(value),
                 None => continue,
             };
             out.texts.insert(vid, text);

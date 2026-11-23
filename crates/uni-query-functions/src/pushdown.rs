@@ -8,7 +8,7 @@
 //! Includes SQL injection prevention for LIKE patterns (CWE-89) and UID validation (CWE-345).
 
 use std::collections::{HashMap, HashSet};
-use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
+use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, Quantifier, UnaryOp};
 use uni_store::backend::types::{CmpOp, FilterExpr, Scalar, StringMatchKind};
 
 use uni_common::Value;
@@ -33,9 +33,20 @@ pub struct PushdownStrategy {
     /// Vec of: (column_name, lower_bound, upper_bound)
     pub btree_prefix_scans: Vec<(String, String, String)>,
 
-    /// JSON FTS predicates for full-text search on JSON columns.
-    /// Vec of: (column_name, search_term, optional_path_filter)
-    pub json_fts_predicates: Vec<(String, String, Option<String>)>,
+    /// `CONTAINS` conjuncts on a column with an Online JSON full-text index,
+    /// as `(column, term, path)`: the term is a string literal or a
+    /// parameter, the path the dotted key path inside the document
+    /// (`a.doc.meta.author` has path `meta.author`; `None` for the column
+    /// itself). The index's derived text column turns each into candidate
+    /// vids for the scan; the conjunct itself stays in `residual`.
+    pub json_fts_predicates: Vec<(String, Expr, Option<String>)>,
+
+    /// `ANY(x IN n.prop WHERE x IN <list>)` conjuncts on a property with an
+    /// Online inverted index, as `(prop, list)`, where the list is a list
+    /// literal or a parameter. The index turns the list into candidate vids
+    /// for the scan; the conjunct itself stays in the residual (or Lance)
+    /// predicates, so the candidates only narrow what is read.
+    pub inverted_prefilters: Vec<(String, Expr)>,
 
     /// Predicates pushable to Lance scan filter.
     pub lance_predicates: Vec<Expr>,
@@ -127,6 +138,12 @@ impl<'a> IndexAwareAnalyzer<'a> {
                 strategy.indexed_range_columns.push((col, kind));
             }
 
+            // An inverted-index candidate set. Recorded, not routed: the
+            // conjunct is still evaluated in full below.
+            if let Some(found) = self.extract_inverted_any(&conj, variable, label_id) {
+                strategy.inverted_prefilters.push(found);
+            }
+
             // 1. Check for _uid = 'xxx' pattern (most selective)
             if let Some(uid) = self.extract_uid_predicate(&conj, variable) {
                 strategy.uid_lookup = Some(uid);
@@ -146,6 +163,9 @@ impl<'a> IndexAwareAnalyzer<'a> {
                 self.extract_json_fts_predicate(&conj, variable, label_id)
             {
                 strategy.json_fts_predicates.push((column, term, path));
+                // A JSON column is not a Lance-filterable string, so the
+                // predicate is evaluated above the scan.
+                strategy.residual.push(conj);
                 continue;
             }
 
@@ -349,41 +369,114 @@ impl<'a> IndexAwareAnalyzer<'a> {
         None
     }
 
-    /// Extract JSON FTS predicate from CONTAINS on an FTS-indexed column.
-    ///
-    /// Returns `Some((column, search_term, optional_path))` if:
-    /// - The predicate is `variable.column CONTAINS 'term'`
-    /// - The column has a `JsonFullText` index
+    /// `ANY(x IN variable.prop WHERE x IN <list literal | $param>)` where
+    /// `(label, prop)` has an Online inverted index: `(prop, list)`.
+    fn extract_inverted_any(
+        &self,
+        expr: &Expr,
+        variable: &str,
+        label_id: u16,
+    ) -> Option<(String, Expr)> {
+        let Expr::Quantifier {
+            quantifier: Quantifier::Any,
+            variable: element,
+            list,
+            predicate,
+        } = expr
+        else {
+            return None;
+        };
+        let Expr::Property(owner, prop) = list.as_ref() else {
+            return None;
+        };
+        if !matches!(owner.as_ref(), Expr::Variable(v) if v == variable) {
+            return None;
+        }
+        let Expr::In {
+            expr: probe,
+            list: terms,
+        } = predicate.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(probe.as_ref(), Expr::Variable(v) if v == element) {
+            return None;
+        }
+        let constant = match terms.as_ref() {
+            Expr::Parameter(_) => true,
+            Expr::List(items) => items.iter().all(|i| matches!(i, Expr::Literal(_))),
+            _ => false,
+        };
+        if !constant {
+            return None;
+        }
+        let label_name = self.schema.label_name_by_id(label_id)?;
+        self.schema.indexes.iter().find_map(|idx| match idx {
+            IndexDefinition::Inverted(cfg)
+                if cfg.label == *label_name
+                    && cfg.property == *prop
+                    && cfg.metadata.status == IndexStatus::Online =>
+            {
+                Some((prop.clone(), terms.as_ref().clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// `variable.column[.path…] CONTAINS <string literal | $param>` where
+    /// `(label, column)` has an Online JSON full-text index that covers the
+    /// path: `(column, term, path)`.
     fn extract_json_fts_predicate(
         &self,
         expr: &Expr,
         variable: &str,
         label_id: u16,
-    ) -> Option<(String, String, Option<String>)> {
-        if let Expr::BinaryOp {
+    ) -> Option<(String, Expr, Option<String>)> {
+        let Expr::BinaryOp {
             left,
             op: BinaryOp::Contains,
             right,
         } = expr
-            && let Expr::Property(var_expr, prop) = left.as_ref()
-            && let Expr::Variable(v) = var_expr.as_ref()
-            && v == variable
-            && let Expr::Literal(CypherLiteral::String(term)) = right.as_ref()
-        {
-            let label_name = self.schema.label_name_by_id(label_id)?;
-
-            // Check if property has a JsonFullText index
-            for idx in &self.schema.indexes {
-                if let IndexDefinition::JsonFullText(cfg) = idx
-                    && cfg.label == *label_name
-                    && cfg.column == *prop
-                    && cfg.metadata.status == IndexStatus::Online
-                {
-                    return Some((prop.clone(), term.clone(), None));
+        else {
+            return None;
+        };
+        if !matches!(
+            right.as_ref(),
+            Expr::Literal(CypherLiteral::String(_)) | Expr::Parameter(_)
+        ) {
+            return None;
+        }
+        // Walk `a.doc.x.y` down to `a.doc`, collecting `x.y`.
+        let mut keys: Vec<&str> = Vec::new();
+        let mut at = left.as_ref();
+        let column = loop {
+            let Expr::Property(inner, key) = at else {
+                return None;
+            };
+            match inner.as_ref() {
+                Expr::Variable(v) if v == variable => break key,
+                Expr::Variable(_) => return None,
+                deeper => {
+                    keys.push(key);
+                    at = deeper;
                 }
             }
-        }
-        None
+        };
+        keys.reverse();
+        let path = (!keys.is_empty()).then(|| keys.join("."));
+
+        let label_name = self.schema.label_name_by_id(label_id)?;
+        self.schema.indexes.iter().find_map(|idx| match idx {
+            IndexDefinition::JsonFullText(cfg)
+                if cfg.label == *label_name
+                    && cfg.column == *column
+                    && cfg.metadata.status == IndexStatus::Online
+                    && cfg.covers_path(path.as_deref()) =>
+            {
+                Some((column.clone(), right.as_ref().clone(), path.clone()))
+            }
+            _ => None,
+        })
     }
 
     /// Split AND-connected predicates into a list.

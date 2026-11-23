@@ -16,8 +16,8 @@ use std::sync::{Arc, LazyLock};
 use uni_common::Value;
 use uni_common::core::schema::{
     AnalyzerConfig, BaseTokenizer, EdgeTypeMeta, EmbeddingConfig, FtsLanguage, FullTextIndexConfig,
-    IndexDefinition, JsonFtsIndexConfig, ScalarIndexConfig, ScalarIndexType, Schema,
-    SparseVectorIndexConfig, TokenizerConfig, VectorIndexConfig,
+    IndexDefinition, InvertedIndexConfig, JsonFtsIndexConfig, ScalarIndexConfig, ScalarIndexType,
+    Schema, SparseVectorIndexConfig, TokenizerConfig, VectorIndexConfig,
 };
 use uni_cypher::ast::{
     AlterEdgeType, AlterLabel, BinaryOp, CallKind, Clause, CreateConstraint, CreateEdgeType,
@@ -2489,6 +2489,12 @@ pub enum LogicalPlan {
     },
     CreateFullTextIndex {
         config: FullTextIndexConfig,
+        if_not_exists: bool,
+    },
+    /// `CREATE INVERTED INDEX`: a term-to-vid index over a `LIST<STRING>`
+    /// property, used as a candidate prefilter for `ANY(x IN n.p WHERE x IN …)`.
+    CreateInvertedIndex {
+        config: InvertedIndexConfig,
         if_not_exists: bool,
     },
     CreateScalarIndex {
@@ -10688,6 +10694,7 @@ impl QueryPlanner {
             | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -11281,6 +11288,7 @@ impl QueryPlanner {
             | LogicalPlan::Empty
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -11570,6 +11578,7 @@ pub fn projection_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
         | LogicalPlan::QuantifiedPattern { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateInvertedIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }
         | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -11712,6 +11721,7 @@ impl QueryPlanner {
                 if let Some(label_name) = self.schema.label_name_by_id(*label_id) {
                     let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
                     let strategy = analyzer.analyze(filter, variable, *label_id);
+                    push_candidate_usage(&strategy, label_name, usage);
                     for (prop, kind) in strategy.indexed_equality_columns {
                         let kind_name = match kind {
                             ScalarIndexType::Hash => "HASH",
@@ -11776,7 +11786,27 @@ impl QueryPlanner {
                 });
             }
             LogicalPlan::Explain { plan } => self.collect_index_usage(plan, usage),
-            LogicalPlan::Filter { input, .. } => self.collect_index_usage(input, usage),
+            LogicalPlan::Filter {
+                input, predicate, ..
+            } => {
+                // A residual `ANY(x IN n.p WHERE x IN …)` or JSON `CONTAINS`
+                // over a scan is served by the scan's index prefilter (C11, C24).
+                if let LogicalPlan::Scan {
+                    label_id,
+                    labels,
+                    variable,
+                    optional: false,
+                    ..
+                } = input.as_ref()
+                    && labels.len() <= 1
+                    && let Some(label_name) = self.schema.label_name_by_id(*label_id)
+                {
+                    let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
+                    let strategy = analyzer.analyze(predicate, variable, *label_id);
+                    push_candidate_usage(&strategy, label_name, usage);
+                }
+                self.collect_index_usage(input, usage)
+            }
             LogicalPlan::Project { input, .. } => self.collect_index_usage(input, usage),
             LogicalPlan::Limit { input, .. } => self.collect_index_usage(input, usage),
             LogicalPlan::Sort { input, .. } => self.collect_index_usage(input, usage),
@@ -12164,14 +12194,53 @@ impl QueryPlanner {
                 })
             }
             SchemaCommand::CreateFullTextIndex(cfg) => {
+                reject_unknown_index_options("FULLTEXT", &cfg.options, FULLTEXT_INDEX_OPTIONS)?;
                 let tokenizer = Self::parse_tokenizer_options(&cfg.options)?;
+                let with_positions = match cfg.options.get("with_positions") {
+                    None => true,
+                    Some(v) => v.as_bool().ok_or_else(|| {
+                        anyhow!("FULLTEXT index option `with_positions` must be a boolean")
+                    })?,
+                };
                 Ok(LogicalPlan::CreateFullTextIndex {
                     config: FullTextIndexConfig {
                         name: cfg.name,
                         label: cfg.label,
                         properties: cfg.properties,
                         tokenizer,
-                        with_positions: true,
+                        with_positions,
+                        metadata: Default::default(),
+                    },
+                    if_not_exists: cfg.if_not_exists,
+                })
+            }
+            SchemaCommand::CreateInvertedIndex(cfg) => {
+                reject_unknown_index_options("INVERTED", &cfg.options, INVERTED_INDEX_OPTIONS)?;
+                let normalize = match cfg.options.get("normalize") {
+                    None => true,
+                    Some(v) => v.as_bool().ok_or_else(|| {
+                        anyhow!("INVERTED index option `normalize` must be a boolean")
+                    })?,
+                };
+                let max_terms_per_doc = match cfg.options.get("max_terms_per_doc") {
+                    None => 10_000,
+                    Some(v) => v
+                        .as_i64()
+                        .filter(|n| *n >= 1)
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "INVERTED index option `max_terms_per_doc` must be a positive integer"
+                            )
+                        })?,
+                };
+                Ok(LogicalPlan::CreateInvertedIndex {
+                    config: InvertedIndexConfig {
+                        name: cfg.name,
+                        label: cfg.label,
+                        property: cfg.property,
+                        normalize,
+                        max_terms_per_doc,
                         metadata: Default::default(),
                     },
                     if_not_exists: cfg.if_not_exists,
@@ -12198,17 +12267,37 @@ impl QueryPlanner {
                 })
             }
             SchemaCommand::CreateJsonFtsIndex(cfg) => {
+                reject_unknown_index_options(
+                    "JSON FULLTEXT",
+                    &cfg.options,
+                    &["with_positions", "paths"],
+                )?;
                 let with_positions = cfg
                     .options
                     .get("with_positions")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let paths: Vec<String> = match cfg.options.get("paths") {
+                    None => Vec::new(),
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<_>>()
+                        .ok_or_else(|| {
+                            anyhow!("JSON FULLTEXT index option `paths` must be a list of strings")
+                        })?,
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "JSON FULLTEXT index option `paths` must be a list of strings"
+                        ));
+                    }
+                };
                 Ok(LogicalPlan::CreateJsonFtsIndex {
                     config: JsonFtsIndexConfig {
                         name: cfg.name,
                         label: cfg.label,
                         column: cfg.column,
-                        paths: Vec::new(),
+                        paths,
                         with_positions,
                         metadata: Default::default(),
                     },
@@ -13407,6 +13496,7 @@ fn collect_properties_recursive(
         | LogicalPlan::OuterRow { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateInvertedIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }
         | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -15546,6 +15636,95 @@ fn column_of_scan_variable(expr: &Expr, scan_variable: &str) -> Option<String> {
 
 fn is_constant_or_param(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(_) | Expr::Parameter(_))
+}
+
+/// EXPLAIN entries for the index candidate prefilters a scan takes from
+/// `strategy` (C11, C24).
+fn push_candidate_usage(
+    strategy: &crate::query::pushdown::PushdownStrategy,
+    label_name: &str,
+    usage: &mut Vec<IndexUsage>,
+) {
+    for (prop, _) in &strategy.inverted_prefilters {
+        usage.push(IndexUsage {
+            label_or_type: label_name.to_string(),
+            property: prop.clone(),
+            index_type: "INVERTED".to_string(),
+            used: true,
+            reason: Some(
+                "candidate-vid prefilter for ANY(x IN ... WHERE x IN ...), unflushed rows \
+                 included; the predicate is still applied"
+                    .to_string(),
+            ),
+        });
+    }
+    for (column, _, _) in &strategy.json_fts_predicates {
+        if usage
+            .iter()
+            .any(|u| u.property == *column && u.index_type == "JSON_FTS")
+        {
+            continue;
+        }
+        usage.push(IndexUsage {
+            label_or_type: label_name.to_string(),
+            property: column.clone(),
+            index_type: "JSON_FTS".to_string(),
+            used: true,
+            reason: Some(
+                "candidate-vid prefilter for CONTAINS from the index's text column, \
+                 unflushed rows included; the predicate is still applied"
+                    .to_string(),
+            ),
+        });
+    }
+}
+
+/// The OPTIONS a `CREATE FULLTEXT INDEX` accepts.
+const FULLTEXT_INDEX_OPTIONS: &[&str] = &[
+    "analyzer",
+    "tokenizer",
+    "language",
+    "stemmer",
+    "stem",
+    "stopwords",
+    "stop_words",
+    "ascii_folding",
+    "lower_case",
+    "max_token_length",
+    "ngram_min",
+    "ngram_max",
+    "with_positions",
+];
+
+/// The OPTIONS a `CREATE INVERTED INDEX` accepts.
+const INVERTED_INDEX_OPTIONS: &[&str] = &["normalize", "max_terms_per_doc"];
+
+/// Refuses an OPTIONS key a `kind` index does not take: one silently
+/// ignored would build an index other than the one asked for.
+fn reject_unknown_index_options(
+    kind: &str,
+    options: &HashMap<String, Value>,
+    known: &[&str],
+) -> Result<()> {
+    let mut unknown: Vec<&str> = options
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !known.contains(k))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort_unstable();
+    let hint = if kind == "FULLTEXT" && unknown.iter().any(|k| INVERTED_INDEX_OPTIONS.contains(k)) {
+        " (`normalize` and `max_terms_per_doc` are options of CREATE INVERTED INDEX)"
+    } else {
+        ""
+    };
+    Err(anyhow!(
+        "unknown {kind} index option(s): {}; accepted: {}{hint}",
+        unknown.join(", "),
+        known.join(", ")
+    ))
 }
 
 #[cfg(test)]

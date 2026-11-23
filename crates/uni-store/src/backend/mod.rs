@@ -13,6 +13,7 @@ pub mod capabilities;
 pub mod eval;
 #[cfg(feature = "lance-backend")]
 pub mod fts_analyzer;
+pub mod fts_query;
 #[cfg(feature = "lance-backend")]
 pub mod lance;
 #[cfg(feature = "lance-backend")]

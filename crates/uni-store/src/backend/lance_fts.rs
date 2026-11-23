@@ -29,6 +29,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::fts_query::{FtsQueryNode, parse_fts_query};
 use super::types::TextSearch;
 use anyhow::{Result, anyhow};
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt64Array};
@@ -44,7 +45,8 @@ use lance_index::metrics::NoOpMetricsCollector;
 use lance_index::scalar::FullTextSearchQuery;
 use lance_index::scalar::InvertedIndexParams;
 use lance_index::scalar::inverted::query::{
-    FtsSearchParams, MatchQuery, Operator, collect_query_tokens,
+    BooleanQuery, FtsQuery, FtsSearchParams, MatchQuery, Occur, Operator, PhraseQuery,
+    collect_query_tokens,
 };
 use lance_index::scalar::inverted::tokenizer::document_tokenizer::LanceTokenizer;
 use lance_index::scalar::inverted::{
@@ -70,10 +72,9 @@ pub(crate) fn configure_search(
     k: usize,
     filter: Option<&str>,
 ) -> Result<()> {
-    let match_query = MatchQuery::new(query.to_string()).with_column(Some(column.to_string()));
     scanner
         .full_text_search(FullTextSearchQuery {
-            query: match_query.into(),
+            query: lance_query(column, query)?,
             limit: Some(k as i64),
             wand_factor: None,
         })
@@ -95,6 +96,217 @@ pub(crate) fn configure_search(
             .map_err(|e| anyhow!("FTS filter '{sql}' on '{column}': {e}"))?;
     }
     Ok(())
+}
+
+/// The Lance query for `query` (see [`super::fts_query`]) on `column`.
+///
+/// A plain word list, or a blank query, stays one OR match of the original
+/// text, exactly the search it was before the syntax existed.
+///
+/// # Errors
+/// Returns an error if `query` is malformed.
+pub(crate) fn lance_query(column: &str, query: &str) -> Result<FtsQuery> {
+    Ok(match parse_fts_query(query)? {
+        Some(node) if !node.is_plain() => node_to_lance(&node, column),
+        _ => MatchQuery::new(query.to_string())
+            .with_column(Some(column.to_string()))
+            .into(),
+    })
+}
+
+/// `node` as Lance's query tree. A negated member of a group becomes the
+/// group's `MUST_NOT` clause; the parser has refused groups without a
+/// positive member.
+fn node_to_lance(node: &FtsQueryNode, column: &str) -> FtsQuery {
+    let group = |children: &[FtsQueryNode], occur: fn() -> Occur| {
+        let (positive, negated) = FtsQueryNode::split_negated(children);
+        FtsQuery::Boolean(BooleanQuery::new(
+            positive
+                .into_iter()
+                .map(|c| (occur(), node_to_lance(c, column)))
+                .chain(
+                    negated
+                        .into_iter()
+                        .map(|c| (Occur::MustNot, node_to_lance(c, column))),
+                ),
+        ))
+    };
+    match node {
+        FtsQueryNode::Term(t) => MatchQuery::new(t.clone())
+            .with_column(Some(column.to_string()))
+            .into(),
+        FtsQueryNode::Phrase(p) => {
+            FtsQuery::Phrase(PhraseQuery::new(p.clone()).with_column(Some(column.to_string())))
+        }
+        FtsQueryNode::And(children) => group(children, || Occur::Must),
+        FtsQueryNode::Or(children) => group(children, || Occur::Should),
+        // Only reachable inside a group, which handles it above.
+        FtsQueryNode::Not(inner) => group(std::slice::from_ref(inner.as_ref()), || Occur::Should),
+    }
+}
+
+/// A parsed query that needs the evaluator below: one with phrases,
+/// negations, `AND` or groups. `None` for a plain word list or a blank query,
+/// which Lance's flat pass scores itself.
+fn structured(query: &str) -> Result<Option<FtsQueryNode>> {
+    Ok(parse_fts_query(query)?.filter(|node| !node.is_plain()))
+}
+
+/// A document's analyzed tokens: each token's text and position.
+struct DocTokens {
+    tokens: Vec<(String, usize)>,
+}
+
+impl DocTokens {
+    fn new(tokenizer: &mut Box<dyn LanceTokenizer>, text: &str) -> Self {
+        let mut tokens = Vec::new();
+        let mut stream = tokenizer.token_stream_for_doc(text);
+        while let Some(token) = stream.next() {
+            tokens.push((token.text.clone(), token.position));
+        }
+        Self { tokens }
+    }
+
+    fn freq(&self, token: &str) -> u32 {
+        self.tokens.iter().filter(|(t, _)| t == token).count() as u32
+    }
+
+    /// Whether the query tokens `phrase` (text, position) occur at the same
+    /// relative positions somewhere in the document.
+    fn has_phrase(&self, phrase: &[(String, usize)]) -> bool {
+        let Some((first, first_pos)) = phrase.first() else {
+            return false;
+        };
+        let at: std::collections::HashSet<(&str, usize)> =
+            self.tokens.iter().map(|(t, p)| (t.as_str(), *p)).collect();
+        self.tokens.iter().any(|(t, start)| {
+            t == first
+                && phrase.iter().all(|(pt, pp)| {
+                    (start + pp)
+                        .checked_sub(*first_pos)
+                        .is_some_and(|pos| at.contains(&(pt.as_str(), pos)))
+                })
+        })
+    }
+}
+
+/// The score of `doc` for `node` on `scorer`'s statistics, `None` when it
+/// does not match. A leaf scores as Lance's flat pass does, the sum over its
+/// tokens of `idf * doc_weight(freq, doc_tokens)`; a group sums its matching
+/// positive members, as Lance's boolean query does.
+fn score_node(
+    node: &FtsQueryNode,
+    doc: &DocTokens,
+    scorer: &MemBM25Scorer,
+    tokenizer: &mut Box<dyn LanceTokenizer>,
+) -> Option<f32> {
+    let doc_len = doc.tokens.len() as u32;
+    let leaf_score = |tokens: &[(String, usize)]| -> f32 {
+        tokens
+            .iter()
+            .map(|(t, _)| scorer.query_weight(t) * scorer.doc_weight(doc.freq(t), doc_len))
+            .sum()
+    };
+    let query_tokens = |tokenizer: &mut Box<dyn LanceTokenizer>, text: &str| {
+        let mut out = Vec::new();
+        let mut stream = tokenizer.token_stream_for_search(text);
+        while let Some(token) = stream.next() {
+            out.push((token.text.clone(), token.position));
+        }
+        out
+    };
+    match node {
+        FtsQueryNode::Term(t) => {
+            let tokens = query_tokens(tokenizer, t);
+            tokens
+                .iter()
+                .any(|(t, _)| doc.freq(t) > 0)
+                .then(|| leaf_score(&tokens))
+        }
+        FtsQueryNode::Phrase(p) => {
+            let tokens = query_tokens(tokenizer, p);
+            doc.has_phrase(&tokens).then(|| leaf_score(&tokens))
+        }
+        FtsQueryNode::And(children) | FtsQueryNode::Or(children) => {
+            let (positive, negated) = FtsQueryNode::split_negated(children);
+            if negated
+                .iter()
+                .any(|c| score_node(c, doc, scorer, tokenizer).is_some())
+            {
+                return None;
+            }
+            let scores: Vec<Option<f32>> = positive
+                .iter()
+                .map(|c| score_node(c, doc, scorer, tokenizer))
+                .collect();
+            let all = matches!(node, FtsQueryNode::And(_));
+            let matched = if all {
+                scores.iter().all(Option::is_some)
+            } else {
+                scores.iter().any(Option::is_some)
+            };
+            matched.then(|| scores.into_iter().flatten().sum())
+        }
+        FtsQueryNode::Not(inner) => score_node(inner, doc, scorer, tokenizer)
+            .is_none()
+            .then_some(0.0),
+    }
+}
+
+/// `docs` scored for `node` against `scorer`'s statistics without adding to
+/// them; the structured counterpart of [`rescore_checked`].
+fn score_structured(
+    scorer: &MemBM25Scorer,
+    tokenizer: &mut Box<dyn LanceTokenizer>,
+    node: &FtsQueryNode,
+    docs: Vec<(u64, String)>,
+    check: impl Fn() -> Result<()>,
+) -> Result<Vec<(u64, f32)>> {
+    let mut out = Vec::new();
+    for (id, text) in docs {
+        check()?;
+        let doc = DocTokens::new(tokenizer, &text);
+        if doc.tokens.is_empty() {
+            continue;
+        }
+        if let Some(score) = score_node(node, &doc, scorer, tokenizer) {
+            out.push((id, score));
+        }
+    }
+    Ok(out)
+}
+
+/// The rows of a scan of `column` (with row ids), collected as documents.
+async fn collect_docs(
+    stream: SendableRecordBatchStream,
+    column: &str,
+) -> Result<Vec<(u64, String)>> {
+    let batches: Vec<RecordBatch> = stream
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("scan '{column}': {e}"))?;
+    let mut docs = Vec::new();
+    for batch in &batches {
+        let ids = batch
+            .column_by_name(ROW_ID)
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| anyhow!("scan of '{column}' has no {ROW_ID} column"))?;
+        let col = batch
+            .column_by_name(column)
+            .ok_or_else(|| anyhow!("scan has no '{column}' column"))?;
+        let col = arrow::compute::cast(col, &DataType::Utf8)
+            .map_err(|e| anyhow!("'{column}' is not text: {e}"))?;
+        let texts = col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow!("'{column}' is not text"))?;
+        for i in 0..batch.num_rows() {
+            if ids.is_valid(i) && texts.is_valid(i) {
+                docs.push((ids.value(i), texts.value(i).to_string()));
+            }
+        }
+    }
+    Ok(docs)
 }
 
 /// The top `k` stored rows of `dataset` for `query` on `column`, and the
@@ -127,12 +339,18 @@ pub(crate) async fn search_with_unstored(
             unstored: score_documents(column, query, unstored, || Ok(())).await?,
         });
     };
+    let node = structured(query)?;
+    // The statistics a structured query ranks by are those of its positive
+    // tokens; a plain query's are its own.
+    let stats_query = node
+        .as_ref()
+        .map_or_else(|| query.to_string(), FtsQueryNode::positive_text);
 
     let (indexes, covered) = open_segments(dataset, column).await?;
     let (tokenizer, base) = match indexes.first() {
         Some(first) => {
             let mut tokenizer = first.tokenizer();
-            let tokens = collect_query_tokens(query, &mut tokenizer);
+            let tokens = collect_query_tokens(&stats_query, &mut tokenizer);
             let base = build_global_bm25_scorer(&indexes, &tokens, &FtsSearchParams::new(), None)
                 .await
                 .map_err(|e| anyhow!("BM25 statistics for '{column}': {e}"))?;
@@ -167,7 +385,7 @@ pub(crate) async fn search_with_unstored(
     let (_, with_docs) = flat_bm25(
         unstored_stream(column, &unstored)?,
         column,
-        query,
+        &stats_query,
         tokenizer.box_clone(),
         base,
     )
@@ -197,10 +415,30 @@ pub(crate) async fn search_with_unstored(
             schema,
             rows.map(|b| b.map_err(|e| DataFusionError::External(Box::new(e)))),
         ));
-        let (scored, all) =
-            flat_bm25(input, column, query, tokenizer.box_clone(), Some(stats)).await?;
-        stats = all;
-        let mut hits = scored_ids(&scored)?;
+        let mut hits = match &node {
+            None => {
+                let (scored, all) =
+                    flat_bm25(input, column, query, tokenizer.box_clone(), Some(stats)).await?;
+                stats = all;
+                scored_ids(&scored)?
+            }
+            Some(node) => {
+                // Statistics first, over the positive tokens, then every row
+                // scored on them, as the flat pass does for a plain query.
+                let docs = collect_docs(input, column).await?;
+                let (_, all) = flat_bm25(
+                    unstored_stream(column, &docs)?,
+                    column,
+                    &stats_query,
+                    tokenizer.box_clone(),
+                    Some(stats),
+                )
+                .await?;
+                stats = all;
+                let mut tokenizer = tokenizer.box_clone();
+                score_structured(&stats, &mut tokenizer, node, docs, || Ok(()))?
+            }
+        };
         hits.sort_by(|a, b| b.1.total_cmp(&a.1));
         hits.truncate(k);
         if !hits.is_empty() {
@@ -209,10 +447,11 @@ pub(crate) async fn search_with_unstored(
     }
 
     let mut tokenizer = tokenizer;
-    Ok(TextSearch {
-        stored,
-        unstored: rescore_checked(&stats, &mut tokenizer, query, unstored, || Ok(()))?,
-    })
+    let unstored = match &node {
+        None => rescore_checked(&stats, &mut tokenizer, query, unstored, || Ok(()))?,
+        Some(node) => score_structured(&stats, &mut tokenizer, node, unstored, || Ok(()))?,
+    };
+    Ok(TextSearch { stored, unstored })
 }
 
 /// `docs` as the input stream of Lance's flat pass.
@@ -321,9 +560,23 @@ pub(crate) async fn score_documents(
             batch
         }),
     );
-    let (_, stats) = flat_bm25(Box::pin(input), column, query, simple_tokenizer()?, None).await?;
+    let node = structured(query)?;
+    let stats_query = node
+        .as_ref()
+        .map_or_else(|| query.to_string(), FtsQueryNode::positive_text);
+    let (_, stats) = flat_bm25(
+        Box::pin(input),
+        column,
+        &stats_query,
+        simple_tokenizer()?,
+        None,
+    )
+    .await?;
     check()?;
-    rescore_checked(&stats, &mut simple_tokenizer()?, query, docs, check)
+    match &node {
+        None => rescore_checked(&stats, &mut simple_tokenizer()?, query, docs, check),
+        Some(node) => score_structured(&stats, &mut simple_tokenizer()?, node, docs, check),
+    }
 }
 
 /// `docs` scored against `scorer`'s statistics without adding to them, by the

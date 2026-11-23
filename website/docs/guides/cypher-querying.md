@@ -808,7 +808,7 @@ MATCH (n:Person) WHERE created_at(n) > datetime("2026-05-01") RETURN n
 MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 ```
 
-The bulk loader can supply explicit per-row values; otherwise the engine assigns timestamps at insertion time. Both are kept on declared and schemaless labels and edge types, before and after a flush, and `updated_at` is never earlier than `created_at`.
+The bulk loader can supply explicit per-row values; otherwise the engine assigns timestamps at insertion time. Both are kept on declared and schemaless labels and edge types, before and after a flush, and `updated_at` is never earlier than `created_at`. An update (`SET`, `REMOVE`, `MERGE ... ON MATCH SET`) keeps `created_at` whether or not the vertex has been flushed.
 
 ### Type Conversion Functions
 
@@ -1156,10 +1156,15 @@ CREATE VECTOR INDEX paper_embeddings
 FOR (p:Paper) ON p.embedding
 OPTIONS {type: 'hnsw'}
 
-// JSON Full-Text index
+// JSON Full-Text index (OPTIONS: with_positions, paths)
 CREATE JSON FULLTEXT INDEX article_fts
 FOR (a:Article) ON _doc
 OPTIONS {with_positions: true}
+
+// Inverted index on a LIST<STRING> property (OPTIONS: normalize, max_terms_per_doc)
+CREATE INVERTED INDEX paper_tags
+FOR (p:Paper) ON (p.tags)
+OPTIONS {normalize: true}
 ```
 
 ### Drop Indexes

@@ -22,6 +22,12 @@ use tracing::{debug, info, instrument};
 use uni_common::core::id::Vid;
 use uni_common::core::schema::InvertedIndexConfig;
 
+/// The term under which the index lists every document whose distinct terms
+/// exceed `max_terms_per_doc`. Such a document is recorded under its first
+/// terms only, so a query also reads this term to find it by the rest: the
+/// index stays a superset of the matches, as a candidate prefilter needs.
+pub const OVER_CAP_TERM: &str = "\u{0}uni:over_max_terms_per_doc";
+
 /// Default memory limit for postings accumulation (256 MB)
 const DEFAULT_MAX_POSTINGS_MEMORY: usize = 256 * 1024 * 1024;
 
@@ -174,26 +180,43 @@ impl InvertedIndex {
             let start = list_array.value_offsets()[i] as usize;
             let end = list_array.value_offsets()[i + 1] as usize;
 
-            let mut terms = HashSet::new();
-            for j in start..end {
-                if !values.is_null(j) {
-                    let term = values.value(j);
-                    let term = if self.config.normalize {
-                        term.to_lowercase().trim().to_string()
-                    } else {
-                        term.to_string()
-                    };
-                    terms.insert(term);
-                }
-            }
-
-            for term in terms {
+            let raw = (start..end)
+                .filter(|j| !values.is_null(*j))
+                .map(|j| values.value(j));
+            for term in self.document_terms(raw) {
                 postings.entry(term).or_default().push(vid);
             }
 
             count += 1;
         }
         Ok(count)
+    }
+
+    /// The terms a document is recorded under: its distinct terms, normalized
+    /// when the index normalizes, at most `max_terms_per_doc` of them, plus
+    /// [`OVER_CAP_TERM`] when it has more.
+    fn document_terms<'t>(&self, raw: impl Iterator<Item = &'t str>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut terms = Vec::new();
+        let mut over_cap = false;
+        for term in raw {
+            let term = if self.config.normalize {
+                term.to_lowercase().trim().to_string()
+            } else {
+                term.to_string()
+            };
+            if seen.insert(term.clone()) {
+                if terms.len() < self.config.max_terms_per_doc {
+                    terms.push(term);
+                } else {
+                    over_cap = true;
+                }
+            }
+        }
+        if over_cap {
+            terms.push(OVER_CAP_TERM.to_string());
+        }
+        terms
     }
 
     /// Merge the accumulated segments and overwrite the on-disk postings.
@@ -304,7 +327,7 @@ impl InvertedIndex {
             return Ok(Vec::new());
         };
 
-        let normalized: Vec<String> = if self.config.normalize {
+        let mut normalized: Vec<String> = if self.config.normalize {
             terms
                 .iter()
                 .map(|t| t.to_lowercase().trim().to_string())
@@ -316,6 +339,8 @@ impl InvertedIndex {
         if normalized.is_empty() {
             return Ok(Vec::new());
         }
+        // Documents over the term cap may hold any term.
+        normalized.push(OVER_CAP_TERM.to_string());
 
         let filter = FilterExpr::any_of(
             normalized
@@ -457,26 +482,7 @@ impl InvertedIndex {
         // Add new VIDs with their terms
         for (vid, terms) in added {
             let vid_u64 = vid.as_u64();
-            let normalized_terms: HashSet<String> = if self.config.normalize {
-                terms
-                    .iter()
-                    .map(|t| t.to_lowercase().trim().to_string())
-                    .collect()
-            } else {
-                terms.iter().cloned().collect()
-            };
-
-            // Respect max_terms_per_doc limit
-            let terms_to_add: Vec<_> = if normalized_terms.len() > self.config.max_terms_per_doc {
-                normalized_terms
-                    .into_iter()
-                    .take(self.config.max_terms_per_doc)
-                    .collect()
-            } else {
-                normalized_terms.into_iter().collect()
-            };
-
-            for term in terms_to_add {
+            for term in self.document_terms(terms.iter().map(String::as_str)) {
                 postings.entry(term).or_default().insert(vid_u64);
             }
         }

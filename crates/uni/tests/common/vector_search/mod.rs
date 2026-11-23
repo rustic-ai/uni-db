@@ -1,7 +1,10 @@
 pub mod cypher_vector;
 pub mod fts_integration;
+pub mod fts_query_syntax;
 pub mod hybrid_query;
+pub mod inverted_index_prefilter;
 pub mod inverted_index_test;
+pub mod json_fts_derived;
 pub mod knn_limit_semantics;
 pub mod similar_to_integration;
 pub mod similarity_fast_path;

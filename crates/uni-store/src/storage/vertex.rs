@@ -149,10 +149,18 @@ impl VertexDataset {
         ));
         columns.push(build_timestamp_column_from_vid_map(vids, updated_at));
 
+        // A JSON full-text index's derived text column is computed here from
+        // its source value, never carried in the row's properties: the
+        // content UID above hashes the properties as written.
+        let derived = json_fts_derived_rows(schema, &self.label, vertices);
+
         // Build property columns using shared builder
         let prop_columns = PropertyColumnBuilder::new(schema, &self.label, vertices.len())
             .with_deleted(deleted)
-            .build(|i| &vertices[i].2)?;
+            .build(|i| match &derived {
+                Some(rows) => &rows[i],
+                None => &vertices[i].2,
+            })?;
 
         columns.extend(prop_columns);
 
@@ -312,4 +320,50 @@ impl VertexDataset {
             .replace_table_atomic(&table_name, vec![batch], arrow_schema)
             .await
     }
+}
+
+/// Each row's properties with the derived text of every JSON full-text index
+/// on `label` set from its source column (`None` when there is no such index).
+fn json_fts_derived_rows(
+    schema: &Schema,
+    label: &str,
+    vertices: &[(Vid, Vec<String>, Properties)],
+) -> Option<Vec<Properties>> {
+    let configs: Vec<&uni_common::core::schema::JsonFtsIndexConfig> = schema
+        .indexes
+        .iter()
+        .filter_map(|idx| match idx {
+            uni_common::core::schema::IndexDefinition::JsonFullText(cfg)
+                if cfg.label == label
+                    && schema
+                        .properties
+                        .get(label)
+                        .is_some_and(|p| p.contains_key(&cfg.derived_column())) =>
+            {
+                Some(cfg)
+            }
+            _ => None,
+        })
+        .collect();
+    if configs.is_empty() {
+        return None;
+    }
+    Some(
+        vertices
+            .iter()
+            .map(|(_, _, props)| {
+                let mut row = props.clone();
+                for cfg in &configs {
+                    let text = props
+                        .get(&cfg.column)
+                        .and_then(|v| uni_common::core::schema::json_fts_text(v, &cfg.paths));
+                    row.insert(
+                        cfg.derived_column(),
+                        text.map_or(uni_common::Value::Null, uni_common::Value::String),
+                    );
+                }
+                row
+            })
+            .collect(),
+    )
 }

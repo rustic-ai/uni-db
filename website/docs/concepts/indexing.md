@@ -384,7 +384,7 @@ ON EACH [p.title, p.abstract]
 | `ngram` | Character n-grams (`ngram_min`/`ngram_max`, default 3) | "cats" → ["cat", "ats"] (trigrams) |
 | `keyword` | No tokenization | "Hello World" → ["hello world"] |
 
-The default is `standard`. Choose another tokenizer and analyzer through `OPTIONS`: `tokenizer` (or `analyzer`), `language`, `stemmer` (bool), `stopwords` (bool or list of words), `lower_case`, `ascii_folding`, `max_token_length`, `ngram_min`, `ngram_max`.
+The default is `standard`. Choose another tokenizer and analyzer through `OPTIONS`: `tokenizer` (or `analyzer`), `language`, `stemmer` (bool), `stopwords` (bool or list of words), `lower_case`, `ascii_folding`, `max_token_length`, `ngram_min`, `ngram_max`, and `with_positions` (bool, default `true`: store term positions, which phrase queries need; an `ngram` tokenizer never stores them). Any other key is refused with an error naming it; `normalize` and `max_terms_per_doc` belong to `CREATE INVERTED INDEX`.
 
 ```cypher
 CREATE FULLTEXT INDEX paper_title_ngram
@@ -411,7 +411,35 @@ RETURN node.title, score
 ORDER BY score DESC
 ```
 
-`uni.fts.query` matches documents that contain **any** of the query terms (OR) and ranks them by BM25. Operators such as `AND`, `NOT`, quoted phrases and wildcards are not interpreted.
+### Full-Text Query Syntax
+
+A plain list of words matches documents that contain **any** of them (OR) and ranks them by BM25. The query may also use:
+
+| Syntax | Meaning |
+|--------|---------|
+| `graph database` | Either word (OR); adjacent terms are OR'd |
+| `graph AND database` | Both words |
+| `graph OR database` | Either word |
+| `"graph database"` | The phrase: the words adjacent and in order |
+| `-legacy`, `NOT legacy` | Exclude documents with the word |
+| `(graph OR vector) AND search` | Grouping |
+
+`AND` binds tighter than `OR` and adjacency, so `a b AND c` is `a OR (b AND c)`. The operators are recognised only in upper case; `and`, `or` and `not` are words. A `-` negates only at the start of a word, phrase or group (`e-mail` is one term). A negated term excludes documents but does not score.
+
+The same syntax applies to unflushed rows, rows flushed since the index was built, indexed rows and undeclared (schemaless) properties, with the same answer before and after a flush.
+
+Edge cases:
+
+- A blank query matches nothing.
+- A query, or a parenthesised group, whose every term is negated (`-legacy`) is an error: it has nothing to rank.
+- An unbalanced quote or parenthesis, or `AND` / `OR` / `NOT` without an operand, is an error.
+- A phrase on an index built without positions (an `ngram` index, or `with_positions: false`) is an error naming the index's missing positions.
+
+```cypher
+CALL uni.fts.query('Paper', 'abstract', '"neural network" AND (vision OR speech) -survey', 10)
+YIELD node, score
+RETURN node.title, score
+```
 
 ---
 
@@ -445,7 +473,15 @@ FOR (a:Article) ON doc
 OPTIONS { with_positions: true }
 ```
 
-The `with_positions` option stores term positions in the index. The indexed column is a declared `JSON` property (`doc` here); names starting with `_` are reserved.
+The `with_positions` option stores term positions in the index, which phrase queries need. `paths` restricts the index to the string values under the listed key paths:
+
+```cypher
+CREATE JSON FULLTEXT INDEX article_title_fts
+FOR (a:Article) ON doc
+OPTIONS { paths: ['title', 'meta.author'] }
+```
+
+The indexed column is a declared `JSON` property (`doc` here); names starting with `_` are reserved.
 
 **If Not Exists:**
 
@@ -470,35 +506,48 @@ WHERE a.doc.title CONTAINS 'Graph' AND a.status = 'published'
 RETURN a.title
 ```
 
-`CONTAINS` on a JSON path is a case-sensitive substring match on the value at that path, and is evaluated as a filter rather than answered from the JSON full-text index. `uni.fts.query` searches string properties only, not `JSON` columns.
+`CONTAINS` on a JSON path is a case-sensitive substring match on the value at that path. With a JSON full-text index on the column, the scan first narrows to the rows whose indexed text contains the term (flushed rows from the index's text column, unflushed rows from their documents), and the predicate is then applied to those rows, so the answer is the same as without the index. `EXPLAIN` reports the index as `JSON_FTS`. A path outside the index's `paths` is evaluated without the prefilter.
+
+`uni.fts.query` on a `JSON` column searches the index's text, with the full query syntax:
+
+```cypher
+CALL uni.fts.query('Article', 'doc', 'graph -vector', 10)
+YIELD node, score
+RETURN node.title, score
+```
 
 ### Query Routing Priority
 
 The query planner routes predicates to the most efficient index:
 
 ```
-1. _uid = 'xxx'           → UidIndex (O(1) lookup)
-2. path = 'exact'         → JsonPathIndex (exact match)
-3. Pushable predicates    → Lance scan filter
-4. Else                   → Residual (post-load filter)
+1. _uid = 'xxx'                    → UidIndex (O(1) lookup)
+2. path = 'exact'                  → JsonPathIndex (exact match)
+3. doc[.path] CONTAINS 'text'      → JSON full-text candidates, then the predicate
+4. ANY(x IN n.p WHERE x IN [...])  → Inverted-index candidates, then the predicate
+5. Pushable predicates             → Lance scan filter
+6. Else                            → Residual (post-load filter)
 ```
 
 ### JSON FTS Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `with_positions` | false | Store term positions |
+| `with_positions` | false | Store term positions (needed for phrase queries) |
+| `paths` | all | List of dotted key paths (`'title'`, `'meta.author'`) whose string values are indexed |
+
+Any other key is refused.
 
 ### How It Works
 
-JSON Full-Text indexes use Lance's inverted index with triplet tokenization:
+A JSON full-text index keeps a derived text column next to the JSON column: each row's string values (map values and list elements, recursively; keys and numbers are not text), one per line, restricted to `paths` when given. Every flush fills it, and creating the index fills it for rows already flushed. The index is a BM25 full-text index on that column, with the standard tokenizer.
 
 ```
-Document: { "title": "Graph Databases", "year": 2024 }
+Document: { "title": "Graph Databases", "tags": ["storage"], "year": 2024 }
          ↓
-Tokens:  (title, string, "graph"), (title, string, "databases"), (year, int, 2024)
+Text:     "storage\nGraph Databases"
          ↓
-Query:   title:graph → Matches documents with "graph" in title path
+Query:    uni.fts.query('Article', 'doc', 'graph', 10) → matches
 ```
 
 ---
@@ -524,7 +573,16 @@ Inverted indexes store a term → vertex mapping for `List<String>` properties, 
 CALL uni.schema.createIndex('Document', 'tags', {type: 'INVERTED'})
 ```
 
-The procedure uses the default configuration below. `CREATE FULLTEXT INDEX` does not create an inverted index: it builds a full-text index and ignores the `normalize` and `max_terms_per_doc` options.
+The procedure uses the default configuration below.
+
+**Via Cypher DDL:**
+
+```cypher
+CREATE INVERTED INDEX document_tags FOR (d:Document) ON (d.tags)
+OPTIONS { normalize: true, max_terms_per_doc: 10000 }
+```
+
+`IF NOT EXISTS` may follow the index name. `OPTIONS` takes `normalize` and `max_terms_per_doc`; any other key is refused.
 
 **Via Rust API:**
 
@@ -551,7 +609,7 @@ db.schema()
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `normalize` | `true` | Lowercase and trim whitespace on terms |
-| `max_terms_per_doc` | `10_000` | Maximum terms per document (DoS protection) |
+| `max_terms_per_doc` | `10_000` | Distinct terms recorded per document (DoS protection); a document with more is still found by every term |
 
 ### Query Patterns
 
@@ -593,7 +651,9 @@ Result: Union of 'rust' and 'python' → [vid_1, vid_2, vid_3]
 
 ### Query Planner Integration
 
-The query planner does not use inverted indexes: `ANY IN` predicates on a `List<String>` property are evaluated by scanning the label, with or without an inverted index.
+A predicate `ANY(x IN n.p WHERE x IN <list>)`, where the list is a literal of strings or a parameter, on a property with an `Online` inverted index is served as a candidate prefilter: the scan reads only the vertices the index lists for any of the terms, plus the unflushed vertices whose list holds one, and the predicate is then applied to them, so the answer is the same as without the index. `EXPLAIN` reports the index as `INVERTED`, and `PROFILE` counts the lookup in the scan's `index_hits`.
+
+The prefilter is not used inside a transaction, on a pinned snapshot or on a fork (the postings follow primary's newest state), or when a term is not a string; those reads scan the label.
 
 ---
 

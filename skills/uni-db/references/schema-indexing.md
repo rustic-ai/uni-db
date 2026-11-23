@@ -298,17 +298,29 @@ CALL uni.fts.query('Article', 'content', 'graph database', 10)
 YIELD node, score
 ```
 
+`FULLTEXT` `OPTIONS` take the tokenizer/analyzer keys and `with_positions` (default `true`, needed for phrase queries); an unknown key is an error. Query syntax: words are OR'd; `AND`, `OR`, `NOT` / `-word`, `"phrases"` and parentheses work on flushed and unflushed rows alike (see `vector-hybrid-search.md`).
+
 ### JSON FTS Index
 
-Full-text search on nested JSON/JSONB properties:
+Full-text search on the string values of a `JSON` property:
 
 ```cypher
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
+  OPTIONS { with_positions: true, paths: ['title', 'author.name'] }
 ```
+
+The index keeps a derived text column (`__jfts_<column>`, hidden) holding the document's string values, filled at flush and backfilled on creation. `uni.fts.query('Data', 'metadata', ...)` searches it. `d.metadata[.path] CONTAINS 'x'` is prefiltered from it (the predicate is still applied, so answers do not change). `paths` (default: the whole document) restricts what is indexed; a `CONTAINS` outside them is not prefiltered.
 
 ### Inverted Index
 
-Term-to-VID mapping for list columns, created with `uni.schema.createIndex(label, prop, {type: 'INVERTED'})`. The query planner does not use inverted indexes yet, so list containment queries (`ANY(x IN list WHERE x IN allowed)`) scan.
+Term-to-VID mapping for `LIST<STRING>` columns:
+
+```cypher
+CREATE INVERTED INDEX idx_tags FOR (d:Doc) ON (d.tags)
+  OPTIONS { normalize: true, max_terms_per_doc: 10000 }
+```
+
+(or `uni.schema.createIndex(label, prop, {type: 'INVERTED'})`). `ANY(x IN d.tags WHERE x IN ['a', 'b'])` (a literal list of strings or a `$param`) reads candidate vids from the index plus matching unflushed rows; the predicate is still applied. Not used inside a transaction, on a pinned snapshot or on a fork. `EXPLAIN` shows it as `INVERTED`.
 
 ---
 
@@ -320,7 +332,7 @@ The query planner pushes predicates in this priority order:
 |----------|-------|--------|------------|
 | 1 | **UID Index** | `n._uid = '...'` | O(1) hash |
 | 2 | **Scalar Index** | `n.prop = value`, `n.prop > value` | O(log N) |
-| 3 | **Full-Text Index** | `CONTAINS 'term'` | BM25 scored |
+| 3 | **JSON FTS / Inverted** | `doc[.path] CONTAINS 'term'`, `ANY(x IN n.list WHERE x IN [...])` | Candidate vids, predicate re-applied |
 | 4 | **Lance Columnar** | Arrow predicate pushdown | Columnar scan |
 | 5 | **Residual Filter** | Post-scan evaluation | O(N) |
 

@@ -353,12 +353,10 @@ pub async fn full_text_search_on_branch(
 ) -> Result<Vec<arrow_array::RecordBatch>> {
     use futures::TryStreamExt;
     use lance_index::scalar::FullTextSearchQuery;
-    use lance_index::scalar::inverted::query::MatchQuery;
 
     let on_branch = open_branch(uri, branch).await?;
-    let match_query = MatchQuery::new(query.to_string()).with_column(Some(column.to_string()));
     let fts_query = FullTextSearchQuery {
-        query: match_query.into(),
+        query: super::lance_fts::lance_query(column, query)?,
         limit: Some(k as i64),
         wand_factor: None,
     };

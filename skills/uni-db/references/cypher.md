@@ -506,6 +506,7 @@ CREATE INDEX idx_name FOR (p:Person) ON (p.name)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding) OPTIONS { metric: 'cosine' }
 CREATE FULLTEXT INDEX idx_content FOR (a:Article) ON EACH [a.content]
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
+CREATE INVERTED INDEX idx_tags FOR (d:Data) ON (d.tags) OPTIONS { normalize: true }
 DROP INDEX idx_name
 ```
 
@@ -565,7 +566,7 @@ CALL uni.fts.query(label, property, search_term, k [, filter] [, threshold] [, o
 YIELD node, vid, score, rerank_score
 ```
 
-BM25-based. `score` is `bm25 / (bm25 + fts_k)` (`options.fts_k`, default 1.0), in `[0, 1)`; `threshold` is a minimum `score`. Terms are OR-ed; `NOT` and phrase queries are not supported.
+BM25-based. `score` is `bm25 / (bm25 + fts_k)` (`options.fts_k`, default 1.0), in `[0, 1)`; `threshold` is a minimum `score`. A plain word list is OR-ed; `AND`, `OR`, `NOT` / `-word`, `"phrase"` and parentheses are interpreted (`AND` binds tighter than `OR`; operators only in upper case). A blank query matches nothing; an all-negated query or an unbalanced quote/parenthesis is an error. On a `JSON` column with a JSON full-text index it searches the document's string values.
 
 ### Hybrid Search
 

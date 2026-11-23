@@ -124,6 +124,23 @@
 - **Background jobs check the fence with `check()`, never `is_tripped()`**: only
   `check()` evaluates the lease deadline.
 
+## Index prefilters and derived columns — invariants
+- **A candidate prefilter must be a superset.** The inverted-index and JSON
+  full-text prefilters (`CandidatePrefilter` in `df_graph/scan.rs`) narrow a
+  scan to candidate vids and leave the predicate above the scan. A change to
+  either index may add candidates (stale terms, case folding, the
+  `OVER_CAP_TERM` posting) but never drop a match: union the unflushed rows,
+  and skip the prefilter where the index cannot vouch for the view (a
+  transaction or pinned snapshot, a fork).
+- **A JSON full-text index's `__jfts_<column>` text is computed at batch build,
+  never stored in L0** (`VertexDataset::build_record_batch_with_timestamps`),
+  so the content UID hashes the row as written. Backfill it in storage before
+  the catalog registers the column.
+- **An update of a flushed vertex keeps its stored `created_at`**:
+  `Writer::write_vertex_row` carries it into the L0 row (batched for SET/REMOVE
+  through `carry_stored_created_at`). Do not stamp an update with `now` when no
+  buffer knows the vertex.
+
 ## Fork system — current invariants (post Phase 7)
 
 The fork track shipped phases 0 through 7. This block captures the

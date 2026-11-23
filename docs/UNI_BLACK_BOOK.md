@@ -2710,17 +2710,28 @@ CALL uni.fts.query('Article', 'content', 'graph database', 10)
 YIELD node, score
 ```
 
+`CREATE FULLTEXT INDEX` `OPTIONS` are checked against the keys the planner reads (`FULLTEXT_INDEX_OPTIONS` in `planner.rs`: the tokenizer/analyzer keys plus `with_positions`, default `true`); an unknown key is an error rather than silently ignored, and the error points `normalize` / `max_terms_per_doc` at `CREATE INVERTED INDEX`.
+
+**Query syntax.** `backend::fts_query::parse_fts_query` parses a query into `FtsQueryNode` (`Term`, `Phrase`, `And`, `Or`, `Not`): adjacency and `OR` are OR, `AND` binds tighter, `NOT` / a leading `-` negate, `"..."` is a phrase, parentheses group; operators only in upper case. A blank query is `None` (no rows); a group whose every member is negated, an unbalanced quote or parenthesis, or an operator without an operand is an error, raised by `StorageManager::fts_search` before any read. A plain word list (`FtsQueryNode::is_plain`) keeps the original path: one OR `MatchQuery` of the original text. Anything else becomes Lance's `BooleanQuery` / `PhraseQuery` / `MatchQuery` tree (`lance_fts::lance_query`; a negated member is the group's `MUST_NOT`) for the index-covered fragments, and is evaluated by `lance_fts::score_structured` for the rows Lance's flat pass would score (fragments the index does not cover, unflushed rows, schemaless corpora): statistics come from the positive tokens (`positive_text`) through the same flat pass, a leaf scores `idf * doc_weight(freq, len)` summed over its tokens, a phrase matches on token positions, a group sums its matching positive members. Lance's error for a phrase on an index without positions is rewritten to name the index.
+
 ### JSON FTS Indexes
 
-Full-text search on nested JSON/JSONB properties:
+Full-text search on the string values of a `JSON` property:
 
 ```cypher
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
+  OPTIONS { with_positions: true, paths: ['title', 'author.name'] }
 ```
+
+The index is built on a derived text column, `__jfts_<column>` (`JsonFtsIndexConfig::derived_column`, a reserved `RESERVED_PROPERTY_PREFIXES` name, hidden from user properties), holding `json_fts_text` of the value: every string value, recursively through maps (keys sorted) and lists, one per line, under `paths` when given. The column is never stored in L0: `VertexDataset::build_record_batch_with_timestamps` computes it from the source value for every label-table write (flush, bulk, compaction, label backfill), after the content UID is hashed from the row's own properties, so the UID is unaffected. `IndexManager::create_json_fts_index` backfills flushed rows first (head backend, table write lock across scan and `replace_table_atomic`, target schema = live schema plus the column), then registers the column in the catalog (storage first, catalog second), then builds the Lance FTS index on it; the deferred build at flush (`ensure_declared_indexes`) skips the backfill when the column was registered before the table existed.
+
+`uni.fts.query` on the JSON column searches the derived column, and reduces unflushed documents with the same `json_fts_text`. `d.metadata[.path] CONTAINS 'x'` (literal or parameter) on an `Online` index covering the path is a candidate prefilter (`CandidatePrefilter::JsonText`): vids whose stored text column contains the term (any stored version, `StringMatch` filter) plus unflushed vertices whose document text contains it; the predicate stays in the `Filter` above the scan. Not used inside a transaction, on a pinned snapshot or a fork, or for a term the storage filter cannot render (`%`, `_`).
 
 ### Inverted Indexes
 
-Term-to-VID mapping intended for `ANY(x IN list WHERE x IN allowed)` query patterns. Currently the planner never emits an inverted-index lookup (`LogicalPlan::InvertedIndexLookup` is not constructed), so these patterns run as scans; and `CREATE FULLTEXT INDEX ... OPTIONS {normalize, max_terms_per_doc}` builds a FULLTEXT index and ignores those options.
+Term-to-VID mapping for `ANY(x IN list WHERE x IN allowed)` on `LIST<STRING>` properties, declared with `CREATE INVERTED INDEX name [IF NOT EXISTS] FOR (n:L) ON (n.p) [OPTIONS {normalize, max_terms_per_doc}]` (other keys refused) or `uni.schema.createIndex(..., {type: 'INVERTED'})`.
+
+**Planner use (candidate prefilter).** `IndexAwareAnalyzer` records `ANY(x IN n.p WHERE x IN <string-literal list | $param>)` on an `Online` inverted index in `PushdownStrategy::inverted_prefilters`. The conjunct is not Lance-pushable, so it stays in the `Filter` above the `Scan`; `plan_filter` plans that scan with `plan_scan_hinted`, and `GraphScanExec` resolves `CandidatePrefilter::Inverted` at execute time (`ResolveCandidates` state): `InvertedIndex::query_any` plus every unflushed vertex of the label whose list holds a term (or that has no L0 property row), intersected with any vid list, then the ordinary vid-list scan path. No candidates means no rows. The predicate is evaluated over the candidates, so the index only has to be a superset: it keeps a vid under terms it no longer holds until the vid is deleted, folds case when it normalizes, and lists a document with more than `max_terms_per_doc` distinct terms under its first terms plus `OVER_CAP_TERM`, which every query also reads. Skipped inside a transaction, on a pinned snapshot or a fork (the postings follow primary's newest state; a vertex deleted since a pinned version is gone from them), and when a term is not a string. EXPLAIN reports `INVERTED`; PROFILE counts the lookup in the scan's `index_hits`; the physical plan shows `inverted_prefilter=`. `LogicalPlan::InvertedIndexLookup` remains unconstructed.
 
 ```rust
 InvertedIndex {
@@ -3606,7 +3617,7 @@ through the projection as a passthrough column. Pinned by
 
 **Semantics:**
 
-- `created_at` is set when the row is first inserted and never changes afterward.
+- `created_at` is set when the row is first inserted and never changes afterward. An update of a flushed vertex writes a new L0 row, so it carries the stored stamp in: `Writer::write_vertex_row` (update path) takes it from `L0Buffer::stored_created_at_hints` when `carry_stored_created_at` read it in one batch for a `SET` / `REMOVE` statement's prefetched vertices, else from one `MainVertexDataset::find_created_at_by_vids` lookup when no buffer in the chain stamps the vertex, and passes it to `L0Buffer::update_vertex_with_labels_created`, whose WAL record carries it too. The flush then writes the original stamp; compaction keeps the earliest across a vertex's rows.
 - `updated_at` is set at creation and bumped on every subsequent write that touches the row — including label changes, property updates, and same-value `SET`s. Idempotent `MERGE ... ON MATCH SET` will keep advancing it.
 - Both columns are visible inside the writing transaction (uncommitted writes see their own timestamps).
 - A row keeps its transaction's `created_at` at commit: `L0Buffer::merge_validated` takes the earliest `created_at` and never lets `updated_at` fall below it.
@@ -5197,7 +5208,7 @@ CALL uni.fts.query(label, property, search_term, k [, filter] [, threshold] [, o
 YIELD node, vid, score, rerank_score
 ```
 
-BM25-based full-text search. `score` is BM25 squashed to [0, 1) as `bm25 / (bm25 + fts_k)` (`fts_k` defaults to 1.0 and is set with `options.fts_k`); `threshold` is a minimum on that scale. Supports optional cross-encoder reranking via the `options` map; without a reranker `rerank_score` is NULL. Query terms are combined with OR; currently `NOT` and phrase queries have no effect.
+BM25-based full-text search. `score` is BM25 squashed to [0, 1) as `bm25 / (bm25 + fts_k)` (`fts_k` defaults to 1.0 and is set with `options.fts_k`); `threshold` is a minimum on that scale. Supports optional cross-encoder reranking via the `options` map; without a reranker `rerank_score` is NULL. A plain word list is OR'd; `AND`, `OR`, `NOT` / `-term`, `"phrases"` and parentheses are interpreted, on flushed and unflushed rows alike (see [Full-Text Indexes](#full-text-indexes-bm25)). On a `JSON` column with a JSON full-text index the search runs over the index's derived text column.
 
 ```cypher
 CALL uni.fts.query('Article', 'content', 'distributed graph database', 10)
@@ -5970,6 +5981,7 @@ CREATE INDEX idx_name FOR (p:Person) ON (p.name)
 CREATE VECTOR INDEX idx_embed FOR (d:Document) ON (d.embedding) OPTIONS { metric: 'cosine' }
 CREATE FULLTEXT INDEX idx_content FOR (a:Article) ON EACH [a.content]
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
+CREATE INVERTED INDEX idx_tags FOR (d:Data) ON (d.tags) OPTIONS { normalize: true }
 DROP INDEX idx_name
 ```
 

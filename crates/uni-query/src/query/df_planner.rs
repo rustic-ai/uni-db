@@ -982,6 +982,7 @@ impl HybridPhysicalPlanner {
             | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -1934,6 +1935,7 @@ impl HybridPhysicalPlanner {
             // DDL operations should be handled separately
             LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -2151,6 +2153,108 @@ impl HybridPhysicalPlanner {
     /// Returns `None` when no indexed predicate exists or any parameter of an
     /// indexed equality fails to resolve — in that case the planner falls back
     /// to the regular post-scan `FilterExec`. See issue #57.
+    /// The index candidate prefilter for a scan of `variable` (C11, C24): an
+    /// inverted index's terms for an `ANY(x IN n.p WHERE x IN …)` conjunct,
+    /// else a JSON full-text index's text for a `CONTAINS` on the column or a
+    /// path in it, with parameters resolved.
+    ///
+    /// `None` when there is no such conjunct; when an inverted term is not a
+    /// string (the index holds string terms only, so it could not vouch for a
+    /// non-string match); when a `CONTAINS` term is not a string or is one the
+    /// storage filter cannot render exactly (`%`, `_`); or when the view is
+    /// pinned (a transaction included) or forked: the postings are maintained
+    /// for primary's newest state, and a vertex deleted since a pinned version
+    /// is gone from them while that version still sees it.
+    fn candidate_prefilter(
+        &self,
+        filter: Option<&Expr>,
+        variable: &str,
+        label_id: u16,
+    ) -> Option<crate::query::df_graph::scan::CandidatePrefilter> {
+        use crate::query::df_graph::scan::CandidatePrefilter;
+        let filter = filter?;
+        let storage = self.graph_ctx.storage();
+        if storage.version_high_water_mark().is_some() || storage.fork_scope().is_some() {
+            return None;
+        }
+        let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
+        let strategy = analyzer.analyze(filter, variable, label_id);
+        let inverted = strategy
+            .inverted_prefilters
+            .into_iter()
+            .find_map(|(property, list)| {
+                let values: Vec<uni_common::Value> = match &list {
+                    Expr::List(items) => items
+                        .iter()
+                        .map(|item| match item {
+                            Expr::Literal(lit) => Some(lit.to_value()),
+                            _ => None,
+                        })
+                        .collect::<Option<_>>()?,
+                    Expr::Parameter(name) => match self.params.get(name)? {
+                        uni_common::Value::List(items) => items.clone(),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let mut terms = Vec::with_capacity(values.len());
+                for value in values {
+                    match value {
+                        uni_common::Value::String(s) => terms.push(s),
+                        // `x IN [null]` is never true.
+                        uni_common::Value::Null => {}
+                        _ => return None,
+                    }
+                }
+                Some(CandidatePrefilter::Inverted { property, terms })
+            });
+        if inverted.is_some() {
+            return inverted;
+        }
+        let label_name = self.schema.label_name_by_id(label_id)?;
+        strategy
+            .json_fts_predicates
+            .into_iter()
+            .find_map(|(column, term, _path)| {
+                let term = match &term {
+                    Expr::Literal(uni_cypher::ast::CypherLiteral::String(s)) => s.clone(),
+                    Expr::Parameter(name) => self.params.get(name)?.as_str()?.to_string(),
+                    _ => return None,
+                };
+                let cfg = self.schema.indexes.iter().find_map(|idx| match idx {
+                    uni_common::core::schema::IndexDefinition::JsonFullText(cfg)
+                        if cfg.label == *label_name && cfg.column == column =>
+                    {
+                        Some(cfg)
+                    }
+                    _ => None,
+                })?;
+                let derived = cfg.derived_column();
+                if !self
+                    .schema
+                    .properties
+                    .get(label_name)
+                    .is_some_and(|p| p.contains_key(&derived))
+                {
+                    return None;
+                }
+                // The storage filter must render the substring exactly.
+                uni_store::backend::types::FilterExpr::StringMatch {
+                    column: derived.clone(),
+                    kind: uni_store::backend::types::StringMatchKind::Contains,
+                    pattern: term.clone(),
+                }
+                .to_sql()
+                .ok()?;
+                Some(CandidatePrefilter::JsonText {
+                    source: column,
+                    derived,
+                    paths: cfg.paths.clone(),
+                    term,
+                })
+            })
+    }
+
     fn build_indexed_property_pushdown(
         &self,
         filter: Option<&Expr>,
@@ -2845,6 +2949,21 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.plan_scan_hinted(label_id, variable, filter, optional, all_properties, None)
+    }
+
+    /// [`Self::plan_scan`], with the index candidate prefilter a `Filter`
+    /// directly above found in its predicate (`candidates`), which the scan's
+    /// own filter does not carry.
+    fn plan_scan_hinted(
+        &self,
+        label_id: u16,
+        variable: &str,
+        filter: Option<&Expr>,
+        optional: bool,
+        all_properties: &HashMap<String, HashSet<String>>,
+        candidates: Option<crate::query::df_graph::scan::CandidatePrefilter>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         // Virtual label: dispatch to a `CatalogVertexScanExec` that wraps
         // the plugin-registered `CatalogTable` (M5 follow-up #6). The
         // plan caches the virtual id, not the table — every execute
@@ -2976,6 +3095,17 @@ impl HybridPhysicalPlanner {
             && vids.len() > 1
         {
             scan_exec = scan_exec.with_vid_list_filter(vids);
+        }
+
+        // `ANY(x IN n.p WHERE x IN <list>)` on an inverted-indexed property,
+        // or `CONTAINS` on a JSON full-text-indexed column: the index's vids,
+        // plus the matching unflushed rows, become the scan's candidate vids
+        // at execute time. The predicate stays in the Cypher filter applied
+        // above the scan.
+        if let Some(prefilter) =
+            candidates.or_else(|| self.candidate_prefilter(filter, variable, label_id))
+        {
+            scan_exec = scan_exec.with_candidate_prefilter(prefilter);
         }
 
         // Indexed-property pushdown — issue #57. Detect equality / IN
@@ -5056,7 +5186,33 @@ impl HybridPhysicalPlanner {
             return Ok(plan);
         }
 
-        let input_plan = self.plan_internal(input, all_properties)?;
+        // `ANY(x IN n.p WHERE x IN …)` and a `CONTAINS` on a JSON path stay
+        // in this filter (its compiler is the only one that handles
+        // quantifiers and nested property access), but the scan below can
+        // read their candidates from an index (C11, C24).
+        let inverted_scan = match input {
+            LogicalPlan::Scan {
+                label_id,
+                labels,
+                variable,
+                filter,
+                optional: false,
+            } if labels.len() <= 1 => self
+                .candidate_prefilter(Some(predicate), variable, *label_id)
+                .map(|hint| (*label_id, variable, filter, hint)),
+            _ => None,
+        };
+        let input_plan = match inverted_scan {
+            Some((label_id, variable, filter, hint)) => self.plan_scan_hinted(
+                label_id,
+                variable,
+                filter.as_ref(),
+                false,
+                all_properties,
+                Some(hint),
+            )?,
+            None => self.plan_internal(input, all_properties)?,
+        };
         let input_width = input_plan.schema().fields().len();
         // An unresolved `startNode(r)` in the predicate reads `r`'s endpoint
         // from a hydrated column, as it does in a projection
@@ -9474,6 +9630,7 @@ pub(crate) fn collect_variable_kinds(
         LogicalPlan::Empty
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateInvertedIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }
         | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -9586,6 +9743,7 @@ fn collect_mutation_node_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::OuterRow { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateInvertedIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }
         | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -9717,6 +9875,7 @@ fn collect_mutation_edge_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::OuterRow { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateInvertedIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }
         | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -10068,6 +10227,7 @@ fn collect_plan_variables_into(plan: &LogicalPlan, out: &mut HashSet<String>) {
         LogicalPlan::Empty
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateInvertedIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }
         | LogicalPlan::CreateJsonFtsIndex { .. }

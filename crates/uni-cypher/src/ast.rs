@@ -35,6 +35,7 @@ pub enum SchemaCommand {
     CreateFullTextIndex(CreateFullTextIndex),
     CreateScalarIndex(CreateScalarIndex),
     CreateJsonFtsIndex(CreateJsonFtsIndex),
+    CreateInvertedIndex(CreateInvertedIndex),
     DropIndex(DropIndex),
     CreateConstraint(CreateConstraint),
     DropConstraint(DropConstraint),
@@ -75,6 +76,17 @@ pub struct CreateFullTextIndex {
     pub name: String,
     pub label: String,
     pub properties: Vec<String>,
+    pub options: HashMap<String, Value>,
+    pub if_not_exists: bool,
+}
+
+/// `CREATE INVERTED INDEX name FOR (n:Label) ON (n.prop) [OPTIONS {...}]`:
+/// a term-to-vid index over a `LIST<STRING>` property.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateInvertedIndex {
+    pub name: String,
+    pub label: String,
+    pub property: String,
     pub options: HashMap<String, Value>,
     pub if_not_exists: bool,
 }

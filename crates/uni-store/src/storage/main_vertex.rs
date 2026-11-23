@@ -849,6 +849,93 @@ impl MainVertexDataset {
         Ok(props_map)
     }
 
+    /// The stored `_created_at` of each live vertex in `vids`, in nanoseconds
+    /// since the epoch.
+    ///
+    /// A vertex has one row per flushed version until compaction, and an
+    /// update's row is stamped in its own flush window, so a later row can
+    /// carry a later `created_at`: the earliest over the vertex's live rows is
+    /// its creation time (compaction keeps the same minimum). A vid whose
+    /// latest row is a tombstone is omitted, as is one with no stamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails.
+    pub async fn find_created_at_by_vids(
+        backend: &dyn StorageBackend,
+        vids: &[Vid],
+        version: impl IntoRowVisibility,
+    ) -> Result<HashMap<Vid, i64>> {
+        let version = version.into_row_visibility();
+        let table_name = table_names::main_vertex_table_name();
+        if vids.is_empty() || !backend.table_exists(table_name).await? {
+            return Ok(HashMap::new());
+        }
+        let filter = with_version_bound(
+            FilterExpr::one_of("_vid", vids.iter().map(|v| Scalar::UInt(v.as_u64()))),
+            &version,
+        );
+        let results = backend
+            .scan(
+                ScanRequest::all(table_name)
+                    .with_filter(filter)
+                    .with_columns(vec![
+                        "_vid".to_string(),
+                        "_version".to_string(),
+                        "_deleted".to_string(),
+                        "_created_at".to_string(),
+                    ]),
+            )
+            .await?;
+
+        // Per vid: (latest version, latest is a tombstone, earliest stamp).
+        let mut seen: HashMap<Vid, (u64, bool, Option<i64>)> = HashMap::new();
+        for batch in &results {
+            let (Some(vid_arr), Some(ver_arr)) = (
+                batch
+                    .column_by_name("_vid")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                batch
+                    .column_by_name("_version")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+            ) else {
+                continue;
+            };
+            let deleted = batch
+                .column_by_name("_deleted")
+                .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+            let created = batch
+                .column_by_name("_created_at")
+                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>());
+            for i in 0..batch.num_rows() {
+                if vid_arr.is_null(i) {
+                    continue;
+                }
+                let vid = Vid::new(vid_arr.value(i));
+                let row_version = if ver_arr.is_null(i) {
+                    0
+                } else {
+                    ver_arr.value(i)
+                };
+                let row_deleted = deleted.is_some_and(|d| d.is_valid(i) && d.value(i));
+                let stamp = created.filter(|c| c.is_valid(i)).map(|c| c.value(i));
+                let entry = seen.entry(vid).or_insert((row_version, row_deleted, None));
+                if row_version > entry.0 || (row_version == entry.0 && row_deleted) {
+                    entry.0 = row_version;
+                    entry.1 = row_deleted;
+                }
+                if !row_deleted && let Some(ts) = stamp {
+                    entry.2 = Some(entry.2.map_or(ts, |cur| cur.min(ts)));
+                }
+            }
+        }
+        Ok(seen
+            .into_iter()
+            .filter(|(_, (_, deleted, _))| !*deleted)
+            .filter_map(|(vid, (_, _, stamp))| stamp.map(|ts| (vid, ts)))
+            .collect())
+    }
+
     /// Find properties for a vertex by VID in the main vertices table.
     ///
     /// Returns the props_json parsed into a Properties HashMap if found.

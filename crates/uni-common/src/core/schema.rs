@@ -2943,10 +2943,11 @@ pub const RESERVED_PROPERTY_NAMES: &[&str] = &[
 /// [`RESERVED_PROPERTY_NAMES`].
 ///
 /// `_gen_` names the columns of generated (expression-index) properties,
-/// `__fde_` a MUVERA index's derived vector column, and `__alias_of__` the
-/// alias marker the planner records in a variable's property set. Each is a
-/// family of names created by the engine, so a prefix is the exact rule.
-pub const RESERVED_PROPERTY_PREFIXES: &[&str] = &["_gen_", "__fde_", "__alias_of__"];
+/// `__fde_` a MUVERA index's derived vector column, `__jfts_` a JSON
+/// full-text index's derived text column, and `__alias_of__` the alias marker
+/// the planner records in a variable's property set. Each is a family of
+/// names created by the engine, so a prefix is the exact rule.
+pub const RESERVED_PROPERTY_PREFIXES: &[&str] = &["_gen_", "__fde_", "__jfts_", "__alias_of__"];
 
 /// Whether `name` is reserved by the engine rather than a user property.
 ///

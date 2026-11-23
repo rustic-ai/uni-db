@@ -1519,6 +1519,7 @@ impl Executor {
             | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -1566,6 +1567,7 @@ impl Executor {
             // Index operations
             LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
+            | LogicalPlan::CreateInvertedIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
             | LogicalPlan::CreateScalarIndex { .. }
             | LogicalPlan::CreateJsonFtsIndex { .. }
@@ -3003,6 +3005,17 @@ impl Executor {
                     }
                     let idx_mgr = self.storage.index_manager();
                     idx_mgr.create_fts_index(config).await?;
+                    Ok(vec![])
+                }
+                LogicalPlan::CreateInvertedIndex {
+                    config,
+                    if_not_exists,
+                } => {
+                    if if_not_exists && self.index_exists_by_name(&config.name) {
+                        return Ok(vec![]);
+                    }
+                    let idx_mgr = self.storage.index_manager();
+                    idx_mgr.create_inverted_index(config).await?;
                     Ok(vec![])
                 }
                 LogicalPlan::CreateScalarIndex {
@@ -4934,12 +4947,9 @@ impl Executor {
     /// Check if an index with the given name exists.
     pub(crate) fn index_exists_by_name(&self, name: &str) -> bool {
         let schema = self.storage.schema_manager().schema();
-        schema.indexes.iter().any(|idx| match idx {
-            uni_common::core::schema::IndexDefinition::Vector(c) => c.name == name,
-            uni_common::core::schema::IndexDefinition::FullText(c) => c.name == name,
-            uni_common::core::schema::IndexDefinition::Scalar(c) => c.name == name,
-            _ => false,
-        })
+        // Every kind: `IF NOT EXISTS` on an inverted, JSON full-text or
+        // sparse index replaced it when only three kinds were matched.
+        schema.indexes.iter().any(|idx| idx.name() == name)
     }
 
     pub(crate) async fn detach_delete_vertex(

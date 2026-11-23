@@ -38,6 +38,11 @@ Add new changes here.
 - **Python:** `PromoteReport.vertices_skipped_no_uid` is removed; it was always 0.
 - **Plugins:** a WASM or Extism load the registrar refuses raises `InvalidArgument` naming the capability, as other loaders do.
 - **Examples:** the PyO3 and Rhai plugin examples build against the current pyo3, arrow and datafusion.
+- **Search:** the planner serves `ANY(x IN n.p WHERE x IN <list|$param>)` from an Online inverted index as a candidate prefilter, unflushed rows included, with the predicate re-applied. New `CREATE INVERTED INDEX ... OPTIONS {normalize, max_terms_per_doc}` DDL.
+- **Search:** unknown OPTIONS keys on FULLTEXT, INVERTED and JSON FULLTEXT indexes are refused, and `IF NOT EXISTS` no longer replaces an inverted, JSON full-text or sparse index.
+- **Search:** `uni.fts.query` interprets `AND`, `OR`, `NOT`/`-term`, quoted phrases and parentheses, on flushed, unflushed and schemaless rows. A blank query matches nothing; an all-negated or malformed query is an error, as is a phrase on an index without positions. FULLTEXT accepts `with_positions`.
+- **Search:** JSON full-text indexes keep a derived text column of the document's string values (optionally limited by `paths`), filled at flush and backfilled on creation. `uni.fts.query` searches JSON columns, and `CONTAINS` on a JSON column or path is prefiltered from it.
+- **Storage:** a `SET`, `REMOVE` or `MERGE ... ON MATCH SET` on a flushed vertex keeps its `created_at`, before and after the next flush.
 - **OGM:** a `Vector[N] | None` field is a nullable vector column, so saving a node without a vector no longer fails with "cannot be null".
 - **OGM:** `SparseVector[N]` fields are saved as `uni_db.SparseVector`; a `TypeMappingError` is raised if the bindings lack that class.
 - **OGM:** `tx.create_edge` accepts nodes added to the same transaction (sync and async). A failed commit clears the vid, session and identity-map entry of the nodes it had created.

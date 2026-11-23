@@ -51,12 +51,11 @@ Defaults taken where the choice was minor:
 | C2, C13, C14, C17, C18/C25, C19, C22, C27 | Fixed (temporal subtraction, BTIC range, pow and shifts, schemaless hop warning, windows in `WITH` and over groups, index and constraint listings, `similar_to` sparse and multi-vector, vector dimension required). C22's cause was the sparse parameter encoding in `value_to_scalar`. |
 | C3, C4, C15, C16 | Fixed (DDL `DEFAULT` for new writes, with an explicit `NULL` kept; sparse map literals canonicalized; timestamps ordered and present on schemaless labels and edges; DROP refused while data exists, counted by a query over the statement's own view) |
 | C5, C9, C10, C23/C33, C26, C31, C34 (rule removal) | Fixed (`USE` resolves registered modules; NEW node properties stored; REQUIRE direction from the registry; CALIBRATE features by position and node inputs as vids; session params in Locy; `MCOUNT(*)`; removal names dependents). Also fixed: C37, C38. |
-| C36 | Open: a `SET` on a flushed vertex resets its `created_at` |
+| C11, C12, C24, C36 | Fixed (inverted-index prefilter and `CREATE INVERTED INDEX`, OPTIONS validation; full FTS query syntax; JSON FTS derived text column; `created_at` carried into updates of flushed vertices). Open follow-ups: unflushed rows of a label with no table yet are scored without case folding; inverted postings keep stale terms for updated rows; a dropped JSON full-text index leaves its hidden `__jfts_` column. |
 | C6, C7, C8, C30 | Fixed (OGM nullable and sparse vectors, edges on pending nodes, `uni import` name) |
 | C21 | Not a defect: ids are intended; declared yield type corrected |
 | C20 `fork_info` | Kept as documented (Python returns `None`) |
 | C1, C20 (promote), C28, C29, C32, C34 (load error), C35; fork diff pairing | Fixed (tagged drop refused with `ForkTagged` and recovery keeps the tombstone; promote on a read-only handle raises `ReadOnly`; `tag_fork` flushes first; promote dedups unflushed primary rows; plugin examples build; WASM and Extism registrar refusals typed; tags scoped to their fork; diff pairs edits by `(label, ext_id)` and by id under lineage). C29's cause was not the one recorded below: the gap was a vertex primary committed after the fork point but had not flushed, with the same content written on the fork, whose flush registered its own vid for the UID. |
-| All others | Open |
 
 ## 1. Code defects found (the docs describe the intended behaviour)
 

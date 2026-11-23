@@ -308,7 +308,7 @@ YIELD node, score, rerank_score, vid
 | `threshold` | Float | No | Minimum `score` |
 | `options` | Map | No | `fts_k` (BM25 saturation, default 1.0) plus reranker configuration (see [Section 12](#12-cross-encoder-reranking)) |
 
-`score` is BM25 squashed to `[0, 1)` as `bm25 / (bm25 + fts_k)`; it is not relative to the top match. Query terms are OR-ed (a document matching any term is returned); `NOT` and quoted phrase queries are not supported.
+`score` is BM25 squashed to `[0, 1)` as `bm25 / (bm25 + fts_k)`; it is not relative to the top match. A plain list of words is OR-ed (a document matching any term is returned). The query also takes `AND`, `OR`, `NOT word` / `-word`, `"quoted phrases"` and parentheses; `AND` binds tighter than `OR` and adjacency, and the operators are recognised only in upper case. Negated terms exclude but do not score. A blank query returns nothing; a query (or group) of only negated terms, an unbalanced quote or parenthesis, or a dangling operator is an error; a phrase on an index without positions (n-gram) is an error. Flushed, unflushed and schemaless rows get the same semantics.
 
 ```cypher
 CALL uni.fts.query('Article', 'content', 'distributed graph database', 10)
@@ -607,7 +607,7 @@ Index is built automatically on creation over existing data. No manual `rebuild_
 CREATE JSON FULLTEXT INDEX idx_meta FOR (d:Data) ON metadata
 ```
 
-Enables full-text search on nested JSON/JSONB property values.
+Indexes the string values of the `JSON` property (optionally only those under `OPTIONS { paths: [...] }`) in a derived text column. `uni.fts.query('Data', 'metadata', ...)` searches it, and `d.metadata.path CONTAINS 'x'` is prefiltered from it, with the predicate re-applied.
 
 ### CONTAINS Predicate
 

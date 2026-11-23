@@ -309,6 +309,13 @@ pub struct L0Buffer {
     pub vertex_created_at: HashMap<Vid, i64>,
     /// Vertex update timestamps (nanoseconds since epoch)
     pub vertex_updated_at: HashMap<Vid, i64>,
+    /// Stored `created_at` stamps of flushed vertices a statement is about
+    /// to update, read in one batch ahead of the writes
+    /// ([`crate::runtime::writer::Writer::carry_stored_created_at`]). An
+    /// update takes its vertex's stamp from here instead of reading storage
+    /// per row. Never merged or flushed: the update moves the stamp into
+    /// `vertex_created_at`.
+    pub stored_created_at_hints: HashMap<Vid, i64>,
     /// Edge creation timestamps (nanoseconds since epoch)
     pub edge_created_at: HashMap<Eid, i64>,
     /// Edge update timestamps (nanoseconds since epoch)
@@ -454,6 +461,7 @@ impl Clone for L0Buffer {
             unpublished_bulk_at_rotation: self.unpublished_bulk_at_rotation.clone(),
             vertex_created_at: self.vertex_created_at.clone(),
             vertex_updated_at: self.vertex_updated_at.clone(),
+            stored_created_at_hints: self.stored_created_at_hints.clone(),
             edge_created_at: self.edge_created_at.clone(),
             edge_updated_at: self.edge_updated_at.clone(),
             // The memo is not copied (below), so neither is its charge.
@@ -803,6 +811,7 @@ impl L0Buffer {
             unpublished_bulk_at_rotation: Vec::new(),
             vertex_created_at: HashMap::new(),
             vertex_updated_at: HashMap::new(),
+            stored_created_at_hints: HashMap::new(),
             edge_created_at: HashMap::new(),
             edge_updated_at: HashMap::new(),
             estimated_size: 0,
@@ -855,7 +864,7 @@ impl L0Buffer {
         labels: &[String],
     ) {
         let props_count = properties.values().filter(|v| !v.is_null()).count();
-        self.insert_vertex_with_labels_impl(vid, properties, labels, false);
+        self.insert_vertex_with_labels_impl(vid, properties, labels, false, None);
         self.mutation_stats.nodes_created += 1;
         self.mutation_stats.labels_added += labels.len();
         self.mutation_stats.properties_set += props_count;
@@ -880,7 +889,21 @@ impl L0Buffer {
         properties: Properties,
         labels: &[String],
     ) {
-        self.insert_vertex_with_labels_impl(vid, properties, labels, false);
+        self.insert_vertex_with_labels_impl(vid, properties, labels, false, None);
+    }
+
+    /// [`Self::update_vertex_with_labels`] for a vertex whose stored
+    /// `created_at` the caller read: the row keeps that stamp (or this
+    /// buffer's, if earlier) instead of taking the update's clock, and the WAL
+    /// record carries it so a replay keeps it too.
+    pub fn update_vertex_with_labels_created(
+        &mut self,
+        vid: Vid,
+        properties: Properties,
+        labels: &[String],
+        stored_created_at: Option<i64>,
+    ) {
+        self.insert_vertex_with_labels_impl(vid, properties, labels, false, stored_created_at);
     }
 
     /// Core vertex insertion. When `skip_wal` is true, skips WAL append
@@ -891,10 +914,15 @@ impl L0Buffer {
         properties: Properties,
         labels: &[String],
         skip_wal: bool,
+        stored_created_at: Option<i64>,
     ) {
         self.current_version += 1;
         let version = self.current_version;
         let now = now_nanos();
+        // The creation stamp this write proposes: the stored row's when the
+        // caller supplied it (an update of a flushed vertex), else this write's
+        // clock. `apply_vertex_write` keeps the earlier of it and the buffer's.
+        let created = stored_created_at.map_or(now, |ts| ts.min(now));
 
         if !skip_wal && let Some(wal) = &self.wal {
             let _ = wal.append(Mutation::InsertVertex {
@@ -904,12 +932,16 @@ impl L0Buffer {
                 // Both stamped with this write's `now`; replay applies
                 // `or_insert` to `created_at`, reproducing the live
                 // "oldest wins" rule in `apply_vertex_write`.
-                created_at: Some(now),
+                created_at: Some(
+                    self.vertex_created_at
+                        .get(&vid)
+                        .map_or(created, |c| (*c).min(created)),
+                ),
                 updated_at: Some(now),
             });
         }
 
-        self.apply_vertex_write(vid, properties, labels, version, now);
+        self.apply_vertex_write(vid, properties, labels, version, now, created);
     }
 
     /// Shared body of the vertex-write paths: clear the tombstone,
@@ -924,6 +956,7 @@ impl L0Buffer {
         labels: &[String],
         version: u64,
         now: i64,
+        created: i64,
     ) {
         self.vertex_tombstones.remove(&vid);
 
@@ -946,8 +979,11 @@ impl L0Buffer {
         }
         self.vertex_versions.insert(vid, version);
 
-        // Set timestamps - created_at only set if this is a new vertex
-        self.vertex_created_at.entry(vid).or_insert(now);
+        // Timestamps: the earliest creation stamp this buffer has seen for the
+        // vertex (a stored one carried in by an update included), the latest
+        // update.
+        let created_at = self.vertex_created_at.entry(vid).or_insert(created);
+        *created_at = (*created_at).min(created);
         self.vertex_updated_at.insert(vid, now);
 
         // Track labels — always create an entry so unlabeled vertices are
@@ -1782,7 +1818,7 @@ impl L0Buffer {
 
         for (vid, props) in vertex_props {
             let labels = other.vertex_labels.get(&vid).cloned().unwrap_or_default();
-            self.insert_vertex_with_labels_impl(vid, props, &labels, true);
+            self.insert_vertex_with_labels_impl(vid, props, &labels, true, None);
         }
 
         // Merge vertex labels that might not have properties

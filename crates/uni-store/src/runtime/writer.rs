@@ -4226,6 +4226,14 @@ impl Writer {
         )
         .await?;
 
+        // An update keeps the vertex's creation stamp: a flushed vertex's comes
+        // from storage, since no buffer holds it.
+        let stored_created_at = if create {
+            None
+        } else {
+            self.stored_created_at_for_update(vid, tx_l0).await?
+        };
+
         // Clone properties and labels before moving into L0 to return them and populate constraint index
         let properties_copy = properties.clone();
         let labels_copy = labels.to_vec();
@@ -4258,7 +4266,12 @@ impl Writer {
             if create {
                 l0_guard.insert_vertex_with_labels(vid, properties, labels);
             } else {
-                l0_guard.update_vertex_with_labels(vid, properties, labels);
+                l0_guard.update_vertex_with_labels_created(
+                    vid,
+                    properties,
+                    labels,
+                    stored_created_at,
+                );
             }
 
             // Populate constraint index for O(1) duplicate detection
@@ -4321,6 +4334,84 @@ impl Writer {
             log::warn!("Slow insert_vertex: {}ms", start.elapsed().as_millis());
         }
         Ok(properties_copy)
+    }
+
+    /// Whether a buffer this write sees (its transaction's, the current one,
+    /// or one being flushed) already holds `vid`'s creation stamp.
+    fn created_at_in_buffers(&self, vid: Vid, tx_l0: Option<&Arc<RwLock<L0Buffer>>>) -> bool {
+        tx_l0
+            .cloned()
+            .into_iter()
+            .chain(std::iter::once(self.l0_manager.get_current()))
+            .chain(self.l0_manager.get_pending_flush())
+            .any(|l0| l0.read().vertex_created_at.contains_key(&vid))
+    }
+
+    /// The flushed creation stamps of `vids`: the earliest over each live
+    /// vertex's stored rows.
+    async fn find_stored_created_at(&self, vids: &[Vid]) -> Result<HashMap<Vid, i64>> {
+        crate::storage::main_vertex::MainVertexDataset::find_created_at_by_vids(
+            self.storage.backend(),
+            vids,
+            self.storage.row_visibility(),
+        )
+        .await
+    }
+
+    /// The stored `created_at` an update of `vid` must keep, or `None` when
+    /// a buffer already holds the vertex's stamp (or storage has none).
+    ///
+    /// An update of a flushed vertex writes a new L0 row, which would
+    /// otherwise be stamped with the update's clock, and the flush and scans
+    /// take the L0 stamp. Served from a hint
+    /// [`Self::carry_stored_created_at`] left, else read from storage.
+    async fn stored_created_at_for_update(
+        &self,
+        vid: Vid,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<Option<i64>> {
+        if let Some(ts) = self
+            .resolve_l0(tx_l0)
+            .write()
+            .stored_created_at_hints
+            .remove(&vid)
+        {
+            return Ok(Some(ts));
+        }
+        if self.created_at_in_buffers(vid, tx_l0) {
+            return Ok(None);
+        }
+        Ok(self.find_stored_created_at(&[vid]).await?.remove(&vid))
+    }
+
+    /// Read the stored `created_at` of every vertex in `vids` no buffer
+    /// stamps, in one storage read, ahead of a statement that updates them,
+    /// so each update keeps its vertex's stamp without a read per row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage read fails.
+    pub async fn carry_stored_created_at(
+        &self,
+        vids: &[Vid],
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<()> {
+        let unknown: Vec<Vid> = vids
+            .iter()
+            .copied()
+            .filter(|vid| !self.created_at_in_buffers(*vid, tx_l0))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let found = self.find_stored_created_at(&unknown).await?;
+        if !found.is_empty() {
+            self.resolve_l0(tx_l0)
+                .write()
+                .stored_created_at_hints
+                .extend(found);
+        }
+        Ok(())
     }
 
     /// Refresh auto-embed targets for a `SET` write whose `touched_keys`
