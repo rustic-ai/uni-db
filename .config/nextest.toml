@@ -58,9 +58,11 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # (`topo_rewrites_unflushed_small_batches`, 15 cases at a two-row execution
 # batch) and 40 s (`flush_wide_smoke`, 100 cases); beside the rest of the suite
 # they measured 89 s, 151 s and 82 s — the two-row batch suffers most under
+# contention. `plan_cache_smoke` (500 cases, three executions each) takes about
+# 60 s alone and measured 115-130 s beside the suite, once past 180 s.
 # contention. 6 minutes leaves room without cutting cases further.
 [[profile.default.overrides]]
-filter = 'test(/metamorphic::dqp::topo::topo_rewrites/) or test(flush_wide_smoke)'
+filter = 'test(/metamorphic::dqp::topo::topo_rewrites/) or test(flush_wide_smoke) or test(plan_cache_smoke)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
 # `locy_operator_parity_matches_cypher` asks about 10,300 expressions of both
@@ -79,7 +81,7 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 
 # Mirrored from the default profile; see the rationale there.
 [[profile.ci.overrides]]
-filter = 'test(/metamorphic::dqp::topo::topo_rewrites/) or test(flush_wide_smoke)'
+filter = 'test(/metamorphic::dqp::topo::topo_rewrites/) or test(flush_wide_smoke) or test(plan_cache_smoke)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
 # `locy_operator_parity_matches_cypher` asks about 10,300 expressions of both

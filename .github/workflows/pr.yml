@@ -564,7 +564,10 @@ jobs:
     if: github.repository == 'rustic-ai/uni-db'
     name: Failpoint Crash Suite
     runs-on: ubuntu-xlarge
-    timeout-minutes: 30
+    # Two feature sets compile from scratch on a cache miss: about 24 minutes
+    # warm, 30 cold (a cold run finished its tests and was cancelled saving the
+    # cache).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
