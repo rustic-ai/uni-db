@@ -350,9 +350,19 @@ impl AsyncDatabase {
         // running and stranded the scratch directory on exit. That is the
         // idiomatic path, so it leaked more often than the explicit call did.
         let inner = self.inner.clone();
+        // As the sync facade: a shutdown failure is raised when the block
+        // succeeded, and logged when it is already raising.
+        let raising = _exc_type.is_some();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _ = inner.shutdown_in_place().await;
-            Ok(false)
+            match inner.shutdown_in_place().await {
+                Err(e) if !raising => Err(crate::exceptions::uni_error_to_pyerr(e)),
+                Err(e) => {
+                    let e = crate::exceptions::uni_error_to_pyerr(e);
+                    Python::attach(|py| crate::exceptions::warn_shutdown_failed(py, &e));
+                    Ok(false)
+                }
+                Ok(()) => Ok(false),
+            }
         })
     }
 
@@ -549,8 +559,10 @@ impl AsyncDatabase {
     /// Shut the database down: flush, stop background tasks, release the store.
     ///
     /// Waits for every background task to stop, then gives up the writer lock
-    /// or lease, so another handle can open the store for writing at once. A
-    /// flush failure is logged, not raised.
+    /// or lease, so another handle can open the store for writing at once.
+    /// Raises if the final flush failed (its commits are then only in the
+    /// WAL; on a hybrid store, in this host's local WAL), after the tasks have
+    /// stopped and the store was released.
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

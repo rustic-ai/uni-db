@@ -104,7 +104,7 @@ let db = Uni::temporary().build().await?;
 | `list_snapshots()` | `Result<Vec<SnapshotManifest>>` | List all available snapshots. |
 | `restore_snapshot(id)` | `Result<()>` | Restore the database (data and schema) to a snapshot taken with `create_snapshot`, at once and on disk. |
 | `delete_snapshot(id)` | `Result<()>` | Delete a snapshot and release the storage versions it pins, so compaction reclaims them. |
-| `shutdown()` | `Result<()>` | Graceful shutdown: flush data, stop background tasks. Consumes the handle. |
+| `shutdown()` | `Result<()>` | Graceful shutdown: flush data, stop background tasks, release the writer lease. Consumes the handle. Returns a failed final flush's error (the commits stay in the WAL); the tasks stop and the lease is released either way. |
 | `shutdown_in_place()` | `Result<()>` | As `shutdown()`, without consuming the handle (for a shared `Arc<Uni>`). |
 | `uri()` | `&str` | Path or URI backing the database (the scratch directory for `temporary()`). |
 | `background_task_count()` | `usize` | Number of tracked background tasks still running. |

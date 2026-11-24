@@ -755,9 +755,18 @@ impl Database {
         _exc_val: Option<Py<PyAny>>,
         _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
-        // Shutdown on exit.
-        let _ = self.shutdown(py);
-        Ok(false)
+        // Shutdown on exit. A failure (a final flush that did not reach
+        // storage, say) is raised when the block itself succeeded; when it is
+        // already raising, that exception propagates and the failure is
+        // logged, so it does not replace the one the caller is handling.
+        match self.shutdown(py) {
+            Err(e) if _exc_type.is_none() => Err(e),
+            Err(e) => {
+                crate::exceptions::warn_shutdown_failed(py, &e);
+                Ok(false)
+            }
+            Ok(()) => Ok(false),
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -1295,8 +1304,10 @@ impl Database {
     /// Shut the database down: flush, stop background tasks, release the store.
     ///
     /// Waits for every background task to stop, then gives up the writer lock
-    /// or lease, so another handle can open the store for writing at once. A
-    /// flush failure is logged, not raised.
+    /// or lease, so another handle can open the store for writing at once.
+    /// Raises if the final flush failed (its commits are then only in the
+    /// WAL; on a hybrid store, in this host's local WAL), after the tasks have
+    /// stopped and the store was released.
     fn shutdown(&self, py: Python<'_>) -> PyResult<()> {
         // Really shut down, rather than flushing and calling it one. Flushing
         // left the background tasks running and the teardown to `Drop` at GC
