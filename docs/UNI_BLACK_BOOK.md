@@ -1457,8 +1457,19 @@ the half-created dataset above was left behind
 
 Two teardown paths, deliberately different:
 
-- **`shutdown()` / `shutdown_in_place()`** awaits every tracked task via
-  `shutdown_async`, then reaps the directory eagerly. Eager because deferring
+- **`shutdown()` / `shutdown_in_place()`** flushes, publishes the read cut
+  and seals the WAL, awaits every tracked task via `shutdown_async`, releases
+  the writer lease, then reaps the directory eagerly. Every step runs even
+  after an earlier one failed, and the first failure is returned, in the
+  order flush, read-cut publish, task stop (the rest are logged; a failed
+  WAL seal only warns). A failed final flush leaves its commits in the WAL;
+  on a hybrid store that WAL is this host's, which another host's open does
+  not see (it claims the store for its own empty WAL), so the error says to
+  reopen from the same directory first. The lease is released anyway:
+  keeping it would block only that same-host reopen. Python's `__exit__` /
+  `__aexit__` raise the failure when the block succeeded and issue a
+  `RuntimeWarning` when it is already raising (#354).
+  The step reaps the directory eagerly. Eager because deferring
   to the guard's `Drop` would keep the directory alive for the lifetime of the
   handle — for a Python `with Uni.temporary() as db:` block, past the end of
   the block until garbage collection.
@@ -2616,6 +2627,8 @@ Traditional database indexes on typed property columns:
 CREATE INDEX idx_name FOR (p:Person) ON (p.name)           // Default: BTree
 CREATE INDEX idx_status FOR (o:Order) ON (o.status)         // BTree
 ```
+
+**Column types (#356).** Lance's BTree and Bitmap refuse a nested field, so a property stored as a nested Arrow column (`DateTime`, `Time` and points are structs; lists, maps and vectors are lists) cannot take a BTree, Hash or Bitmap index (`ScalarIndexType::cannot_index`; LabelList is for lists). `SchemaManager::add_index`, where every declaration path registers an index, refuses a new one (`Schema::scalar_index_refusal` names the property and its type), and `IndexManager::create_scalar_index` refuses it before building. One already in a catalog (declared while the property was untyped, or by an earlier release) still loads: its build records it `Failed` without attempting it, `ensure_declared_indexes` skips a `Failed` scalar index at flush, and the background rebuild marks Online only the indexes it left built (not `Stale` or `Failed`), where it used to mark every index on the label Online. A `TIMESTAMP` property is a plain Arrow timestamp and indexes; it keeps no offset or zone name.
 
 ### Vector Indexes (HNSW, IVF-PQ, Flat)
 
@@ -9264,7 +9277,7 @@ Python: `UniBuilder.in_memory().strict_schema(True).build()` or `.config({"stric
 | `wal_enabled` | `bool` | `true` | Write-ahead logging |
 | `async_flush_enabled` | `bool` | `true` (`UNI_ASYNC_FLUSH=0` disables) | Run the L1 streaming phase off the commit path |
 | `max_pending_flushes` | `usize` | 2 | Max async flushes in flight; the next rotate waits |
-| `flush_stream_timeout` | `Duration` | 60s | Max wall time one async L0→L1 stream phase may run before it becomes a flush *failure* |
+| `flush_stream_timeout` | `Duration` | 60s | Max time one async L0→L1 stream phase may go without a table commit (`ReadCut::commit_count`, any task's) before it becomes a flush *failure*; at most 15× this in all (`STREAM_TIMEOUT_CAP_FACTOR`) |
 | `flush_drain_timeout` | `Duration` | 900s | Max time `flush_to_l1` waits for in-flight flushes to drain. Exceeding it is an **error**, not a silent partial flush |
 | `drop_fork_drain_timeout` | `Duration` | 10s | Max time `drop_fork` waits for the fork's live sessions to be released (else `ForkInUse`) and its pending flushes to drain (else `PendingFlushTimeout`) |
 
