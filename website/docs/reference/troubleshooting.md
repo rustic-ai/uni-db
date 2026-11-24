@@ -369,6 +369,16 @@ uni query "EXPLAIN MATCH (p:Paper) WHERE p.year > 2020 RETURN p" --path ./storag
    WHERE p.year > 2000
    ```
 
+#### `CREATE INDEX` Is Refused
+
+**Symptom:** `CREATE INDEX` fails naming the property and another index kind, or saying an index of that name already exists.
+
+**Causes and Solutions:**
+
+1. **The type takes another kind of index.** A scalar index on a `LIST<STRING>`, `VECTOR`, whole `MAP` or whole `JSON` column is refused with the index that fits (`CREATE INVERTED INDEX`, `CREATE VECTOR INDEX`, an index on `n.m.<key>`, `CREATE JSON FULLTEXT INDEX`). `DURATION` and other lists take no index; queries on them scan. See [Indexing — Property Types](../concepts/indexing.md#property-types).
+2. **The name is taken.** An index name names one index. Drop the existing one (`DROP INDEX name`) or choose another name. Re-running the same declaration is not an error.
+3. **An index recorded `Failed` by an earlier release** on a `DATETIME`, `TIME`, `BTIC` or point property is built at the next writable open; no action is needed.
+
 #### Index Build Fails
 
 **Symptom:**

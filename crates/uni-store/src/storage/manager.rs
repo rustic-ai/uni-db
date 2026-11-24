@@ -2941,20 +2941,36 @@ impl StorageManager {
         // The widened versions are read before the catalog names the column.
         self.publish_cut().await?;
 
-        // Propagate to live fork branches. `ForkInfo::datasets` is the
-        // authoritative per-fork table -> branch map; a fork with no branch for
-        // a table needs nothing, because its reads resolve through `base_paths`
-        // to primary, which now has the column. Cutting a branch just to hold
-        // the column would be actively wrong -- it would pin a
-        // pre-declaration parent version.
-        let (Some(registry), Some(branching)) = (self.fork_registry(), backend.branching()) else {
-            return Ok(());
+        Self::widen_fork_branches(self.fork_registry(), backend, &tables, fields).await;
+        Ok(())
+    }
+
+    /// Add `fields` (nullable, all NULL) to every live fork's branch of
+    /// `tables`, after primary's tables gained them.
+    ///
+    /// A branch is a shallow clone carrying its own schema copy, and a read
+    /// through one that lacks a column the catalog names fails in Lance's
+    /// projection (#249). Branches are only widened, never backfilled: a
+    /// rewrite of a branch tip would materialize every inherited row into it.
+    /// `ForkInfo::datasets` is the authoritative per-fork table -> branch map;
+    /// a fork with no branch for a table needs nothing, because its reads
+    /// resolve through `base_paths` to primary, which now has the column.
+    /// Cutting a branch just to hold the column would be actively wrong -- it
+    /// would pin a pre-declaration parent version.
+    pub async fn widen_fork_branches(
+        registry: Option<&Arc<crate::fork::ForkRegistryHandle>>,
+        backend: &dyn StorageBackend,
+        tables: &[String],
+        fields: &[arrow_schema::Field],
+    ) {
+        let (Some(registry), Some(branching)) = (registry, backend.branching()) else {
+            return;
         };
         for fork in registry.snapshot().await.forks.values() {
             if fork.status == uni_common::core::fork::ForkStatus::Tombstoned {
                 continue;
             }
-            for table in &tables {
+            for table in tables {
                 let Some(branch) = fork.datasets.get(table) else {
                     continue;
                 };
@@ -2971,12 +2987,11 @@ impl StorageManager {
                         table = %table,
                         branch = %branch,
                         error = %e,
-                        "could not widen a fork branch for a newly declared property"
+                        "could not widen a fork branch for a newly declared column"
                     );
                 }
             }
         }
-        Ok(())
     }
 
     /// Phase 5a: query whether a fork-local index of `kind` exists
@@ -4272,6 +4287,8 @@ impl StorageManager {
         IndexManager::new(&self.base_uri, self.schema_manager.clone())
             .with_backend(self.head_backend_arc())
             .with_read_cut(Arc::clone(&self.read_cut))
+            .with_fork_registry(self.fork_registry().cloned())
+            .with_forked(self.fork_scope().is_some())
     }
 
     // ========================================================================

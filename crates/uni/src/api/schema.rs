@@ -428,6 +428,13 @@ impl<'a> SchemaBuilder<'a> {
                             );
                             uni_common::core::schema::IndexDefinition::Vector(cfg)
                         }
+                        // The key a scalar index is stored with, so that the
+                        // comparison below sees the same configuration. A
+                        // refusal is reported by `add_index`.
+                        uni_common::core::schema::IndexDefinition::Scalar(mut cfg) => {
+                            let _ = manager.schema().resolve_scalar_index(&mut cfg);
+                            uni_common::core::schema::IndexDefinition::Scalar(cfg)
+                        }
                         other => other,
                     };
                     // Skip the synchronous Lance rebuild when the index is
@@ -672,6 +679,7 @@ impl<'a> LabelBuilder<'a> {
                 index_type: stype.into_internal(),
                 where_clause: None,
                 metadata: Default::default(),
+                key: None,
             }),
             IndexType::Inverted(config) => IndexDefinition::Inverted(config),
             IndexType::Sparse {
@@ -1172,7 +1180,12 @@ fn property_infos_for(
 ) -> Vec<crate::api::schema::PropertyInfo> {
     let mut properties = Vec::new();
     if let Some(props) = schema.properties.get(name) {
-        for (prop_name, prop_meta) in props {
+        // The engine's own columns (`__jfts_`, `__key_`, `__fde_`, `_gen_`)
+        // are not properties a user declared or can read back.
+        for (prop_name, prop_meta) in props
+            .iter()
+            .filter(|(n, _)| !uni_common::core::schema::is_reserved_property_name(n))
+        {
             properties.push(crate::api::schema::PropertyInfo {
                 name: prop_name.clone(),
                 // `type_spec`, not `format!("{:?}")`. This field is a type
@@ -1641,6 +1654,7 @@ mod index_status_projection_tests {
                     status,
                     ..IndexMetadata::default()
                 },
+                key: None,
             }));
         schema
     }

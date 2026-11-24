@@ -300,6 +300,7 @@ async fn planner_with_index() -> QueryPlanner {
         where_clause: None,
         // `IndexStatus` defaults to `Online`, which is what the rank requires.
         metadata: IndexMetadata::default(),
+        key: None,
     }))
     .unwrap();
 

@@ -1295,7 +1295,8 @@ impl Executor {
     ) -> Result<(Vec<HashMap<String, Value>>, ProfileOutput)> {
         // Generate ExplainOutput first
         let planner =
-            crate::query::planner::QueryPlanner::new(self.storage.schema_manager().schema());
+            crate::query::planner::QueryPlanner::new(self.storage.schema_manager().schema())
+                .with_params(params.clone());
         let explain_output = planner.explain_logical_plan(&plan)?;
 
         let start = Instant::now();

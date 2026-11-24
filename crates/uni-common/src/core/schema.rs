@@ -2658,9 +2658,27 @@ impl SchemaManager {
     /// without bloating `schema.indexes` and lets the rebuild epilogue inside
     /// every `IndexManager::create_*_index` re-record metadata updates without
     /// duplicating entries (issue rustic-ai/uni-db#63).
-    pub fn add_index(&self, index_def: IndexDefinition) -> Result<()> {
+    pub fn add_index(&self, mut index_def: IndexDefinition) -> Result<()> {
         let mut guard = acquire_write(&self.schema, "schema")?;
         let schema = Arc::make_mut(&mut *guard);
+        // A scalar index's key is chosen from its property's declared type
+        // here, where every declaration path registers it. A new index on a
+        // column type it cannot index is refused (#356). One already in the
+        // catalog is still accepted as it is: an existing catalog must open,
+        // and the build records it `Failed`.
+        if let IndexDefinition::Scalar(cfg) = &mut index_def {
+            if let Some(clash) = schema.scalar_index_name_clash(cfg) {
+                return Err(anyhow!("Cannot create index '{}': {clash}", cfg.name));
+            }
+            let mut resolved = cfg.clone();
+            match schema.resolve_scalar_index(&mut resolved) {
+                Ok(()) => *cfg = resolved,
+                Err(reason) if !schema.records_scalar_index(cfg) => {
+                    return Err(anyhow!("Cannot create index '{}': {reason}", cfg.name));
+                }
+                Err(_) => {}
+            }
+        }
         if let Some(existing) = schema
             .indexes
             .iter_mut()
@@ -2964,7 +2982,27 @@ pub const RESERVED_PROPERTY_NAMES: &[&str] = &[
 /// full-text index's derived text column, and `__alias_of__` the alias marker
 /// the planner records in a variable's property set. Each is a family of
 /// names created by the engine, so a prefix is the exact rule.
-pub const RESERVED_PROPERTY_PREFIXES: &[&str] = &["_gen_", "__fde_", "__jfts_", "__alias_of__"];
+/// `__key_` names the key columns of a keyed scalar index (see
+/// [`IndexKey`]).
+pub const RESERVED_PROPERTY_PREFIXES: &[&str] =
+    &["_gen_", "__fde_", "__jfts_", "__key_", "__alias_of__"];
+
+/// Name prefixes of the columns a batch build derives from a row's other
+/// properties: a JSON full-text index's text and a keyed index's key columns.
+///
+/// Such a column is computed whenever a row is written to its label table and
+/// is never part of what the row *is*: it is not hashed into the content UID
+/// and never carried in an L0 row. A path that rebuilds a row from its stored
+/// columns (compaction, a SET on a flushed vertex) must skip it.
+pub const DERIVED_PROPERTY_PREFIXES: &[&str] = &[JSON_FTS_COLUMN_PREFIX, INDEX_KEY_COLUMN_PREFIX];
+
+/// Whether `name` is a derived column (see [`DERIVED_PROPERTY_PREFIXES`]).
+#[must_use]
+pub fn is_derived_property_name(name: &str) -> bool {
+    DERIVED_PROPERTY_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
 
 /// Whether `name` is reserved by the engine rather than a user property.
 ///
@@ -3783,6 +3821,7 @@ mod tests {
                 row_count_at_build: Some(42),
                 analysis_revision: FTS_ANALYSIS_REVISION,
             },
+            key: None,
         });
 
         let json = serde_json::to_string(&def).unwrap();
@@ -3807,6 +3846,7 @@ mod tests {
             index_type: ScalarIndexType::BTree,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         });
         manager.add_index(idx)?;
 
@@ -3878,6 +3918,7 @@ mod tests {
                 status: IndexStatus::Building,
                 ..Default::default()
             },
+            key: None,
         });
         manager.add_index(initial.clone())?;
         assert_eq!(manager.schema().indexes.len(), 1);
@@ -3911,6 +3952,7 @@ mod tests {
             index_type: ScalarIndexType::BTree,
             where_clause: None,
             metadata: IndexMetadata::default(),
+            key: None,
         });
         manager.add_index(other)?;
         assert_eq!(manager.schema().indexes.len(), 2);
@@ -3951,6 +3993,7 @@ mod tests {
                     row_count_at_build: count,
                     ..Default::default()
                 },
+                key: None,
             })
         };
         for _ in 0..49 {

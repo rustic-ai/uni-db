@@ -112,7 +112,10 @@ async fn index_builder_tick(weak: &Weak<UniInner>, threshold: u64) -> anyhow::Re
         .indexes
         .iter()
         .flat_map(|idx| match idx {
-            IndexDefinition::Scalar(cfg) if cfg.properties.len() == 1 => {
+            // A keyed index is never built fork-locally: its key columns are
+            // all NULL on a branch (widened, never backfilled), and key
+            // pushdown is off on a fork's view.
+            IndexDefinition::Scalar(cfg) if cfg.properties.len() == 1 && cfg.key.is_none() => {
                 vec![(
                     cfg.label.clone(),
                     cfg.properties[0].clone(),

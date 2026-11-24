@@ -30,6 +30,7 @@ async fn test_list_indexes_with_metadata() -> Result<()> {
         index_type: ScalarIndexType::BTree,
         where_clause: None,
         metadata: Default::default(),
+        key: None,
     });
     db.schema_manager().add_index(idx)?;
 
@@ -63,6 +64,7 @@ async fn test_update_index_metadata_persists() -> Result<()> {
         index_type: ScalarIndexType::BTree,
         where_clause: None,
         metadata: Default::default(),
+        key: None,
     });
     db.schema_manager().add_index(idx)?;
 
@@ -109,6 +111,7 @@ async fn test_bulk_sync_sets_metadata() -> Result<()> {
         index_type: ScalarIndexType::BTree,
         where_clause: None,
         metadata: Default::default(),
+        key: None,
     });
     db.schema_manager().add_index(idx)?;
     db.schema_manager().save().await?;

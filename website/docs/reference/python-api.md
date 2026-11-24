@@ -125,7 +125,7 @@ with uni_db.Uni.open("./my_graph") as db:
 | `db.metrics()` | `DatabaseMetrics` | Database-wide metrics snapshot |
 | `db.config()` | `dict` | Current database configuration |
 | `db.flush()` | `None` | Flush uncommitted changes to persistent storage |
-| `db.shutdown()` | `None` | Flush, stop background tasks and release the writer lock or lease |
+| `db.shutdown()` | `None` | Flush, stop background tasks and release the writer lock or lease. Raises if the final flush failed (the commits stay in the WAL); the tasks stop and the lease is released either way. On a `with` block's exit the failure is raised, or, when the block is already raising, issued as a `RuntimeWarning` |
 | `db.label_exists(name)` | `bool` | Check if a label exists |
 | `db.edge_type_exists(name)` | `bool` | Check if an edge type exists |
 | `db.list_labels()` | `list[str]` | List all label names |

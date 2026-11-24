@@ -304,6 +304,7 @@ fn create_test_schema_with_btree_index(label: &str, label_id: u16, index_propert
             index_type: ScalarIndexType::BTree,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         }));
     schema
 }
@@ -396,6 +397,7 @@ fn test_btree_starts_with_hash_index_not_used() {
             index_type: ScalarIndexType::Hash, // Not BTree
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         }));
 
     // Create predicate: n.name STARTS WITH 'John'
@@ -517,6 +519,7 @@ fn test_btree_starts_with_multiple_indexed_properties() {
             index_type: ScalarIndexType::BTree,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         }));
 
     // Test name (indexed)

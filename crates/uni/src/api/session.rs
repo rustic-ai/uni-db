@@ -1816,7 +1816,7 @@ impl<'a> QueryBuilder<'a> {
         self.session.authorize(&self.cypher, "read")?;
         self.session
             .run_before_query_hooks(&self.cypher, QueryType::Cypher, &params)?;
-        self.session.db.explain_internal(&self.cypher).await
+        self.session.db.explain_internal(&self.cypher, params).await
     }
 
     /// Profile the query execution, returning results with profiling output.

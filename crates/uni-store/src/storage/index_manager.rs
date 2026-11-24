@@ -104,6 +104,36 @@ pub(crate) enum BuildOutcome {
     NotRequired,
 }
 
+/// Whether a build may rewrite the label table to fill a derived column its
+/// index reads: a keyed index's key columns, a JSON full-text index's text,
+/// a MUVERA index's FDE.
+///
+/// A rewrite is `WriteMode::Overwrite`, which drops every Lance index on the
+/// table. So a build that rewrites restores the label's other indexes
+/// afterwards ([`IndexManager::restore_label_indexes`]), and the builds that
+/// restore them never rewrite. Neither does a build inside a flush (its
+/// commit would join the flush's unit, and the catalog save naming the column
+/// would run ahead of the manifest naming the table version) nor one on a fork
+/// (a branch rewrite is a delete-all then an append the branch cannot take).
+#[cfg(feature = "lance-backend")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// Rewrite the table to fill them, registered or not: a create, an
+    /// upgrade, a rebuild's first phase. The rows written while no such
+    /// index was declared carry none.
+    Rewrite,
+    /// A MUVERA create: rewrite only when this build registers the column.
+    /// A registered one is kept current by the flush-time materializer.
+    IfUnregistered,
+    /// Filled by a rebuild's first phase just now: build over them as they
+    /// are, without a rewrite.
+    Filled,
+    /// Never rewrite. An index that needs one to be built (its columns are
+    /// unregistered over a flushed table, or it is recorded without the key
+    /// its type now has) is left as it is.
+    Never,
+}
+
 #[cfg(feature = "lance-backend")]
 impl BuildOutcome {
     /// The metadata an index carries after this outcome.
@@ -318,6 +348,14 @@ pub struct IndexManager {
     /// The store's read cut, which index datasets this manager writes record
     /// their versions in.
     read_cut: Option<Arc<crate::storage::read_cut::ReadCut>>,
+    /// The fork registry, when the store has one: a key column added on
+    /// primary widens every live fork branch of the label's table.
+    fork_registry: Option<Arc<crate::fork::ForkRegistryHandle>>,
+    /// Whether this manager serves a forked session. An index whose build
+    /// rewrites the label table (a derived column's backfill) is refused
+    /// there: on a fork, a table rewrite is a delete-all then an append on
+    /// the branch, which a branch that lacks the new column cannot take.
+    forked: bool,
 }
 
 impl std::fmt::Debug for IndexManager {
@@ -374,7 +412,40 @@ impl IndexManager {
             schema_manager,
             backend: None,
             read_cut: None,
+            fork_registry: None,
+            forked: false,
         }
+    }
+
+    /// Mark this manager as serving a forked session (see `forked`).
+    #[must_use]
+    pub fn with_forked(mut self, forked: bool) -> Self {
+        self.forked = forked;
+        self
+    }
+
+    /// Refuses a table-rewriting index build in a forked session, before
+    /// anything is written. Declare the index on primary: a live fork's
+    /// branch is widened with the new column, and the fork builds nothing.
+    fn refuse_table_rewrite_on_fork(&self, what: &str) -> Result<()> {
+        if self.forked {
+            return Err(anyhow!(
+                "{what} rewrites the label table to fill a derived column, which a forked \
+                 session cannot do; declare it on primary, which widens live forks"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Widen live fork branches through `registry` when this manager adds a
+    /// key column (see [`Self::create_scalar_index`]).
+    #[must_use]
+    pub fn with_fork_registry(
+        mut self,
+        registry: Option<Arc<crate::fork::ForkRegistryHandle>>,
+    ) -> Self {
+        self.fork_registry = registry;
+        self
     }
 
     /// Puts the index datasets this manager writes under the store's cut.
@@ -479,14 +550,25 @@ impl IndexManager {
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
     pub async fn create_vector_index(&self, config: VectorIndexConfig) -> Result<()> {
-        self.create_vector_index_inner(config, false).await
+        let (label, name) = (config.label.clone(), config.name.clone());
+        if self
+            .create_vector_index_inner(config, Fill::IfUnregistered)
+            .await?
+        {
+            self.restore_label_indexes(&label, &HashSet::new(), Some(&name), false)
+                .await?;
+        }
+        Ok(())
     }
 
-    /// Like [`Self::create_vector_index`], but `force_backfill` re-materialises a MUVERA
-    /// index's derived FDE column over ALL current rows even if it was already registered.
+    /// Like [`Self::create_vector_index`]; `fill` says whether a MUVERA index's
+    /// derived FDE column may be (re)materialised by a table rewrite. Returns
+    /// whether the table was rewritten.
     ///
-    /// Full rebuilds ([`Self::rebuild_indexes_for_label`], hence `db.indexes().rebuild()`
-    /// and the bulk loader's sync index sync) set this. The flush-time FDE materializer
+    /// [`Fill::Rewrite`] re-materialises it over ALL current rows even if it was already
+    /// registered: full rebuilds ([`Self::rebuild_indexes_for_label`], hence
+    /// `db.indexes().rebuild()` and the bulk loader's sync index sync, and compaction's
+    /// first phase) use it. The flush-time FDE materializer
     /// (`Writer::materialize_fde_columns`) only runs on the tx write path, so after a BULK
     /// load — or any out-of-band table mutation — the newly written rows have no FDE. A
     /// plain create would hit the "already registered" guard and skip the backfill, leaving
@@ -497,8 +579,8 @@ impl IndexManager {
     async fn create_vector_index_inner(
         &self,
         mut config: VectorIndexConfig,
-        force_backfill: bool,
-    ) -> Result<()> {
+        fill: Fill,
+    ) -> Result<bool> {
         // An ANN index is built over a fixed width; without one every build
         // and every query would fail later, far from the declaration.
         match index_build_dim(&self.schema_manager.schema(), &config) {
@@ -521,9 +603,19 @@ impl IndexManager {
                 ));
             }
         }
+        let mut rewrote = false;
         let outcome = if let VectorIndexType::Muvera { inner, .. } = &config.index_type {
             // Register + backfill the derived FDE column (forced on a full rebuild).
-            self.prepare_muvera_fde(&config, force_backfill).await?;
+            match self.prepare_muvera_fde(&config, fill).await? {
+                Some(r) => rewrote = r,
+                None => {
+                    debug!(
+                        index = %config.name,
+                        "MUVERA index left as is: its FDE column needs a table rewrite"
+                    );
+                    return Ok(false);
+                }
+            }
             let inner_cfg = VectorIndexConfig {
                 name: config.name.clone(),
                 label: config.label.clone(),
@@ -553,7 +645,7 @@ impl IndexManager {
         self.schema_manager
             .add_index(IndexDefinition::Vector(config))?;
         self.schema_manager.save().await?;
-        Ok(())
+        Ok(rewrote)
     }
 
     /// Prepare a MUVERA index's derived `__fde_*` column: register it as an internal
@@ -565,24 +657,36 @@ impl IndexManager {
     /// The "already registered" guard makes this cheap on incremental creates: a plain
     /// `create_vector_index` (e.g. when another index on the label is added, or on schema
     /// re-apply) skips the rewrite — on the tx write path the column is kept current by the
-    /// flush-time materializer (`Writer::materialize_fde_columns`). `force_backfill` bypasses
-    /// that guard for full rebuilds, where the materializer assumption does not hold (e.g.
-    /// after a bulk load); see [`Self::create_vector_index_inner`]. No-op for a non-MUVERA
-    /// config, an unresolved source dimension, a label with nothing flushed yet, or when no
-    /// backend is attached.
+    /// flush-time materializer (`Writer::materialize_fde_columns`). [`Fill::Rewrite`]
+    /// bypasses that guard for full rebuilds, where the materializer assumption does not
+    /// hold (e.g. after a bulk load); see [`Self::create_vector_index_inner`]. No-op for a
+    /// non-MUVERA config, an unresolved source dimension, a label with nothing flushed yet,
+    /// or when no backend is attached.
+    ///
+    /// Returns whether the table was rewritten, or `None` when the column is unregistered
+    /// over a flushed table and `fill` allows no rewrite: the index cannot be built.
     #[cfg(feature = "lance-backend")]
     async fn prepare_muvera_fde(
         &self,
         config: &VectorIndexConfig,
-        force_backfill: bool,
-    ) -> Result<()> {
+        fill: Fill,
+    ) -> Result<Option<bool>> {
         use crate::storage::muvera_index::fde_spec_for_config;
 
         let schema = self.schema_manager.schema();
         let Some(spec) = fde_spec_for_config(&schema, config) else {
-            return Ok(());
+            return Ok(Some(false));
         };
         spec.params.validate()?;
+        if matches!(fill, Fill::Filled | Fill::Never)
+            && !schema
+                .properties
+                .get(&spec.label)
+                .is_some_and(|p| p.contains_key(&spec.derived_col))
+            && self.label_table_exists(&spec.label).await?
+        {
+            return Ok(None);
+        }
 
         // Register the derived column. `add_internal_property` is write-lock-guarded and
         // reports whether THIS call inserted it, so two concurrent creates of the same MUVERA
@@ -599,8 +703,13 @@ impl IndexManager {
         // Backfill when we just registered the column, or when a full rebuild forces it (the
         // flush-time materializer doesn't cover bulk-loaded / out-of-band rows). A plain
         // re-create that finds the column already present relies on that materializer.
-        if !newly_added && !force_backfill {
-            return Ok(());
+        let rewrite = match fill {
+            Fill::Rewrite => true,
+            Fill::IfUnregistered => newly_added,
+            Fill::Filled | Fill::Never => false,
+        };
+        if !rewrite {
+            return Ok(Some(false));
         }
 
         // Run the backfill; if it FAILS after we just added the column, roll the registration
@@ -614,15 +723,30 @@ impl IndexManager {
         // rewrite overwrites — self-healing. Persisting the schema first would be worse (a
         // registered column with no data errors reads), and a `Building` marker is not
         // auto-recovered (`labels_needing_rebuild` skips `Building`/`Failed`).
-        if let Err(e) = self.backfill_fde_column(&spec).await {
-            if newly_added {
-                let _ = self
-                    .schema_manager
-                    .drop_property(&spec.label, &spec.derived_col);
+        match self.backfill_fde_column(&spec).await {
+            Ok(rewrote) => Ok(Some(rewrote)),
+            Err(e) => {
+                if newly_added {
+                    let _ = self
+                        .schema_manager
+                        .drop_property(&spec.label, &spec.derived_col);
+                }
+                Err(e)
             }
-            return Err(e);
         }
-        Ok(())
+    }
+
+    /// Whether `label`'s table exists; `false` with no backend attached.
+    #[cfg(feature = "lance-backend")]
+    async fn label_table_exists(&self, label: &str) -> Result<bool> {
+        match self.backend.as_ref() {
+            Some(backend) => {
+                backend
+                    .table_exists(&table_names::vertex_table_name(label))
+                    .await
+            }
+            None => Ok(false),
+        }
     }
 
     /// Materialize the MUVERA derived FDE column over all currently-flushed rows via a full
@@ -635,18 +759,19 @@ impl IndexManager {
     async fn backfill_fde_column(
         &self,
         spec: &crate::storage::muvera_index::FdeSpec,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        self.refuse_table_rewrite_on_fork("a multi-vector (MUVERA) index")?;
         use crate::storage::muvera_index::splice_fde_batch;
 
         let Some(backend) = self.backend.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let table = table_names::vertex_table_name(&spec.label);
         // Err propagates (a backend fault must not silently skip the backfill and
         // leave the FDE column NULL); Ok(false) is the create-before-ingest case
         // where the flush path will materialize the column.
         if !backend.table_exists(&table).await? {
-            return Ok(());
+            return Ok(false);
         }
 
         let schema = self.schema_manager.schema();
@@ -688,7 +813,7 @@ impl IndexManager {
         backend
             .replace_table_atomic(&table, new_batches, target_schema)
             .await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Build the physical Lance ANN index described by `config` over `config.property`
@@ -804,20 +929,77 @@ impl IndexManager {
     }
 
     /// Build and persist a scalar (BTree) index for exact-match and range queries.
+    ///
+    /// A property whose type is indexed through a key (see
+    /// [`uni_common::core::schema::IndexKey`]) is built by
+    /// `create_keyed_scalar_index`.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
-    pub async fn create_scalar_index(&self, mut config: ScalarIndexConfig) -> Result<()> {
-        let label = &config.label;
-        let properties = &config.properties;
+    pub async fn create_scalar_index(&self, config: ScalarIndexConfig) -> Result<()> {
+        let (label, name) = (config.label.clone(), config.name.clone());
+        if self
+            .create_scalar_index_inner(config, Fill::Rewrite)
+            .await?
+        {
+            self.restore_label_indexes(&label, &HashSet::new(), Some(&name), false)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::create_scalar_index`]; `fill` says whether a keyed index's key
+    /// columns may be re-derived by a table rewrite ([`Fill::Rewrite`]: a
+    /// create, an upgrade, a rebuild; rows written while no such index was
+    /// declared carry no key). Returns whether the table was rewritten, which
+    /// dropped the label's other Lance indexes.
+    #[cfg(feature = "lance-backend")]
+    async fn create_scalar_index_inner(
+        &self,
+        mut config: ScalarIndexConfig,
+        fill: Fill,
+    ) -> Result<bool> {
+        // Recorded without the key its type now has: an upgrade, which
+        // re-derives the key whatever is registered.
+        let recorded_keyed = config.key.is_some();
         info!(
             "Creating scalar index '{}' on {}.{:?}",
-            config.name, label, properties
+            config.name, config.label, config.properties
         );
 
         let schema = self.schema_manager.schema();
-        if !schema.labels.contains_key(label) {
-            return Err(anyhow!("Label '{}' not found", label));
+        if !schema.labels.contains_key(&config.label) {
+            return Err(anyhow!("Label '{}' not found", config.label));
         }
+        // The key is chosen from the declared type (an index recorded before
+        // its type had a key gets one here, at its next build). A column type
+        // the index kind cannot index (#356): a new index is refused before
+        // anything is built; one already in the catalog is recorded `Failed`,
+        // which neither the flush nor the rebuild checker retries, rather than
+        // attempted (and logged) at every flush.
+        if let Some(clash) = schema.scalar_index_name_clash(&config) {
+            return Err(anyhow!("Cannot create index '{}': {clash}", config.name));
+        }
+        if let Err(reason) = schema.resolve_scalar_index(&mut config) {
+            if !schema.records_scalar_index(&config) {
+                return Err(anyhow!("Cannot create index '{}': {reason}", config.name));
+            }
+            warn!(index = %config.name, "{reason}; the index is recorded Failed");
+            config.metadata = uni_common::core::schema::IndexMetadata {
+                status: uni_common::core::schema::IndexStatus::Failed,
+                ..Default::default()
+            };
+            self.schema_manager
+                .add_index(IndexDefinition::Scalar(config))?;
+            self.schema_manager.save().await?;
+            return Ok(false);
+        }
+        if config.key.is_some() {
+            return self
+                .create_keyed_scalar_index(config, fill, !recorded_keyed)
+                .await;
+        }
+        let label = &config.label;
+        let properties = &config.properties;
 
         let columns: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         // Map the schema scalar type to the backend's; anything other than the
@@ -877,7 +1059,270 @@ impl IndexManager {
             .add_index(IndexDefinition::Scalar(config))?;
         self.schema_manager.save().await?;
 
-        Ok(())
+        Ok(false)
+    }
+
+    /// Whether every key column of `key` is registered on `label`.
+    #[cfg(feature = "lance-backend")]
+    fn key_registered(&self, label: &str, key: &uni_common::core::schema::IndexKey) -> bool {
+        let schema = self.schema_manager.schema();
+        let props = schema.properties.get(label);
+        key.columns
+            .iter()
+            .all(|c| props.is_some_and(|p| p.contains_key(c)))
+    }
+
+    /// Fill a keyed index's key columns, storage first, then the catalog.
+    ///
+    /// 1. When `rewrite` and the label's table exists, rewrite it with the
+    ///    key columns derived from every row ([`Self::backfill_key_columns`]).
+    /// 2. Register each key column as an internal property, so every later
+    ///    batch build fills it (`derived_rows`).
+    /// 3. Widen live fork branches of the table with the key columns, all
+    ///    NULL. A branch is never backfilled, and no key is pushed down on a
+    ///    fork's view.
+    ///
+    /// Returns whether the table was rewritten.
+    #[cfg(feature = "lance-backend")]
+    async fn fill_key_columns(&self, config: &ScalarIndexConfig, rewrite: bool) -> Result<bool> {
+        let key = config
+            .key
+            .clone()
+            .ok_or_else(|| anyhow!("index '{}' has no key", config.name))?;
+        let label = &config.label;
+        let table = table_names::vertex_table_name(label);
+        let registered = self.key_registered(label, &key);
+        let rewrote = rewrite
+            && self.label_table_exists(label).await?
+            && self.backfill_key_columns(config).await?;
+        let types = key.kind.column_types();
+        for (column, ty) in key.columns.iter().zip(&types) {
+            self.schema_manager
+                .add_internal_property(label, column, ty.clone(), true)?;
+        }
+        if !registered && let Some(backend) = self.backend.as_ref() {
+            let fields: Vec<arrow_schema::Field> = key
+                .columns
+                .iter()
+                .zip(&types)
+                .map(|(c, ty)| arrow_schema::Field::new(c, ty.to_arrow(), true))
+                .collect();
+            crate::storage::manager::StorageManager::widen_fork_branches(
+                self.fork_registry.as_ref(),
+                backend.as_ref(),
+                std::slice::from_ref(&table),
+                &fields,
+            )
+            .await;
+        }
+        Ok(rewrote)
+    }
+
+    /// Build a keyed scalar index: fill its key columns as `fill` allows
+    /// ([`Self::fill_key_columns`]), build one BTree per key column, named
+    /// `<index>__<role>`, and record the index, which publishes the cut.
+    ///
+    /// `upgrade` is an index recorded without the key its type now has. Its
+    /// key is always re-derived, never trusted: columns registered before a
+    /// downgrade were not kept current while it was unkeyed. Under
+    /// [`Fill::Never`] an index that needs a rewrite (an upgrade, or key
+    /// columns unregistered over a flushed table) is left as it is.
+    ///
+    /// Returns whether the table was rewritten.
+    #[cfg(feature = "lance-backend")]
+    async fn create_keyed_scalar_index(
+        &self,
+        mut config: ScalarIndexConfig,
+        fill: Fill,
+        upgrade: bool,
+    ) -> Result<bool> {
+        let key = config
+            .key
+            .clone()
+            .ok_or_else(|| anyhow!("index '{}' has no key", config.name))?;
+        let label = config.label.clone();
+        let table = table_names::vertex_table_name(&label);
+        let table_exists = self.label_table_exists(&label).await?;
+        let rewrite = match fill {
+            Fill::Rewrite | Fill::IfUnregistered => true,
+            Fill::Filled => false,
+            Fill::Never => {
+                if table_exists && (upgrade || !self.key_registered(&label, &key)) {
+                    debug!(
+                        index = %config.name,
+                        "keyed index left as is: its key needs a table rewrite, which runs \
+                         at the next writable open or an explicit rebuild"
+                    );
+                    return Ok(false);
+                }
+                false
+            }
+        };
+        let rewrote = self.fill_key_columns(&config, rewrite).await?;
+
+        let outcome = match self.backend.as_ref() {
+            Some(backend) if table_exists => {
+                let mut outcome = BuildOutcome::Built;
+                for (column, index_name) in key.columns.iter().zip(config.physical_index_names()) {
+                    info!(
+                        "Building key index '{}' on '{}.{}' for '{}'",
+                        index_name, table, column, config.name
+                    );
+                    if let Err(e) = backend
+                        .create_scalar_index(
+                            &table,
+                            &[column.as_str()],
+                            crate::backend::types::ScalarIndexType::BTree,
+                            Some(&index_name),
+                        )
+                        .await
+                    {
+                        warn!(
+                            "Failed to build key index '{}' on '{}': {}",
+                            index_name, table, e
+                        );
+                        outcome = BuildOutcome::Failed;
+                        break;
+                    }
+                }
+                outcome
+            }
+            Some(_) => {
+                debug!(
+                    "Label '{}' not flushed yet; keyed scalar index '{}' deferred",
+                    label, config.name
+                );
+                BuildOutcome::NotAttempted
+            }
+            None => {
+                warn!(
+                    "No storage backend; keyed scalar index '{}' deferred until a flush",
+                    config.name
+                );
+                BuildOutcome::NotAttempted
+            }
+        };
+        fail::fail_point!("index_manager::scalar-built");
+        let row_count = self.built_row_count(&config.label, outcome).await;
+        config.metadata = outcome.into_metadata(row_count);
+        self.schema_manager
+            .add_index(IndexDefinition::Scalar(config))?;
+        self.schema_manager.save().await?;
+        Ok(rewrote)
+    }
+
+    /// Rewrites the label's flushed rows with a keyed index's key columns
+    /// derived from each row's property value.
+    ///
+    /// Like [`Self::backfill_json_fts_column`]: reads the newest versions (the
+    /// head backend) under the table's write lock, so a flush cannot append
+    /// between the scan and the rewrite, and targets the live schema plus the
+    /// key columns, which the caller registers only after this succeeds.
+    #[cfg(feature = "lance-backend")]
+    async fn backfill_key_columns(&self, config: &ScalarIndexConfig) -> Result<bool> {
+        self.refuse_table_rewrite_on_fork(&format!("index '{}'", config.name))?;
+        use arrow_array::{Array, ArrayRef};
+
+        let (Some(backend), Some(key), [property]) = (
+            self.backend.as_ref(),
+            config.key.as_ref(),
+            config.properties.as_slice(),
+        ) else {
+            return Ok(false);
+        };
+        let label = &config.label;
+        let table = table_names::vertex_table_name(label);
+        let types = key.kind.column_types();
+        // The column the key is derived from (`m` for a key path `m.k`).
+        let property = key.kind.source_property(property);
+
+        let mut widened = (*self.schema_manager.schema()).clone();
+        let version = widened.schema_version;
+        let entry = widened.properties.entry(label.clone()).or_default();
+        for (column, ty) in key.columns.iter().zip(&types) {
+            entry
+                .entry(column.clone())
+                .or_insert_with(|| uni_common::core::schema::PropertyMeta {
+                    r#type: ty.clone(),
+                    nullable: true,
+                    added_in: version,
+                    state: uni_common::core::schema::SchemaElementState::Active,
+                    generation_expression: None,
+                    description: None,
+                    default: None,
+                });
+        }
+        let label_id = widened
+            .label_id_by_name(label)
+            .ok_or_else(|| anyhow!("keyed index: label '{label}' not found"))?;
+        let target_schema =
+            VertexDataset::new(&self.base_uri, label, label_id).get_arrow_schema(&widened)?;
+        let source_dt = widened
+            .properties
+            .get(label)
+            .and_then(|p| p.get(property))
+            .map(|m| m.r#type.clone());
+
+        let _table_guard = backend.lock_table_for_write(&table).await;
+        let batches = backend.scan(ScanRequest::all(&table)).await?;
+        let mut rewritten = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            let mut per_column: Vec<Vec<Option<crate::storage::index_keys::KeyValue>>> =
+                vec![Vec::with_capacity(batch.num_rows()); key.columns.len()];
+            let source = batch.column_by_name(property);
+            // A deleted row's slot holds a placeholder, not a value (a BTIC
+            // tombstone is 24 zero bytes, which do not decode): its key is
+            // NULL, as the batch builder leaves it.
+            let deleted = batch.column_by_name("_deleted").and_then(|c| {
+                c.as_any()
+                    .downcast_ref::<arrow_array::BooleanArray>()
+                    .cloned()
+            });
+            for row in 0..batch.num_rows() {
+                let is_deleted = deleted
+                    .as_ref()
+                    .is_some_and(|d| !d.is_null(row) && d.value(row));
+                let value = match source {
+                    Some(src) if !is_deleted && !src.is_null(row) => {
+                        Some(crate::storage::arrow_convert::arrow_to_value(
+                            src.as_ref(),
+                            row,
+                            source_dt.as_ref(),
+                        )?)
+                    }
+                    _ => None,
+                };
+                let keys = crate::storage::index_keys::derive(&key.kind, value.as_ref());
+                for (slot, k) in per_column.iter_mut().zip(keys) {
+                    slot.push(k);
+                }
+            }
+            let mut key_arrays: HashMap<&str, ArrayRef> = HashMap::new();
+            for ((column, ty), values) in key.columns.iter().zip(&types).zip(per_column) {
+                key_arrays.insert(column.as_str(), key_column_array(ty, values)?);
+            }
+            let mut columns: Vec<ArrayRef> = Vec::with_capacity(target_schema.fields().len());
+            for field in target_schema.fields() {
+                if let Some(array) = key_arrays.get(field.name().as_str()) {
+                    columns.push(array.clone());
+                } else if let Some(col) = batch.column_by_name(field.name()) {
+                    columns.push(col.clone());
+                } else {
+                    columns.push(arrow_array::new_null_array(
+                        field.data_type(),
+                        batch.num_rows(),
+                    ));
+                }
+            }
+            rewritten.push(arrow_array::RecordBatch::try_new(
+                target_schema.clone(),
+                columns,
+            )?);
+        }
+        backend
+            .replace_table_atomic(&table, rewritten, target_schema)
+            .await?;
+        Ok(true)
     }
 
     /// Build any declared scalar or full-text index for `label` whose physical
@@ -945,17 +1390,27 @@ impl IndexManager {
         };
         let named = |name: &str| existing.iter().any(|idx| idx.name == name);
 
+        let schema = self.schema_manager.schema();
         for def in declared {
             // Reuse the single build path for each kind so the outcome-to-status
             // mapping stays in one place; it re-registers the definition with
             // fresh metadata.
             match def {
-                IndexDefinition::Scalar(config) if !covers(&config.properties) => {
+                // Matched on the columns it is built on: a keyed index's key
+                // columns, each with its own index. `Failed` is permanent (a
+                // column type the index cannot index). An index that needs a
+                // table rewrite to become keyed is left for the next
+                // writable open or an explicit rebuild (`Fill::Never`).
+                IndexDefinition::Scalar(config)
+                    if self.scalar_needs_build(&schema, &config, &covers) =>
+                {
                     info!(
                         "Resolving deferred scalar index '{}' on '{}' at flush",
                         config.name, table
                     );
-                    self.create_scalar_index(config).await?;
+                    // Inside a flush, whose rows already carry the key when
+                    // its columns are registered.
+                    self.create_scalar_index_inner(config, Fill::Never).await?;
                 }
                 IndexDefinition::FullText(config) if !named(&config.name) => {
                     info!(
@@ -970,13 +1425,120 @@ impl IndexManager {
                         config.name, table
                     );
                     // Inside a flush, whose rows already carry the text.
-                    self.create_json_fts_index_inner(config, false).await?;
+                    self.create_json_fts_index_inner(config, Fill::Never)
+                        .await?;
                 }
                 _ => {}
             }
         }
 
         Ok(())
+    }
+
+    /// Whether a declared scalar index lacks its physical artifact and should
+    /// be built at a flush (see [`Self::ensure_declared_indexes`]).
+    ///
+    /// Matched on the columns it is built on (`covers`): a keyed index is
+    /// built when any key column lacks an index. `Failed` is permanent (a
+    /// column type the index cannot index). An index that needs a table
+    /// rewrite to become keyed (recorded before its type had a key, or its
+    /// key columns unregistered) is not built here, inside a flush: it is
+    /// upgraded at the next writable open ([`Self::upgrade_keyed_indexes`])
+    /// or by an explicit rebuild.
+    fn scalar_needs_build(
+        &self,
+        schema: &uni_common::core::schema::Schema,
+        config: &ScalarIndexConfig,
+        covers: &dyn Fn(&[String]) -> bool,
+    ) -> bool {
+        let mut resolved = config.clone();
+        let _ = schema.resolve_scalar_index(&mut resolved);
+        if Self::needs_key_upgrade(schema, config) {
+            debug!(
+                index = %config.name,
+                "keyed index needs a table rewrite; left for the next writable open"
+            );
+            return false;
+        }
+        let columns: Vec<String> = resolved
+            .physical_columns()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let built = match &resolved.key {
+            Some(_) => columns.iter().all(|c| covers(std::slice::from_ref(c))),
+            None => covers(&columns),
+        };
+        !built && config.metadata.status != uni_common::core::schema::IndexStatus::Failed
+    }
+
+    /// Whether the recorded scalar index `config` needs a table rewrite to
+    /// serve its key: its property's type resolves to a key, and it is
+    /// recorded without one (an index from before its type had a key, whose
+    /// key columns, even if registered, were not kept current) or its key
+    /// columns are unregistered.
+    fn needs_key_upgrade(
+        schema: &uni_common::core::schema::Schema,
+        config: &ScalarIndexConfig,
+    ) -> bool {
+        let mut resolved = config.clone();
+        if schema.resolve_scalar_index(&mut resolved).is_err() {
+            return false;
+        }
+        let Some(key) = &resolved.key else {
+            return false;
+        };
+        let props = schema.properties.get(&config.label);
+        config.key.is_none()
+            || !key
+                .columns
+                .iter()
+                .all(|c| props.is_some_and(|p| p.contains_key(c)))
+    }
+
+    /// Upgrade every scalar index whose key needs a table rewrite (see
+    /// `needs_key_upgrade`): re-derive the key over the label's
+    /// flushed rows, build it, and restore the label's other indexes, which
+    /// the rewrite dropped. Returns the names of the indexes upgraded.
+    ///
+    /// Runs at a writable primary open, after recovery and before the store
+    /// serves, because a flush never rewrites a table (its commit would join
+    /// the flush's unit) and a fork cannot. A failed upgrade is logged and
+    /// leaves the index as it was; the open goes on.
+    #[cfg(feature = "lance-backend")]
+    pub async fn upgrade_keyed_indexes(&self) -> Result<Vec<String>> {
+        if self.forked {
+            return Ok(Vec::new());
+        }
+        let pending: Vec<ScalarIndexConfig> = {
+            let schema = self.schema_manager.schema();
+            schema
+                .indexes
+                .iter()
+                .filter_map(|idx| match idx {
+                    IndexDefinition::Scalar(cfg) if Self::needs_key_upgrade(&schema, cfg) => {
+                        Some(cfg.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut upgraded = Vec::with_capacity(pending.len());
+        for config in pending {
+            let name = config.name.clone();
+            match self.create_scalar_index(config).await {
+                Ok(()) => {
+                    info!(index = %name, "scalar index upgraded to a keyed index");
+                    upgraded.push(name);
+                }
+                Err(e) => warn!(
+                    index = %name,
+                    error = %e,
+                    "could not upgrade the index to a keyed index; it is left as it was"
+                ),
+            }
+        }
+        Ok(upgraded)
     }
 
     /// Build and persist a full-text search (Lance inverted) index.
@@ -1072,15 +1634,48 @@ impl IndexManager {
     pub async fn create_json_fts_index(&self, config: JsonFtsIndexConfig) -> Result<()> {
         // Always re-derived: rows written while no such index was declared
         // (before it, or after a drop) carry no text.
-        self.create_json_fts_index_inner(config, true).await
+        let (label, name) = (config.label.clone(), config.name.clone());
+        if self
+            .create_json_fts_index_inner(config, Fill::Rewrite)
+            .await?
+        {
+            self.restore_label_indexes(&label, &HashSet::new(), Some(&name), false)
+                .await?;
+        }
+        Ok(())
     }
 
+    /// Fill a JSON full-text index's text column, storage first: rewrite the
+    /// table with it when `rewrite` and the table exists, then register it.
+    /// Returns whether the table was rewritten.
+    #[cfg(feature = "lance-backend")]
+    async fn fill_json_fts_column(
+        &self,
+        config: &JsonFtsIndexConfig,
+        rewrite: bool,
+    ) -> Result<bool> {
+        let label = &config.label;
+        let rewrote = rewrite
+            && self.label_table_exists(label).await?
+            && self.backfill_json_fts_column(config).await?;
+        self.schema_manager.add_internal_property(
+            label,
+            &config.derived_column(),
+            uni_common::DataType::String,
+            true,
+        )?;
+        Ok(rewrote)
+    }
+
+    /// [`Self::create_json_fts_index`] as `fill` allows; returns whether the
+    /// table was rewritten. Under [`Fill::Never`] / [`Fill::Filled`] an index
+    /// whose text column is unregistered over a flushed table is left as is.
     #[cfg(feature = "lance-backend")]
     async fn create_json_fts_index_inner(
         &self,
         mut config: JsonFtsIndexConfig,
-        force_backfill: bool,
-    ) -> Result<()> {
+        fill: Fill,
+    ) -> Result<bool> {
         let label = config.label.clone();
         let derived = config.derived_column();
         let (label, derived) = (&label, &derived);
@@ -1099,21 +1694,22 @@ impl IndexManager {
             .is_some_and(|p| p.contains_key(derived.as_str()));
 
         let table = table_names::vertex_table_name(label);
-        let table_exists = match self.backend.as_ref() {
-            Some(backend) => backend.table_exists(&table).await?,
-            None => false,
+        let table_exists = self.label_table_exists(label).await?;
+        let rewrite = match fill {
+            Fill::Rewrite => true,
+            Fill::IfUnregistered => !registered,
+            Fill::Filled | Fill::Never => {
+                if table_exists && !registered {
+                    debug!(
+                        index = %config.name,
+                        "JSON full-text index left as is: its text column needs a table rewrite"
+                    );
+                    return Ok(false);
+                }
+                false
+            }
         };
-        if table_exists && (!registered || force_backfill) {
-            self.backfill_json_fts_column(&config).await?;
-        }
-        if !registered {
-            self.schema_manager.add_internal_property(
-                label,
-                derived,
-                uni_common::DataType::String,
-                true,
-            )?;
-        }
+        let rewrote = self.fill_json_fts_column(&config, rewrite).await?;
 
         let outcome = if let Some(backend) = self.backend.as_ref() {
             if table_exists {
@@ -1161,7 +1757,7 @@ impl IndexManager {
             .add_index(IndexDefinition::JsonFullText(config))?;
         self.schema_manager.save().await?;
 
-        Ok(())
+        Ok(rewrote)
     }
 
     /// Rewrites the label's flushed rows with the JSON full-text index's
@@ -1173,11 +1769,12 @@ impl IndexManager {
     /// backfill). The target schema is the live one plus the derived column,
     /// which the caller adds to the catalog only after this succeeds.
     #[cfg(feature = "lance-backend")]
-    async fn backfill_json_fts_column(&self, config: &JsonFtsIndexConfig) -> Result<()> {
+    async fn backfill_json_fts_column(&self, config: &JsonFtsIndexConfig) -> Result<bool> {
+        self.refuse_table_rewrite_on_fork(&format!("JSON full-text index '{}'", config.name))?;
         use arrow_array::{Array, ArrayRef, StringArray};
 
         let Some(backend) = self.backend.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let label = &config.label;
         let derived = config.derived_column();
@@ -1254,7 +1851,7 @@ impl IndexManager {
         backend
             .replace_table_atomic(&table, rewritten, target_schema)
             .await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Remove an index both physically from the Lance dataset and from the schema.
@@ -1273,14 +1870,24 @@ impl IndexManager {
         // so a failure here is non-fatal.
         let label = idx_def.label();
         let table = table_names::vertex_table_name(label);
+        // A keyed index is built as one Lance index per key column.
+        let physical = match &idx_def {
+            IndexDefinition::Scalar(cfg) => cfg.physical_index_names(),
+            _ => vec![name.to_string()],
+        };
         if let Some(backend) = self.backend.as_ref() {
-            if let Err(e) = backend.drop_index(&table, name).await {
-                warn!(
-                    "Physical index drop for '{}' returned error (non-fatal): {}",
-                    name, e
-                );
-            } else {
-                info!("Physical index '{}' dropped from '{}'", name, table);
+            for physical_name in &physical {
+                if let Err(e) = backend.drop_index(&table, physical_name).await {
+                    warn!(
+                        "Physical index drop for '{}' returned error (non-fatal): {}",
+                        physical_name, e
+                    );
+                } else {
+                    info!(
+                        "Physical index '{}' dropped from '{}'",
+                        physical_name, table
+                    );
+                }
             }
         }
 
@@ -1301,40 +1908,169 @@ impl IndexManager {
                 }
             }
         }
+        // Likewise a keyed index's key columns, with the last index that uses
+        // them.
+        if let IndexDefinition::Scalar(cfg) = &idx_def
+            && let Some(key) = &cfg.key
+        {
+            let schema = self.schema_manager.schema();
+            for column in &key.columns {
+                let still_used = schema.indexes.iter().any(|idx| {
+                    matches!(idx, IndexDefinition::Scalar(other)
+                        if other.label == cfg.label
+                            && other.key.as_ref().is_some_and(|k| k.columns.contains(column)))
+                });
+                if !still_used && let Err(e) = self.schema_manager.drop_property(&cfg.label, column)
+                {
+                    debug!("key column '{column}' of '{name}' was not registered: {e}");
+                }
+            }
+        }
         self.schema_manager.save().await?;
         Ok(())
     }
 
     /// Rebuild all indexes registered for `label` from scratch.
+    ///
+    /// In three phases, because a table rewrite drops every Lance index on
+    /// the table:
+    ///
+    /// 1. every rewrite the label's indexes need (a MUVERA FDE, a JSON
+    ///    full-text index's text, a keyed index's key), each followed at once
+    ///    by its column's registration, storage first
+    ///    (`fill_derived_columns`);
+    /// 2. the label's default indexes (`_vid`, `_uid`, `ext_id`);
+    /// 3. every declared index, with no table rewrite.
+    ///
+    /// An index whose key needs a rewrite to become keyed (an upgrade) is
+    /// upgraded here: phase 1 re-derives its key.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
     pub async fn rebuild_indexes_for_label(&self, label: &str) -> Result<()> {
         info!("Rebuilding all indexes for label '{}'", label);
-        let schema = self.schema_manager.schema();
+        let filled = self.fill_derived_columns(label, false).await?;
+        self.restore_label_indexes(label, &filled, None, true).await
+    }
 
-        // Clone and filter to avoid holding lock while async awaiting
-        let indexes: Vec<_> = schema
+    /// Restore `label`'s indexes after a vertex compaction replaced its table.
+    ///
+    /// The compaction's batch already carries every registered derived column
+    /// it can compute (key columns and JSON full-text text are filled at batch
+    /// build), so only a MUVERA FDE is re-materialised (the flush-time
+    /// materializer does not cover bulk-loaded rows); then phases 2 and 3 of
+    /// [`Self::rebuild_indexes_for_label`].
+    #[cfg(feature = "lance-backend")]
+    #[instrument(skip(self), level = "info")]
+    pub async fn restore_indexes_after_compaction(&self, label: &str) -> Result<()> {
+        let filled = self.fill_derived_columns(label, true).await?;
+        self.restore_label_indexes(label, &filled, None, true).await
+    }
+
+    /// Phase 1 of [`Self::rebuild_indexes_for_label`]: every table rewrite
+    /// the label's declared indexes need, each followed by its column's
+    /// registration. `muvera_only` limits it to MUVERA FDE columns.
+    ///
+    /// Returns the keyed scalar indexes whose keys it filled.
+    #[cfg(feature = "lance-backend")]
+    async fn fill_derived_columns(
+        &self,
+        label: &str,
+        muvera_only: bool,
+    ) -> Result<HashSet<String>> {
+        let declared: Vec<IndexDefinition> = self
+            .schema_manager
+            .schema()
             .indexes
             .iter()
             .filter(|idx| idx.label() == label)
             .cloned()
             .collect();
-
-        for index in indexes {
+        let mut filled = HashSet::new();
+        for index in declared {
             match index {
                 // A full rebuild must force the MUVERA FDE backfill: bulk-loaded / reopened
                 // rows aren't covered by the flush-time materializer (see
                 // `create_vector_index_inner`).
-                IndexDefinition::Vector(cfg) => self.create_vector_index_inner(cfg, true).await?,
-                IndexDefinition::Scalar(cfg) => self.create_scalar_index(cfg).await?,
-                IndexDefinition::FullText(cfg) => self.create_fts_index(cfg).await?,
-                IndexDefinition::Inverted(cfg) => self.create_inverted_index(cfg).await?,
+                IndexDefinition::Vector(cfg) => {
+                    self.prepare_muvera_fde(&cfg, Fill::Rewrite).await?;
+                }
+                _ if muvera_only => {}
                 // A rebuild re-derives the text column: bulk-loaded rows may
                 // predate it.
                 IndexDefinition::JsonFullText(cfg) => {
-                    self.create_json_fts_index_inner(cfg, true).await?
+                    self.fill_json_fts_column(&cfg, true).await?;
                 }
-                IndexDefinition::Sparse(cfg) => self.create_sparse_vector_index(cfg).await?,
+                IndexDefinition::Scalar(mut cfg) => {
+                    let schema = self.schema_manager.schema();
+                    if schema.resolve_scalar_index(&mut cfg).is_ok() && cfg.key.is_some() {
+                        drop(schema);
+                        self.fill_key_columns(&cfg, true).await?;
+                        filled.insert(cfg.name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(filled)
+    }
+
+    /// Phases 2 and 3 of [`Self::rebuild_indexes_for_label`]: the label's
+    /// default indexes, then every declared index on it except `skip`, none
+    /// of them rewriting the table. A keyed index named in `filled` has just
+    /// had its key filled ([`Fill::Filled`]); any other build that would need
+    /// a rewrite is left as it is ([`Fill::Never`]).
+    ///
+    /// `all_kinds` also rebuilds uni's own inverted and sparse indexes, which
+    /// live outside the table; a single index's rewrite does not touch them.
+    #[cfg(feature = "lance-backend")]
+    async fn restore_label_indexes(
+        &self,
+        label: &str,
+        filled: &HashSet<String>,
+        skip: Option<&str>,
+        all_kinds: bool,
+    ) -> Result<()> {
+        let (label_id, declared): (Option<u16>, Vec<IndexDefinition>) = {
+            let schema = self.schema_manager.schema();
+            (
+                schema.label_id_by_name(label),
+                schema
+                    .indexes
+                    .iter()
+                    .filter(|idx| idx.label() == label && Some(idx.name()) != skip)
+                    .cloned()
+                    .collect(),
+            )
+        };
+        if let (Some(backend), Some(label_id)) = (self.backend.as_ref(), label_id) {
+            VertexDataset::new(&self.base_uri, label, label_id)
+                .ensure_default_indexes(backend.as_ref())
+                .await?;
+        }
+        for index in declared {
+            match index {
+                IndexDefinition::Vector(cfg) => {
+                    self.create_vector_index_inner(cfg, Fill::Filled).await?;
+                }
+                IndexDefinition::Scalar(cfg) => {
+                    let fill = if filled.contains(&cfg.name) {
+                        Fill::Filled
+                    } else {
+                        Fill::Never
+                    };
+                    self.create_scalar_index_inner(cfg, fill).await?;
+                }
+                IndexDefinition::FullText(cfg) => self.create_fts_index(cfg).await?,
+                IndexDefinition::JsonFullText(cfg) => {
+                    self.create_json_fts_index_inner(cfg, Fill::Filled).await?;
+                }
+                IndexDefinition::Inverted(cfg) if all_kinds => {
+                    self.create_inverted_index(cfg).await?
+                }
+                IndexDefinition::Sparse(cfg) if all_kinds => {
+                    self.create_sparse_vector_index(cfg).await?
+                }
+                IndexDefinition::Inverted(_) | IndexDefinition::Sparse(_) => {}
                 _ => warn!("Unknown index type encountered during rebuild, skipping"),
             }
         }
@@ -1384,6 +2120,7 @@ impl IndexManager {
                     index_type: uni_common::core::schema::ScalarIndexType::BTree,
                     where_clause: None,
                     metadata: outcome.into_metadata(row_count),
+                    key: None,
                 };
                 self.schema_manager
                     .add_index(IndexDefinition::Scalar(config))?;
@@ -1613,4 +2350,43 @@ pub fn index_build_dim(
         .get(&config.label)
         .and_then(|props| props.get(&config.property))
         .and_then(|meta| crate::storage::muvera_index::resolve_vector_dim(&meta.r#type))
+}
+
+/// An Arrow column of key values of the declared key column type `ty`.
+#[cfg(feature = "lance-backend")]
+fn key_column_array(
+    ty: &uni_common::DataType,
+    values: Vec<Option<crate::storage::index_keys::KeyValue>>,
+) -> Result<arrow_array::ArrayRef> {
+    use crate::storage::index_keys::KeyValue;
+    Ok(match ty {
+        uni_common::DataType::Int64 => Arc::new(arrow_array::Int64Array::from(
+            values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KeyValue::Int(i)) => Some(i),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        uni_common::DataType::Float64 => Arc::new(arrow_array::Float64Array::from(
+            values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KeyValue::Float(f)) => Some(f),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        uni_common::DataType::String => Arc::new(arrow_array::StringArray::from(
+            values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KeyValue::Str(s)) => Some(s),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        other => return Err(anyhow!("no key column of type {other:?}")),
+    })
 }

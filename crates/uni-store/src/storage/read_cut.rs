@@ -165,6 +165,9 @@ pub struct ReadCut {
     /// complete commits an earlier process left above the cut.
     checking: std::sync::atomic::AtomicBool,
     units_closed: tokio::sync::Notify,
+    /// Table commits recorded so far, by any task: the progress a flush
+    /// stream's timeout watches (#355).
+    commits: std::sync::atomic::AtomicU64,
     fence: std::sync::OnceLock<Arc<crate::lease::WriteFence>>,
     last_refresh: Mutex<Option<Instant>>,
     /// Serializes standalone publishes.
@@ -210,6 +213,7 @@ impl ReadCut {
             recording: std::sync::atomic::AtomicBool::new(false),
             checking: std::sync::atomic::AtomicBool::new(false),
             units_closed: tokio::sync::Notify::new(),
+            commits: std::sync::atomic::AtomicU64::new(0),
             fence: std::sync::OnceLock::new(),
             last_refresh: Mutex::new(None),
             publishing: tokio::sync::Mutex::new(()),
@@ -219,6 +223,13 @@ impl ReadCut {
             done_out_of_turn: Mutex::new(BTreeSet::new()),
             turn_changed: tokio::sync::Notify::new(),
         }
+    }
+
+    /// How many table commits this cut has recorded. It only grows; a flush
+    /// stream whose count stays put is making no progress.
+    #[must_use]
+    pub fn commit_count(&self) -> u64 {
+        self.commits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Starts recording this handle's commits (a writable primary handle).
@@ -333,6 +344,8 @@ impl ReadCut {
     /// Records a loose commit, or one of the running task's unit: `table` now
     /// holds `version`.
     pub fn record(&self, table: &str, version: u64) {
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let unit = current_unit();
         let mut state = self.state.lock();
         let slot = state.committed.entry(table.to_string()).or_insert(0);

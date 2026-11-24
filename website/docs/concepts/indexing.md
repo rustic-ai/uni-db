@@ -298,7 +298,7 @@ db.schema()
 
 ## Scalar Indexes
 
-Scalar indexes optimize exact match and range queries on primitive properties.
+Scalar indexes optimize exact match and range queries. They work directly on strings, numbers, booleans and dates, and on several richer types through hidden *key columns* (see [Property Types](#property-types)).
 
 ### Index Types
 
@@ -325,6 +325,36 @@ CALL uni.schema.createIndex('Doc', 'tags', {"type": "LABEL_LIST"})
 ```
 
 `CREATE INDEX` always builds a BTree. `uni.schema.createIndex` accepts `BTREE`, `BITMAP` and `LABEL_LIST`. `Hash` is available only from the Rust schema builder (`ScalarType::Hash`); it has no separate on-disk form and is stored as a BTree.
+
+### Property Types
+
+A BTree, Hash or Bitmap index on a type Lance cannot index directly is built on hidden key columns derived from each value. You declare it as usual (`CREATE INDEX i FOR (e:Event) ON (e.ts)`); the key columns are internal and never appear in results or `labelInfo`.
+
+| Property type | Served predicates (against constants or parameters) | Not served |
+|---------------|------------------------------------------------------|------------|
+| `DATETIME` | `=`, `<`, `<=`, `>`, `>=`, `IN`, pattern-map equality, compared by instant | `<>`, other types, `datetime.realtime()` |
+| `TIME` | `=`, `<`, `<=`, `>`, `>=`, `IN`, pattern-map equality, compared in UTC (not wrapped at midnight) | `<>`, `localtime` |
+| `BTIC` | `btic_overlaps`, `btic_contains`, `btic_during`, `btic_before`, `btic_after`, `btic_meets`, `btic_starts`, `btic_finishes`, `btic_equals`, `btic_disjoint`, `btic_adjacent`, `btic_contains_point`, `=`, `IN`, `btic_lo` / `btic_hi` vs a datetime | |
+| `POINT`, `POINT3D`, `GEOPOINT` | `point.withinBBox(p, ll, ur)`, `distance(p, c) < r` / `<= r` (a 3-D point's z is not indexed) | point `=` and ordering, a constant of another CRS |
+| `MAP<STRING, T>` key path, `ON (n.m.k)` | `n.m.k` `=`, `<`, `<=`, `>`, `>=`, `IN`, for `T` a string, integer or float | whole-map predicates, deeper paths |
+
+A key containing spaces or punctuation is quoted: ``CREATE INDEX i FOR (n:Doc) ON (n.m.`content-type`)``. An expression such as `n.m.a + 1` is an expression index, not a map key.
+
+Types no scalar index can serve are refused when declared, with the index that fits:
+
+| Property type | Use instead |
+|---------------|-------------|
+| `LIST<STRING>` | `CREATE INVERTED INDEX` |
+| `VECTOR`, `LIST<VECTOR>` | `CREATE VECTOR INDEX` |
+| whole `JSON` column | `CREATE JSON FULLTEXT INDEX`, or a typed `MAP` and a key-path index |
+| whole `MAP` | an index on `n.m.<key>` |
+| other `LIST<T>`, `DURATION` (not ordered) | none; queries scan |
+
+A `DURATION` or `JSON` BTree created by an earlier release keeps working.
+
+**An index never changes the answer.** The predicate is still applied to every row the index reads, so a query returns the same rows with or without it. It can change whether a query *fails*: a predicate that raises on some row (for example `a.doc.n CONTAINS '7'` on a row whose `doc` is a string) raises without the index, but with it that row may never be read.
+
+**An index name names one index.** `CREATE INDEX i …` is refused when `i` already names an index on a different label or property; drop it first or choose another name. Repeating the same declaration, or `IF NOT EXISTS`, is fine.
 
 ### Composite Indexes
 

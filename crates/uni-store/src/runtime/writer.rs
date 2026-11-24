@@ -849,12 +849,15 @@ impl Writer {
                 auto_rebuild_enabled: config.index_rebuild.auto_rebuild_enabled,
             };
             let finalize_fn: Arc<dyn FinalizeFn> = Arc::new(WriterFinalizer);
-            Some(Arc::new(FlushCoordinator::new(
-                config.max_pending_flushes,
-                config.flush_stream_timeout,
-                shared,
-                finalize_fn,
-            )))
+            Some(Arc::new(
+                FlushCoordinator::new(
+                    config.max_pending_flushes,
+                    config.flush_stream_timeout,
+                    shared,
+                    finalize_fn,
+                )
+                .with_progress(storage.read_cut().clone()),
+            ))
         } else {
             None
         };

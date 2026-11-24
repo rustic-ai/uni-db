@@ -724,11 +724,363 @@ pub fn json_fts_text(value: &crate::Value, paths: &[String]) -> Option<String> {
 pub struct ScalarIndexConfig {
     pub name: String,
     pub label: String,
+    /// The logical properties indexed (`["ts"]`), as declared and reported.
     pub properties: Vec<String>,
     pub index_type: ScalarIndexType,
     pub where_clause: Option<String>,
     #[serde(default)]
     pub metadata: IndexMetadata,
+    /// Set when the property's type is indexed through derived key columns
+    /// rather than its own column (see [`IndexKey`]). Chosen from the declared
+    /// type by [`Schema::resolve_scalar_index`]; a user never spells it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<IndexKey>,
+}
+
+impl ScalarIndexConfig {
+    /// The table columns this index is built on: the key columns for a keyed
+    /// index, the properties otherwise.
+    #[must_use]
+    pub fn physical_columns(&self) -> Vec<&str> {
+        match &self.key {
+            Some(key) => key.physical_columns().iter().map(String::as_str).collect(),
+            None => self.properties.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// The Lance index names this index is built as, one per
+    /// [`Self::physical_columns`] entry for a keyed index (`idx_ts__dt`), the
+    /// index's own name otherwise.
+    #[must_use]
+    pub fn physical_index_names(&self) -> Vec<String> {
+        match &self.key {
+            Some(key) => key
+                .kind
+                .column_roles()
+                .iter()
+                .map(|role| format!("{}__{role}", self.name))
+                .collect(),
+            None => vec![self.name.clone()],
+        }
+    }
+}
+
+/// Name prefix of a keyed scalar index's key columns.
+pub const INDEX_KEY_COLUMN_PREFIX: &str = "__key_";
+
+/// How a keyed scalar index indexes its property: the key kind and the
+/// derived columns that hold the key.
+///
+/// A key column is computed from the property at every batch build of the
+/// label's table, like a JSON full-text index's text column, and is never
+/// stored in L0 or hashed into the content UID. A predicate on the property is
+/// rewritten into a bound on the key for the storage scan only; the original
+/// predicate is always kept, so the key may admit extra rows but never drops a
+/// match.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IndexKey {
+    pub kind: KeyKind,
+    /// Physical key columns, in [`KeyKind::column_roles`] order.
+    pub columns: Vec<String>,
+}
+
+impl IndexKey {
+    /// The key of `kind` for `property`, with its reserved column names.
+    #[must_use]
+    pub fn new(kind: KeyKind, property: &str) -> Self {
+        let columns = kind.column_names(property);
+        Self { kind, columns }
+    }
+
+    /// The derived columns the index is built on.
+    #[must_use]
+    pub fn physical_columns(&self) -> &[String] {
+        &self.columns
+    }
+}
+
+/// The kind of an [`IndexKey`]: which flat values are derived from the
+/// property.
+///
+/// [`KeyKind::DateTimeInstant`], [`KeyKind::TimeUtc`],
+/// [`KeyKind::BticBounds`] and [`KeyKind::PointCoords`] are chosen by
+/// [`KeyKind::for_property`], and [`KeyKind::MapPath`] by
+/// [`KeyKind::for_map_path`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+#[non_exhaustive]
+pub enum KeyKind {
+    /// A DATETIME's instant: `[__key_dt_<p>]`, Int64 nanoseconds since the
+    /// epoch. `WHERE` compares DATETIMEs by instant, so the key is exact for
+    /// `=` and ranges.
+    DateTimeInstant,
+    /// A TIME's UTC nanoseconds: `[__key_time_<p>]`, Int64
+    /// `nanos_since_midnight − offset_seconds · 10⁹` with no modulo, which is
+    /// what `WHERE` compares, so the key is exact for `=` and ranges.
+    TimeUtc,
+    /// A BTIC's raw bounds: `[__key_lo_<p>, __key_hi_<p>]`, Int64 ms, the
+    /// unbounded sentinels (`i64::MIN` / `i64::MAX`) kept. Every interval
+    /// predicate compares exactly these, so a predicate with one constant
+    /// side is a range (or a union of two) on the bounds.
+    BticBounds,
+    /// The value at a key path of a typed MAP: `[__key_map_<p>_<path>]`.
+    /// `value` is the map's declared value type (STRING, INT32/64,
+    /// FLOAT32/64); the key column holds the value as a read of `n.m.k`
+    /// returns it (Int64, Float64 or String), NULL where the key is missing.
+    /// The index's property is the dotted path (`m.k`).
+    MapPath { path: Vec<String>, value: DataType },
+    /// A point's coordinates: `[__key_px_<p>, __key_py_<p>]`, Float64:
+    /// `(x, y)`, or `(longitude, latitude)` when `geographic`; a 3-D point's
+    /// `z` is not keyed. `three_d` records a `Cartesian3D` column, whose
+    /// points carry another CRS name than a 2-D column's (see
+    /// [`KeyKind::point_crs`]).
+    PointCoords {
+        geographic: bool,
+        #[serde(default)]
+        three_d: bool,
+    },
+}
+
+/// What [`KeyKind::for_property`] decides for a declared type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyChoice {
+    /// A flat type: the property's own column is indexed.
+    Plain,
+    /// The property is indexed through a key of this kind.
+    Key(KeyKind),
+    /// The type cannot take a scalar index; the reason names what to do.
+    Refuse(String),
+    /// A new scalar index on the type is refused, with the reason; one
+    /// already in a catalog is kept as a plain index (it builds, and no
+    /// predicate uses it), so that the catalog keeps opening.
+    RefuseNew(String),
+}
+
+impl KeyKind {
+    /// The key a BTree, Hash or Bitmap index on a property of type `dt` is
+    /// built through.
+    ///
+    /// A nested Arrow column cannot take a Lance scalar index (#356). A
+    /// DATETIME is indexed through its instant, BTIC (a fixed-size binary
+    /// column no predicate compares) through its bounds, and POINT through
+    /// its coordinates. A list, vector, duration, whole JSON value or whole
+    /// map is refused with the index kind that fits (see
+    /// `refusal_pointer`); every other nested type is refused.
+    #[must_use]
+    pub fn for_property(dt: &DataType) -> KeyChoice {
+        if let Some(refusal) = Self::refusal_pointer(dt) {
+            return refusal;
+        }
+        match dt {
+            DataType::DateTime => KeyChoice::Key(Self::DateTimeInstant),
+            // `WHERE` compares TIMEs by their UTC nanoseconds.
+            DataType::Time => KeyChoice::Key(Self::TimeUtc),
+            // A BTIC is stored packed in a fixed-size binary column, which a
+            // BTree can index but no predicate compares; its bounds are keyed.
+            DataType::Btic => KeyChoice::Key(Self::BticBounds),
+            // A point is a struct; its two horizontal coordinates are keyed.
+            DataType::Point(pt) => KeyChoice::Key(Self::PointCoords {
+                geographic: matches!(pt, PointType::Geographic),
+                three_d: matches!(pt, PointType::Cartesian3D),
+            }),
+            dt if dt.to_arrow().is_nested() => KeyChoice::Refuse(format!(
+                "the property is {ty}, stored as a nested column, which Lance's scalar \
+                 indexes do not support. Declare it TIMESTAMP to index it, or leave it \
+                 unindexed (queries on it scan)",
+                ty = dt.repr_name(),
+            )),
+            _ => KeyChoice::Plain,
+        }
+    }
+
+    /// The key an index on the key path `path` of a MAP property whose
+    /// values are of type `value` (`n.m.k`) is built through: the value at
+    /// the path, in a column of the type the engine reads the map's values
+    /// as. Only a flat, ordered value type is keyed (STRING, the integers,
+    /// the floats).
+    #[must_use]
+    pub fn for_map_path(value: &DataType, path: &[String]) -> KeyChoice {
+        if Self::map_value_column_type(value).is_none() {
+            return KeyChoice::Refuse(format!(
+                "the map's values are {ty}; an index on a key path needs STRING, \
+                 integer or float values (queries on it scan)",
+                ty = value.repr_name(),
+            ));
+        }
+        if path.len() != 1 || path[0].is_empty() {
+            return KeyChoice::Refuse(
+                "a key path into a typed MAP names one key (`n.m.k`)".to_string(),
+            );
+        }
+        KeyChoice::Key(Self::MapPath {
+            path: path.to_vec(),
+            value: value.clone(),
+        })
+    }
+
+    /// The key column type for a MAP value type: the type a read of `n.m.k`
+    /// returns (an INT32 value reads as an integer, a FLOAT32 one as a
+    /// float). `None` for a value type a key path cannot index.
+    fn map_value_column_type(value: &DataType) -> Option<DataType> {
+        match value {
+            DataType::String => Some(DataType::String),
+            DataType::Int64 | DataType::Int32 => Some(DataType::Int64),
+            DataType::Float64 | DataType::Float32 => Some(DataType::Float64),
+            _ => None,
+        }
+    }
+
+    /// The property a key of this kind is derived from, for an index on
+    /// `property`: the MAP property for a key path (`m` for `m.k`), the
+    /// property itself otherwise.
+    #[must_use]
+    pub fn source_property<'a>(&self, property: &'a str) -> &'a str {
+        match self {
+            Self::MapPath { .. } => property.split_once('.').map_or(property, |(head, _)| head),
+            _ => property,
+        }
+    }
+
+    /// The refusal, naming the index kind that does fit, for a type no
+    /// scalar index serves: a list, a vector, a duration, a whole JSON value
+    /// or a whole map. `None` for any other type.
+    ///
+    /// DURATION and JSON are flat (binary) columns a BTree can be built on,
+    /// but its byte order serves no predicate: a new index is refused, and
+    /// one already in a catalog is kept ([`KeyChoice::RefuseNew`]).
+    fn refusal_pointer(dt: &DataType) -> Option<KeyChoice> {
+        Some(match dt {
+            DataType::List(inner) => match inner.as_ref() {
+                DataType::String => KeyChoice::Refuse(String::from(
+                    "the property is a LIST<STRING>, which a scalar index does not index. \
+                     Index its elements with an inverted index instead: \
+                     CREATE INVERTED INDEX <name> FOR (n:<Label>) ON (n.<property>)",
+                )),
+                DataType::Vector { .. } => KeyChoice::Refuse(String::from(
+                    "the property is a list of vectors, which a scalar index does \
+                     not index. Use a vector index: CREATE VECTOR INDEX <name> \
+                     FOR (n:<Label>) ON (n.<property>)",
+                )),
+                _ => KeyChoice::Refuse(String::from(
+                    "the property is a LIST, which a scalar index does not index, and \
+                     no index kind serves a list of this element type yet (a \
+                     LIST<STRING> takes an inverted index): queries on it scan",
+                )),
+            },
+            DataType::Vector { .. } => KeyChoice::Refuse(String::from(
+                "the property is a VECTOR, which a scalar index does not index. \
+                 Use a vector index: CREATE VECTOR INDEX <name> FOR (n:<Label>) \
+                 ON (n.<property>)",
+            )),
+            DataType::Duration => KeyChoice::RefuseNew(
+                "the property is DURATION. Durations are not ordered (`<` between two \
+                 durations is NULL), so no scalar index serves them: queries on it scan"
+                    .to_string(),
+            ),
+            DataType::CypherValue => KeyChoice::RefuseNew(
+                "the property is JSON, stored as an encoded value whose byte order no \
+                 predicate follows. For text search use a JSON full-text index: \
+                 CREATE JSON FULLTEXT INDEX <name> FOR (n:<Label>) ON <property>; to \
+                 compare values, declare it a typed MAP and index a key path: \
+                 CREATE INDEX <name> FOR (n:<Label>) ON (n.<property>.<key>)"
+                    .to_string(),
+            ),
+            DataType::Map(..) => KeyChoice::Refuse(String::from(
+                "the property is a whole MAP, which a scalar index does not index. \
+                 Index a key path instead: CREATE INDEX <name> FOR (n:<Label>) \
+                 ON (n.<property>.<key>)",
+            )),
+            _ => return None,
+        })
+    }
+
+    /// The CRS name a point of a [`KeyKind::PointCoords`] column carries when
+    /// `point(...)` wrote it: `WGS84`, `Cartesian` or `Cartesian-3D`.
+    /// `distance` compares CRS names exactly and raises on a mismatch, so
+    /// only a stored point carrying this name is keyed, and only a constant
+    /// carrying it is turned into a distance bound. `None` for other kinds.
+    #[must_use]
+    pub fn point_crs(&self) -> Option<&'static str> {
+        match self {
+            Self::PointCoords {
+                geographic: true, ..
+            } => Some("WGS84"),
+            Self::PointCoords { three_d: true, .. } => Some("Cartesian-3D"),
+            Self::PointCoords { .. } => Some("Cartesian"),
+            _ => None,
+        }
+    }
+
+    /// The role of each key column, in column order; also the suffix of the
+    /// Lance index built on it.
+    #[must_use]
+    pub fn column_roles(&self) -> &'static [&'static str] {
+        match self {
+            Self::DateTimeInstant => &["dt"],
+            Self::TimeUtc => &["time"],
+            Self::BticBounds => &["lo", "hi"],
+            Self::MapPath { .. } => &["map"],
+            Self::PointCoords { .. } => &["px", "py"],
+        }
+    }
+
+    /// The reserved key column names for `property`.
+    #[must_use]
+    pub fn column_names(&self, property: &str) -> Vec<String> {
+        match self {
+            Self::MapPath { path, .. } => {
+                // Sanitized for readability, with a hash of the exact path so
+                // two paths never share a column.
+                let joined = path.join(".");
+                let readable: String = path
+                    .join("_")
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                vec![format!(
+                    "{INDEX_KEY_COLUMN_PREFIX}map_{property}_{readable}_{:08x}",
+                    fnv1a32(joined.as_bytes())
+                )]
+            }
+            _ => self
+                .column_roles()
+                .iter()
+                .map(|role| format!("{INDEX_KEY_COLUMN_PREFIX}{role}_{property}"))
+                .collect(),
+        }
+    }
+
+    /// The declared type of each key column, in column order.
+    #[must_use]
+    pub fn column_types(&self) -> Vec<DataType> {
+        match self {
+            Self::DateTimeInstant | Self::TimeUtc => vec![DataType::Int64],
+            Self::BticBounds => vec![DataType::Int64, DataType::Int64],
+            Self::MapPath { value, .. } => {
+                vec![Self::map_value_column_type(value).unwrap_or_else(|| value.clone())]
+            }
+            Self::PointCoords { .. } => vec![DataType::Float64, DataType::Float64],
+        }
+    }
+
+    /// A short user-facing description, as reported by index listings.
+    #[must_use]
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::DateTimeInstant => "datetime instant",
+            Self::TimeUtc => "time utc",
+            Self::BticBounds => "btic lo/hi",
+            Self::MapPath { .. } => "map path",
+            Self::PointCoords { .. } => "point coordinates",
+        }
+    }
+}
+
+/// FNV-1a, 32 bits: a stable, dependency-free hash for column names.
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(*b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -738,6 +1090,167 @@ pub enum ScalarIndexType {
     Hash,
     Bitmap,
     LabelList,
+}
+
+impl Schema {
+    /// Resolve how `config` is built from the declared types of its
+    /// properties: set [`ScalarIndexConfig::key`] for a property indexed
+    /// through a key, clear it for a flat one, and return why the index can
+    /// never be built, naming the property, when its type cannot take one.
+    ///
+    /// An undeclared property is not judged: it has no column type yet, so
+    /// the index is plain until the property is declared and the index next
+    /// built (which is how an index recorded before its key existed is
+    /// upgraded). A key serves one property: a composite index over a keyed
+    /// type is refused.
+    ///
+    /// # Errors
+    ///
+    /// The reason the index is refused.
+    pub fn resolve_scalar_index(
+        &self,
+        config: &mut ScalarIndexConfig,
+    ) -> std::result::Result<(), String> {
+        if matches!(config.index_type, ScalarIndexType::LabelList) {
+            config.key = None;
+            return Ok(());
+        }
+        let declared = self.properties.get(&config.label);
+        let mut key = None;
+        for prop in &config.properties {
+            let refuse = |why: &str| {
+                format!(
+                    "a {kind:?} index cannot index {label}.{prop}: {why}",
+                    kind = config.index_type,
+                    label = config.label,
+                )
+            };
+            let Some(meta) = declared.and_then(|d| d.get(prop)) else {
+                // `m.k` on a declared MAP property `m`: a key path. Any other
+                // undeclared name is not judged.
+                let Some((head, choice)) = self.map_path_choice(&config.label, prop) else {
+                    continue;
+                };
+                match choice {
+                    KeyChoice::Key(kind) if config.properties.len() == 1 => {
+                        key = Some(IndexKey::new(kind, head));
+                    }
+                    KeyChoice::Key(_) => {
+                        return Err(refuse(
+                            "a key path is indexed through a derived key, and a key serves \
+                             a single-property index only. Index it on its own",
+                        ));
+                    }
+                    // A key path never resolves to a kept-when-recorded refusal.
+                    KeyChoice::Refuse(why) | KeyChoice::RefuseNew(why) => {
+                        return Err(refuse(&why));
+                    }
+                    KeyChoice::Plain => {}
+                }
+                continue;
+            };
+            match KeyKind::for_property(&meta.r#type) {
+                KeyChoice::Plain => {}
+                KeyChoice::Refuse(why) => return Err(refuse(&why)),
+                // Refused when new; kept, plain, when already recorded.
+                KeyChoice::RefuseNew(why) if !self.records_scalar_index(config) => {
+                    return Err(refuse(&why));
+                }
+                KeyChoice::RefuseNew(_) => {}
+                KeyChoice::Key(kind) if config.properties.len() == 1 => {
+                    key = Some(IndexKey::new(kind, prop));
+                }
+                KeyChoice::Key(_) => {
+                    return Err(refuse(&format!(
+                        "the property is {ty}, which is indexed through a derived key, \
+                         and a key serves a single-property index only. Index it on its own",
+                        ty = meta.r#type.repr_name(),
+                    )));
+                }
+            }
+        }
+        config.key = key;
+        Ok(())
+    }
+
+    /// For a dotted `property` (`m.k`) whose head is a declared MAP property
+    /// of `label`, the head and what [`KeyKind::for_map_path`] decides for
+    /// the rest of the path; `None` for anything else.
+    #[must_use]
+    pub fn map_path_choice<'a>(
+        &self,
+        label: &str,
+        property: &'a str,
+    ) -> Option<(&'a str, KeyChoice)> {
+        let (head, path) = property.split_once('.')?;
+        let meta = self.properties.get(label)?.get(head)?;
+        let DataType::Map(_, value) = &meta.r#type else {
+            return None;
+        };
+        let path: Vec<String> = path.split('.').map(str::to_string).collect();
+        Some((head, KeyKind::for_map_path(value, &path)))
+    }
+
+    /// Why `config` cannot be recorded under its name: another index already
+    /// holds the name with another kind, label or property list. Re-declaring
+    /// the same index is not a clash. Replacing it by name silently dropped
+    /// the index the name had (and let a refused type in as "recorded").
+    #[must_use]
+    pub fn scalar_index_name_clash(&self, config: &ScalarIndexConfig) -> Option<String> {
+        let existing = self.indexes.iter().find(|i| i.name() == config.name)?;
+        if self.records_scalar_index(config) {
+            return None;
+        }
+        let on = match existing {
+            IndexDefinition::Scalar(c) => format!("{}({})", c.label, c.properties.join(", ")),
+            other => format!("{} (a different index kind)", other.label()),
+        };
+        Some(format!(
+            "an index named '{}' already exists on {on}; drop it first or choose another name",
+            config.name
+        ))
+    }
+
+    /// Whether the catalog already records a scalar index named as `config`,
+    /// on the same label and properties.
+    #[must_use]
+    pub fn records_scalar_index(&self, config: &ScalarIndexConfig) -> bool {
+        self.indexes.iter().any(|idx| {
+            matches!(idx, IndexDefinition::Scalar(c)
+                if c.name == config.name
+                    && c.label == config.label
+                    && c.properties == config.properties)
+        })
+    }
+
+    /// Why `config` can never be built, or `None` (see
+    /// [`Self::resolve_scalar_index`]).
+    #[must_use]
+    pub fn scalar_index_refusal(&self, config: &ScalarIndexConfig) -> Option<String> {
+        self.resolve_scalar_index(&mut config.clone()).err()
+    }
+
+    /// The keyed scalar index serving `(label, property)`, if one is
+    /// `Online` and its key columns are registered on the label.
+    #[must_use]
+    pub fn keyed_scalar_index(&self, label: &str, property: &str) -> Option<&ScalarIndexConfig> {
+        let props = self.properties.get(label)?;
+        self.indexes.iter().find_map(|idx| match idx {
+            IndexDefinition::Scalar(cfg)
+                if cfg.label == label
+                    && cfg.properties.len() == 1
+                    && cfg.properties[0] == property
+                    && cfg.metadata.status == IndexStatus::Online
+                    && cfg
+                        .key
+                        .as_ref()
+                        .is_some_and(|k| k.columns.iter().all(|c| props.contains_key(c))) =>
+            {
+                Some(cfg)
+            }
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -752,6 +1265,7 @@ mod same_config_tests {
             index_type: ScalarIndexType::Hash,
             where_clause: None,
             metadata: IndexMetadata::default(),
+            key: None,
         })
     }
 
@@ -778,5 +1292,426 @@ mod same_config_tests {
         let a = scalar("idx", "name");
         let b = scalar("idx", "other");
         assert!(!a.same_config_as(&b));
+    }
+
+    /// The key is part of the configuration: a keyed and an unkeyed index on
+    /// the same property are different builds.
+    #[test]
+    fn key_differences_are_reported() {
+        let plain = scalar("idx", "ts");
+        let mut keyed = plain.clone();
+        if let IndexDefinition::Scalar(cfg) = &mut keyed {
+            cfg.key = Some(IndexKey::new(KeyKind::DateTimeInstant, "ts"));
+        }
+        assert!(!plain.same_config_as(&keyed));
+        assert!(keyed.same_config_as(&keyed.clone()));
+    }
+}
+
+#[cfg(test)]
+mod index_key_tests {
+    use super::*;
+
+    fn config(prop: &str, key: Option<IndexKey>) -> ScalarIndexConfig {
+        ScalarIndexConfig {
+            name: "idx_ts".to_string(),
+            label: "Event".to_string(),
+            properties: vec![prop.to_string()],
+            index_type: ScalarIndexType::BTree,
+            where_clause: None,
+            metadata: IndexMetadata::default(),
+            key,
+        }
+    }
+
+    fn schema_with(props: &[(&str, DataType)]) -> Schema {
+        let mut schema = Schema::default();
+        let entry = schema.properties.entry("Event".to_string()).or_default();
+        for (name, ty) in props {
+            entry.insert(
+                (*name).to_string(),
+                PropertyMeta {
+                    r#type: ty.clone(),
+                    nullable: true,
+                    added_in: 0,
+                    state: SchemaElementState::Active,
+                    generation_expression: None,
+                    description: None,
+                    default: None,
+                },
+            );
+        }
+        schema
+    }
+
+    #[test]
+    fn keyed_config_round_trips_through_json() {
+        let cfg = config("ts", Some(IndexKey::new(KeyKind::DateTimeInstant, "ts")));
+        let json = serde_json::to_string(&IndexDefinition::Scalar(cfg.clone())).unwrap();
+        assert!(json.contains("__key_dt_ts"), "{json}");
+        let back: IndexDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, IndexDefinition::Scalar(cfg));
+
+        for kind in [
+            KeyKind::TimeUtc,
+            KeyKind::BticBounds,
+            KeyKind::MapPath {
+                path: vec!["a".into(), "b c".into()],
+                value: DataType::Int64,
+            },
+            KeyKind::PointCoords {
+                geographic: true,
+                three_d: false,
+            },
+        ] {
+            let key = IndexKey::new(kind, "p");
+            let json = serde_json::to_string(&key).unwrap();
+            assert_eq!(serde_json::from_str::<IndexKey>(&json).unwrap(), key);
+        }
+    }
+
+    /// A catalog written before keys existed has no `key` field and reads as
+    /// unkeyed; an unkeyed index writes no `key` field, so the catalog an
+    /// older binary reads is unchanged.
+    #[test]
+    fn old_catalog_json_deserializes_unchanged() {
+        let old = r#"{"type":"Scalar","name":"idx_ts","label":"Event","properties":["ts"],
+                      "index_type":"BTree","where_clause":null,
+                      "metadata":{"status":"Failed","last_built_at":null,"row_count_at_build":null}}"#;
+        let IndexDefinition::Scalar(cfg) = serde_json::from_str::<IndexDefinition>(old).unwrap()
+        else {
+            panic!("not scalar");
+        };
+        assert_eq!(cfg.key, None);
+        assert_eq!(cfg.metadata.status, IndexStatus::Failed);
+        let json = serde_json::to_string(&IndexDefinition::Scalar(config("ts", None))).unwrap();
+        assert!(!json.contains("key"), "{json}");
+    }
+
+    #[test]
+    fn column_names_are_reserved_and_distinct() {
+        let names = KeyKind::DateTimeInstant.column_names("ts");
+        assert_eq!(names, vec!["__key_dt_ts".to_string()]);
+        assert!(names.iter().all(|n| is_reserved_property_name(n)));
+        assert!(names.iter().all(|n| is_derived_property_name(n)));
+        let path = |p: &[&str]| KeyKind::MapPath {
+            path: p.iter().map(|s| (*s).to_string()).collect(),
+            value: DataType::String,
+        };
+        assert_ne!(
+            path(&["a_b"]).column_names("m"),
+            path(&["a", "b"]).column_names("m"),
+            "two paths must never share a column"
+        );
+        let cfg = config("ts", Some(IndexKey::new(KeyKind::DateTimeInstant, "ts")));
+        assert_eq!(cfg.physical_columns(), vec!["__key_dt_ts"]);
+        assert_eq!(cfg.physical_index_names(), vec!["idx_ts__dt".to_string()]);
+        assert_eq!(config("ts", None).physical_columns(), vec!["ts"]);
+    }
+
+    #[test]
+    fn resolve_chooses_the_key_from_the_declared_type() {
+        let schema = schema_with(&[
+            ("ts", DataType::DateTime),
+            ("at", DataType::Time),
+            ("tags", DataType::List(Box::new(DataType::String))),
+            ("n", DataType::Int64),
+            ("valid", DataType::Btic),
+        ]);
+        let mut cfg = config("ts", None);
+        schema.resolve_scalar_index(&mut cfg).unwrap();
+        assert_eq!(cfg.key, Some(IndexKey::new(KeyKind::DateTimeInstant, "ts")));
+
+        // A BTIC is keyed by its two raw bounds.
+        let mut cfg = config("valid", None);
+        schema.resolve_scalar_index(&mut cfg).unwrap();
+        let key = cfg.key.clone().expect("a BTIC index is keyed");
+        assert_eq!(key, IndexKey::new(KeyKind::BticBounds, "valid"));
+        assert_eq!(
+            cfg.physical_columns(),
+            vec!["__key_lo_valid", "__key_hi_valid"]
+        );
+        assert_eq!(
+            cfg.physical_index_names(),
+            vec!["idx_ts__lo".to_string(), "idx_ts__hi".to_string()]
+        );
+
+        let mut cfg = config("n", Some(IndexKey::new(KeyKind::DateTimeInstant, "n")));
+        schema.resolve_scalar_index(&mut cfg).unwrap();
+        assert_eq!(cfg.key, None, "a flat type has no key");
+
+        let mut cfg = config("undeclared", None);
+        schema.resolve_scalar_index(&mut cfg).unwrap();
+        assert_eq!(cfg.key, None);
+
+        // A TIME is keyed by its UTC nanoseconds.
+        let mut cfg = config("at", None);
+        schema.resolve_scalar_index(&mut cfg).unwrap();
+        assert_eq!(cfg.key, Some(IndexKey::new(KeyKind::TimeUtc, "at")));
+        assert_eq!(cfg.physical_columns(), vec!["__key_time_at"]);
+
+        // Not yet keyed: refused as #356 refuses them.
+        let err = schema
+            .resolve_scalar_index(&mut config("tags", None))
+            .unwrap_err();
+        assert!(err.contains("tags") && err.contains("cannot"), "{err}");
+
+        let mut composite = config("ts", None);
+        composite.properties.push("n".to_string());
+        assert!(schema.resolve_scalar_index(&mut composite).is_err());
+
+        let mut label_list = config("tags", None);
+        label_list.index_type = ScalarIndexType::LabelList;
+        schema.resolve_scalar_index(&mut label_list).unwrap();
+    }
+
+    #[test]
+    fn resolve_keys_a_typed_map_path() {
+        let map = |v: DataType| DataType::Map(Box::new(DataType::String), Box::new(v));
+        let schema = schema_with(&[
+            ("m", map(DataType::Int32)),
+            ("f", map(DataType::Float32)),
+            ("s", map(DataType::String)),
+            ("b", map(DataType::Bool)),
+            ("l", map(DataType::List(Box::new(DataType::Int64)))),
+            ("n", DataType::Int64),
+        ]);
+        let path_key = |head: &str, k: &str, value: DataType| {
+            IndexKey::new(
+                KeyKind::MapPath {
+                    path: vec![k.to_string()],
+                    value,
+                },
+                head,
+            )
+        };
+        // The key column has the type the engine reads the values as.
+        for (prop, head, k, value, column) in [
+            ("m.a", "m", "a", DataType::Int32, DataType::Int64),
+            ("f.x", "f", "x", DataType::Float32, DataType::Float64),
+            ("s.name", "s", "name", DataType::String, DataType::String),
+        ] {
+            let mut cfg = config(prop, None);
+            schema.resolve_scalar_index(&mut cfg).unwrap();
+            let key = cfg.key.clone().expect("a typed MAP path is keyed");
+            assert_eq!(key, path_key(head, k, value), "{prop}");
+            assert_eq!(key.kind.column_types(), vec![column], "{prop}");
+            assert_eq!(key.kind.source_property(prop), head);
+            assert!(
+                key.columns[0].starts_with(&format!("__key_map_{head}_{k}_")),
+                "{key:?}"
+            );
+        }
+        // Two paths on one map have distinct columns.
+        let (mut a, mut b) = (config("m.a", None), config("m.b", None));
+        schema.resolve_scalar_index(&mut a).unwrap();
+        schema.resolve_scalar_index(&mut b).unwrap();
+        assert_ne!(a.physical_columns(), b.physical_columns());
+
+        // Refused: an unordered or nested value type, a deeper path, a
+        // composite index.
+        for prop in ["b.k", "l.k", "m.a.b"] {
+            let err = schema
+                .resolve_scalar_index(&mut config(prop, None))
+                .unwrap_err();
+            assert!(err.contains(prop), "{err}");
+        }
+        let mut composite = config("m.a", None);
+        composite.properties.push("n".to_string());
+        assert!(schema.resolve_scalar_index(&mut composite).is_err());
+
+        // A dotted name whose head is not a MAP, or is undeclared, is not
+        // judged.
+        for prop in ["n.k", "undeclared.k"] {
+            let mut cfg = config(prop, None);
+            schema.resolve_scalar_index(&mut cfg).unwrap();
+            assert_eq!(cfg.key, None, "{prop}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod point_and_refusal_tests {
+    use super::*;
+
+    fn config(prop: &str) -> ScalarIndexConfig {
+        ScalarIndexConfig {
+            name: format!("idx_{prop}"),
+            label: "Place".to_string(),
+            properties: vec![prop.to_string()],
+            index_type: ScalarIndexType::BTree,
+            where_clause: None,
+            metadata: IndexMetadata::default(),
+            key: None,
+        }
+    }
+
+    fn schema_with(props: &[(&str, DataType)]) -> Schema {
+        let mut schema = Schema::default();
+        let entry = schema.properties.entry("Place".to_string()).or_default();
+        for (name, ty) in props {
+            entry.insert(
+                (*name).to_string(),
+                PropertyMeta {
+                    r#type: ty.clone(),
+                    nullable: true,
+                    added_in: 0,
+                    state: SchemaElementState::Active,
+                    generation_expression: None,
+                    description: None,
+                    default: None,
+                },
+            );
+        }
+        schema
+    }
+
+    /// A key with a space or a hyphen is a key.
+    #[test]
+    fn quoted_keys_are_keys() {
+        let mut schema = Schema::default();
+        schema.labels.insert(
+            "Doc".into(),
+            LabelMeta {
+                id: 1,
+                created_at: chrono::Utc::now(),
+                state: SchemaElementState::Active,
+                description: None,
+            },
+        );
+        let mut props = HashMap::new();
+        props.insert(
+            "m".to_string(),
+            PropertyMeta {
+                r#type: DataType::Map(Box::new(DataType::String), Box::new(DataType::Int64)),
+                nullable: true,
+                added_in: 1,
+                state: SchemaElementState::Active,
+                generation_expression: None,
+                description: None,
+                default: None,
+            },
+        );
+        schema.properties.insert("Doc".into(), props);
+        // The catalog API takes a key as named: Cypher's planner
+        // parenthesizes an expression before it gets here (see
+        // `normalize_expression_for_storage`).
+        let (_, choice) = schema
+            .map_path_choice("Doc", "m.content-type")
+            .expect("a map head");
+        assert!(
+            matches!(choice, KeyChoice::Key(KeyKind::MapPath { .. })),
+            "{choice:?}"
+        );
+        let (_, choice) = schema.map_path_choice("Doc", "m.a b").expect("a map head");
+        assert!(
+            matches!(choice, KeyChoice::Key(KeyKind::MapPath { .. })),
+            "{choice:?}"
+        );
+    }
+    #[test]
+    fn a_point_is_keyed_by_its_coordinates() {
+        let schema = schema_with(&[
+            ("geo", DataType::Point(PointType::Geographic)),
+            ("xy", DataType::Point(PointType::Cartesian2D)),
+            ("xyz", DataType::Point(PointType::Cartesian3D)),
+        ]);
+        for (prop, geographic, three_d, crs) in [
+            ("geo", true, false, "WGS84"),
+            ("xy", false, false, "Cartesian"),
+            ("xyz", false, true, "Cartesian-3D"),
+        ] {
+            let mut cfg = config(prop);
+            schema.resolve_scalar_index(&mut cfg).unwrap();
+            let key = cfg.key.expect("a point index is keyed");
+            assert_eq!(
+                key.kind,
+                KeyKind::PointCoords {
+                    geographic,
+                    three_d
+                }
+            );
+            assert_eq!(key.kind.point_crs(), Some(crs));
+            assert_eq!(
+                key.columns,
+                vec![format!("__key_px_{prop}"), format!("__key_py_{prop}")]
+            );
+            assert_eq!(key.kind.column_types(), vec![DataType::Float64; 2]);
+        }
+        assert_eq!(KeyKind::DateTimeInstant.point_crs(), None);
+        // A key recorded without `three_d` reads as 2-D.
+        let old: KeyKind =
+            serde_json::from_str(r#"{"kind":"PointCoords","geographic":false}"#).unwrap();
+        assert_eq!(
+            old,
+            KeyKind::PointCoords {
+                geographic: false,
+                three_d: false
+            }
+        );
+    }
+
+    /// Each refusal names the property and the index kind that fits.
+    #[test]
+    fn refusals_name_the_index_kind_that_fits() {
+        let schema = schema_with(&[
+            ("tags", DataType::List(Box::new(DataType::String))),
+            ("nums", DataType::List(Box::new(DataType::Int64))),
+            ("emb", DataType::Vector { dimensions: 4 }),
+            (
+                "embs",
+                DataType::List(Box::new(DataType::Vector { dimensions: 4 })),
+            ),
+            ("took", DataType::Duration),
+            ("doc", DataType::CypherValue),
+            (
+                "attrs",
+                DataType::Map(Box::new(DataType::String), Box::new(DataType::Int64)),
+            ),
+        ]);
+        for (prop, pointer) in [
+            ("tags", "CREATE INVERTED INDEX"),
+            ("nums", "queries on it scan"),
+            ("emb", "CREATE VECTOR INDEX"),
+            ("embs", "CREATE VECTOR INDEX"),
+            ("took", "not ordered"),
+            ("doc", "CREATE JSON FULLTEXT INDEX"),
+            ("doc", "ON (n.<property>.<key>)"),
+            ("attrs", "ON (n.<property>.<key>)"),
+        ] {
+            let err = schema.resolve_scalar_index(&mut config(prop)).unwrap_err();
+            assert!(
+                err.contains(&format!("Place.{prop}")) && err.contains(pointer),
+                "{prop}: {err}"
+            );
+        }
+    }
+
+    /// A DURATION or whole-JSON BTree already in a catalog is kept, plain;
+    /// a new one is refused. A refused nested type stays refused either way.
+    #[test]
+    fn a_recorded_duration_or_json_index_is_kept_plain() {
+        let mut schema = schema_with(&[
+            ("took", DataType::Duration),
+            ("doc", DataType::CypherValue),
+            ("tags", DataType::List(Box::new(DataType::Int64))),
+        ]);
+        for prop in ["took", "doc", "tags"] {
+            schema.indexes.push(IndexDefinition::Scalar(config(prop)));
+        }
+        for prop in ["took", "doc"] {
+            let mut cfg = config(prop);
+            schema.resolve_scalar_index(&mut cfg).unwrap();
+            assert_eq!(cfg.key, None);
+            // Another name is a new index.
+            let mut renamed = config(prop);
+            renamed.name = "other".to_string();
+            assert!(schema.resolve_scalar_index(&mut renamed).is_err());
+        }
+        // The same name on another property is new too.
+        let mut moved = config("took");
+        moved.properties = vec!["doc".to_string()];
+        assert!(schema.resolve_scalar_index(&mut moved).is_err());
+        assert!(schema.resolve_scalar_index(&mut config("tags")).is_err());
     }
 }

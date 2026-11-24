@@ -152,7 +152,8 @@ pub struct UniConfig {
     /// `async_flush_enabled` is true (default: 2).
     pub max_pending_flushes: usize,
 
-    /// Per-stream async flush timeout (default: 60s; UNI_FLUSH_STREAM_TIMEOUT override).
+    /// Async flush stream's time without a table commit (default: 60s, at most
+    /// 15x that in all; UNI_FLUSH_STREAM_TIMEOUT override).
     pub flush_stream_timeout: Duration,
 
     /// Maximum time without progress draining async flushes (default: 900s).

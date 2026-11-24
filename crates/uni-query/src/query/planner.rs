@@ -3134,6 +3134,11 @@ pub struct QueryPlanner {
     /// parameters' values (see `folded_limit_skip_params`). Interior-mutable
     /// because `plan` takes `&self`.
     folded_limit_skip_params: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Whether the view planned for lets a keyed index bound its key, as the
+    /// physical planner decides it (`build_indexed_property_pushdown`): not on
+    /// a pinned snapshot or a fork. EXPLAIN reports a keyed index `used` only
+    /// when it is.
+    index_keys_vouched: bool,
 }
 
 struct TraverseParams<'a> {
@@ -3209,6 +3214,7 @@ impl QueryPlanner {
             replacement_scans_enabled: false,
             cardinality: None,
             folded_limit_skip_params: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            index_keys_vouched: true,
         }
     }
 
@@ -3219,6 +3225,15 @@ impl QueryPlanner {
         cardinality: Arc<uni_store::storage::cardinality::CardinalityCache>,
     ) -> Self {
         self.cardinality = Some(cardinality);
+        self
+    }
+
+    /// Say whether the view planned for lets a keyed index bound its key
+    /// (not a pinned snapshot, not a fork), so that EXPLAIN reports what the
+    /// physical planner will do.
+    #[must_use]
+    pub fn with_index_keys_vouched(mut self, vouched: bool) -> Self {
+        self.index_keys_vouched = vouched;
         self
     }
 
@@ -11713,6 +11728,13 @@ impl QueryPlanner {
                     let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
                     let strategy = analyzer.analyze(filter, variable, *label_id);
                     push_candidate_usage(&strategy, label_name, usage);
+                    push_keyed_usage(
+                        &strategy,
+                        label_name,
+                        &self.params,
+                        self.index_keys_vouched,
+                        usage,
+                    );
                     for (prop, kind) in strategy.indexed_equality_columns {
                         let kind_name = match kind {
                             ScalarIndexType::Hash => "HASH",
@@ -11795,6 +11817,13 @@ impl QueryPlanner {
                     let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
                     let strategy = analyzer.analyze(predicate, variable, *label_id);
                     push_candidate_usage(&strategy, label_name, usage);
+                    push_keyed_usage(
+                        &strategy,
+                        label_name,
+                        &self.params,
+                        self.index_keys_vouched,
+                        usage,
+                    );
                 }
                 self.collect_index_usage(input, usage)
             }
@@ -12041,14 +12070,32 @@ impl QueryPlanner {
     /// For simple property: u.email -> "email"
     /// For expressions: lower(u.email) -> "lower(email)"
     fn normalize_expression_for_storage(expr: &Expr) -> String {
-        match expr {
-            Expr::Property(base, prop) if matches!(**base, Expr::Variable(_)) => prop.clone(),
-            _ => {
-                // Serialize expression and strip variable prefix
-                let expr_str = expr.to_string_repr();
-                Self::strip_variable_prefix(&expr_str)
+        // A property chain on the variable, `n.m.k` -> "m.k": the dotted
+        // path in full (stripping each `x.` prefix would turn `n.m.a.b`
+        // into "m.b").
+        fn property_path(expr: &Expr) -> Option<String> {
+            match expr {
+                Expr::Property(base, prop) => match base.as_ref() {
+                    Expr::Variable(_) => Some(prop.clone()),
+                    inner => Some(format!("{}.{prop}", property_path(inner)?)),
+                },
+                _ => None,
             }
         }
+        property_path(expr).unwrap_or_else(|| {
+            // Serialize expression and strip variable prefix
+            let expr_str = Self::strip_variable_prefix(&expr.to_string_repr());
+            // Anything but a property chain is an expression index. One
+            // without a call of its own (`n.m.a + 1` → "m.a + 1") is
+            // parenthesized, which is how the executor tells an expression
+            // from a property name; unwrapped, it read as a key path into the
+            // map entry named `a + 1`.
+            if expr_str.contains('(') && expr_str.contains(')') {
+                expr_str
+            } else {
+                format!("({expr_str})")
+            }
+        })
     }
 
     /// Strip variable references like "u.prop" from expression strings
@@ -12253,6 +12300,7 @@ impl QueryPlanner {
                         index_type: ScalarIndexType::BTree,
                         where_clause: cfg.where_clause.map(|e| e.to_string_repr()),
                         metadata: Default::default(),
+                        key: None,
                     },
                     if_not_exists: cfg.if_not_exists,
                 })
@@ -15632,6 +15680,53 @@ fn push_candidate_usage(
                  unflushed rows included; the predicate is still applied"
                     .to_string(),
             ),
+        });
+    }
+}
+
+/// Report each conjunct on a keyed property (see
+/// [`crate::query::pushdown::KeyedPredicate`]): `used` when its operand folds
+/// to a value of the property's type, so that the scan bounds the index key
+/// with it. The clock read here only decides whether the operand folds.
+fn push_keyed_usage(
+    strategy: &crate::query::pushdown::PushdownStrategy,
+    label_name: &str,
+    params: &HashMap<String, uni_common::Value>,
+    vouched: bool,
+    usage: &mut Vec<IndexUsage>,
+) {
+    for keyed in &strategy.keyed_predicates {
+        let folds = keyed.lance_bound(params, chrono::Utc::now()).is_some();
+        let used = vouched && folds;
+        if usage
+            .iter()
+            .any(|u| u.used && u.property == keyed.property && u.label_or_type == label_name)
+        {
+            continue;
+        }
+        usage.push(IndexUsage {
+            label_or_type: label_name.to_string(),
+            property: keyed.property.clone(),
+            index_type: "BTREE".to_string(),
+            used,
+            reason: Some(if used {
+                format!(
+                    "index '{}' bounds its {} key in the Lance scan; the predicate is still applied",
+                    keyed.index_name,
+                    keyed.key.kind.describe()
+                )
+            } else if !folds {
+                format!(
+                    "index '{}' not used: the operand is not a constant of the property's type, \
+                     or the predicate holds for every key",
+                    keyed.index_name
+                )
+            } else {
+                format!(
+                    "index '{}' not used: its key cannot vouch for a pinned snapshot or a fork",
+                    keyed.index_name
+                )
+            }),
         });
     }
 }

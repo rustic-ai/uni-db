@@ -1497,6 +1497,10 @@ impl Uni {
     ///
     /// This method flushes any pending data and waits for all background tasks to complete
     /// (with a timeout). After calling this method, the database instance should not be used.
+    ///
+    /// # Errors
+    /// A failed final flush, among others; see [`Self::shutdown_in_place`].
+    /// The background tasks stop and the writer lease is released either way.
     pub async fn shutdown(self) -> Result<()> {
         self.shutdown_in_place().await
     }
@@ -1511,24 +1515,57 @@ impl Uni {
     /// scratch directory was removed while writers were still finishing, and
     /// survived a few percent of the time.
     ///
+    /// Every step runs even when an earlier one fails: the background tasks
+    /// stop and the writer lease is released either way, so the store is not
+    /// left locked by a handle that is going away.
+    ///
     /// # Errors
-    /// Propagates a failure to stop the background tasks. A flush failure is
-    /// logged rather than propagated, matching the previous behaviour.
+    /// Returns the first of these that failed, in this order (the others are
+    /// logged):
+    /// - the final flush. Its commits are then only in the WAL. On a hybrid
+    ///   store that WAL is on this host, so another host opening the store
+    ///   does not see them: reopen the store from this host's local directory
+    ///   first, which replays and flushes them.
+    /// - publishing the read cut (index builds, compaction or widening this
+    ///   handle made since its last publish, which the next open rolls back).
+    /// - stopping the background tasks.
+    ///
+    /// Recording the WAL's announced mark is not an error: if it fails, the
+    /// next open announces the latest commits again.
     pub async fn shutdown_in_place(&self) -> Result<()> {
         // Stop an in-flight compaction at its next safe point rather than
         // letting it run to completion against a closing database.
         self.inner.storage.cancel_compaction();
 
-        // Flush pending data.
+        let mut flush_result: Result<()> = Ok(());
+        let mut publish_result: Result<()> = Ok(());
         if let Some(writer) = &self.inner.writer {
+            // Whether anything is unflushed: commits in the current L0, a
+            // buffer still being flushed, or an earlier flush that failed and
+            // stranded its L0. A handle with nothing unflushed loses nothing
+            // when its final flush fails (a fenced writer that never wrote,
+            // say), so that failure is logged, not returned.
+            let unflushed = writer.l0_manager.get_current().read().mutation_count > 0
+                || !writer.l0_manager.get_pending_flush().is_empty()
+                || writer
+                    .flush_coordinator()
+                    .is_some_and(|c| c.failed_flush_count() > 0);
+            // Flush pending data.
             if let Err(e) = writer.flush_to_l1(None).await {
-                tracing::error!("Error flushing during shutdown: {}", e);
+                if unflushed {
+                    flush_result = Err(self.shutdown_flush_error(e));
+                } else {
+                    tracing::warn!(
+                        error = %e,
+                        "the final flush at shutdown failed with nothing unflushed"
+                    );
+                }
             }
             // Compaction, index builds and widening this handle made since its
             // last publish: other handles, and the next open, read them only
-            // once a manifest names them.
+            // once a manifest names it.
             if let Err(e) = self.inner.storage.publish_cut().await {
-                tracing::error!("Error publishing the read cut during shutdown: {}", e);
+                publish_result = Err(storage_error(e));
             }
             // A flush that did not run (or found nothing to flush) leaves
             // announced commits in the WAL; record that they were announced,
@@ -1552,19 +1589,65 @@ impl Uni {
             }
         }
 
-        self.inner
+        let tasks_result = self
+            .inner
             .shutdown_handle
             .shutdown_async()
             .await
-            .map_err(UniError::Internal)?;
+            .map_err(UniError::Internal);
 
-        // Every task has stopped: give the store up for the next writer.
+        // Every task has stopped (or failed to): give the store up for the
+        // next writer either way. Keeping the lease would only block the
+        // same-host reopen that replays the WAL, and it expires anyway.
         if let Some(hold) = &self.inner.writer_hold {
             hold.release().await;
         }
 
         self.reap_scratch_dir();
-        Ok(())
+
+        let mut first: Option<UniError> = None;
+        for (what, result) in [
+            ("final flush", flush_result),
+            ("read-cut publish", publish_result),
+            ("stopping background tasks", tasks_result),
+        ] {
+            if let Err(e) = result {
+                if first.is_none() {
+                    first = Some(e);
+                } else {
+                    tracing::error!(error = %e, "shutdown: {what} also failed");
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// The error a failed final flush returns from shutdown.
+    ///
+    /// A typed error keeps its variant. On a hybrid store, whose WAL is on
+    /// this host, an untyped one also says where the commits are, since
+    /// another host opening the store does not see them.
+    fn shutdown_flush_error(&self, e: anyhow::Error) -> UniError {
+        let hybrid = self
+            .inner
+            .storage
+            .origin()
+            .is_some_and(|o| o.local.is_some());
+        tracing::error!(error = %e, hybrid, "Error flushing during shutdown");
+        match e.downcast::<UniError>() {
+            Ok(typed) => typed,
+            // The cause is in the message itself: `UniError::Internal`
+            // displays only the outermost message of its error.
+            Err(e) if hybrid => UniError::Internal(anyhow::anyhow!(
+                "the final flush at shutdown failed ({e:#}): the unflushed commits are only \
+                 in this host's local WAL. Reopen the store from this host's local \
+                 directory, which replays and flushes them, before opening it anywhere else"
+            )),
+            Err(e) => UniError::Internal(anyhow::anyhow!(
+                "the final flush at shutdown failed ({e:#}): the unflushed commits are in the \
+                 WAL, and the next open replays them"
+            )),
+        }
     }
 
     /// Drops this handle's claim on an `in_memory()` database's scratch
@@ -3005,6 +3088,22 @@ impl UniBuilder {
             }
             recovered
         };
+        // A scalar index recorded before its property's type had a key (a
+        // #356-era catalog, or a property typed after the index was declared)
+        // is upgraded to a keyed one here, before the store serves: the key
+        // is filled by a table rewrite, which a flush never runs and a fork
+        // cannot. A read-only handle writes nothing.
+        #[cfg(feature = "lance-backend")]
+        if !self.read_only {
+            let upgraded = storage
+                .index_manager()
+                .upgrade_keyed_indexes()
+                .await
+                .map_err(UniError::Internal)?;
+            if !upgraded.is_empty() {
+                storage.publish_cut().await.map_err(UniError::Internal)?;
+            }
+        }
 
         // Wire up IndexRebuildManager for post-flush automatic rebuild scheduling
         let mut auto_rebuild_manager = None;
@@ -3108,7 +3207,15 @@ impl UniBuilder {
                         _ = shutdown_rx.recv() => {
                             if flush_on_shutdown {
                                 tracing::info!("Auto-flush shutting down, performing final flush");
-                                let _ = writer_clone.flush_to_l1(None).await;
+                                // Nothing awaits this task's result; `shutdown`'s own flush
+                                // reports a failure to its caller.
+                                if let Err(e) = writer_clone.flush_to_l1(None).await {
+                                    tracing::error!(
+                                        error = %e,
+                                        "auto-flush: the final flush at shutdown failed; the \
+                                         unflushed commits are in the WAL"
+                                    );
+                                }
                             } else {
                                 tracing::info!("Auto-flush shutting down; the WAL holds L0");
                             }

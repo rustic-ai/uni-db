@@ -151,10 +151,16 @@ pub struct FlushCoordinator {
     last_flush_error: Arc<parking_lot::Mutex<Option<String>>>,
     drain_notify: Arc<tokio::sync::Notify>,
     max_pending_flushes: usize,
-    /// Wall-clock bound on a single stream phase. A stream that exceeds this
-    /// is converted into a data-safe flush *failure* so its rotate-seq is
-    /// still submitted and the finalizer never wedges (issue #132).
+    /// Bound on a stream phase's time *without progress*. A stream that makes
+    /// no table commit for this long (nor any other stream, whose commits it
+    /// may be waiting behind) is converted into a data-safe flush *failure*,
+    /// so its rotate-seq is still submitted and the finalizer never wedges
+    /// (issue #132). Without a progress source it bounds the whole stream.
     stream_timeout: std::time::Duration,
+    /// Where progress is read: the store's table-commit count. Each commit
+    /// resets the idle bound, so a flush to a slow object store that keeps
+    /// committing tables is not abandoned (#355).
+    progress: Option<Arc<crate::storage::read_cut::ReadCut>>,
     /// Tracked for `ShutdownHandle::track_task` registration AND for
     /// `shutdown()`'s await. Set to None after either takes it.
     finalizer_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -222,6 +228,82 @@ impl Drop for FlushSeqGuard {
     }
 }
 
+/// How many stream timeouts a progressing stream may run in all.
+pub const STREAM_TIMEOUT_CAP_FACTOR: u32 = 15;
+
+/// Why [`run_with_stream_timeout`] gave up on a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamExpired {
+    /// No table commit for a whole timeout.
+    Idle,
+    /// Progressing, but past the overall cap.
+    Cap,
+}
+
+impl StreamExpired {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Cap => "cap",
+        }
+    }
+
+    fn describe(self, timeout: std::time::Duration) -> String {
+        match self {
+            Self::Idle => format!("{timeout:?} without a table commit"),
+            Self::Cap => format!(
+                "{:?} in all (the cap, {STREAM_TIMEOUT_CAP_FACTOR} x the timeout)",
+                timeout.saturating_mul(STREAM_TIMEOUT_CAP_FACTOR)
+            ),
+        }
+    }
+}
+
+/// Runs `fut`, giving up after `timeout` passes with no table commit in
+/// `progress`, or after [`STREAM_TIMEOUT_CAP_FACTOR`] times `timeout` in all.
+/// Without a progress source, `timeout` bounds the whole run.
+///
+/// A stalled stream (#132) commits nothing, so it is still caught after one
+/// timeout; a slow one that keeps committing tables runs on (#355). Commits
+/// by other tasks count too: a stream waiting behind another's commits is
+/// waiting on progress.
+async fn run_with_stream_timeout<F: std::future::Future>(
+    fut: F,
+    timeout: std::time::Duration,
+    progress: Option<Arc<crate::storage::read_cut::ReadCut>>,
+) -> Result<F::Output, StreamExpired> {
+    let Some(progress) = progress else {
+        return tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| StreamExpired::Idle);
+    };
+    let start = tokio::time::Instant::now();
+    let cap = start + timeout.saturating_mul(STREAM_TIMEOUT_CAP_FACTOR);
+    let tick = (timeout / 4).max(std::time::Duration::from_millis(10));
+    let mut seen = progress.commit_count();
+    let mut idle_since = start;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            out = &mut fut => return Ok(out),
+            _ = tokio::time::sleep(tick) => {
+                let now = tokio::time::Instant::now();
+                let count = progress.commit_count();
+                if count != seen {
+                    seen = count;
+                    idle_since = now;
+                }
+                if now >= cap {
+                    return Err(StreamExpired::Cap);
+                }
+                if now.duration_since(idle_since) >= timeout {
+                    return Err(StreamExpired::Idle);
+                }
+            }
+        }
+    }
+}
+
 impl FlushCoordinator {
     pub fn new(
         max_pending_flushes: usize,
@@ -262,9 +344,19 @@ impl FlushCoordinator {
             drain_notify,
             max_pending_flushes,
             stream_timeout,
+            progress: None,
             finalizer_handle: parking_lot::Mutex::new(Some(handle)),
             stream_handles: parking_lot::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Measure stream progress by `cut`'s table commits: the stream timeout
+    /// then bounds time without one, up to [`STREAM_TIMEOUT_CAP_FACTOR`] times
+    /// the timeout in all.
+    #[must_use]
+    pub fn with_progress(mut self, cut: Arc<crate::storage::read_cut::ReadCut>) -> Self {
+        self.progress = Some(cut);
+        self
     }
 
     /// Drop the submit channel and await the finalizer task to exit.
@@ -449,6 +541,7 @@ impl FlushCoordinator {
         let current_version = rotated.current_version;
         let name = rotated.name.clone();
         let stream_timeout = self.stream_timeout;
+        let progress = self.progress.clone();
         let stream_turn = rotated.stream_turn.clone();
         // The seq guard guarantees this seq is submitted even if the task's
         // future is dropped before the normal `submit` below (issue #132).
@@ -478,21 +571,23 @@ impl FlushCoordinator {
             // which retains the old L0 in `pending_flush` and the WAL data.
             let stream_fut =
                 run_stream_catching(run_stream(old_l0, wal_lsn, current_version, name));
-            let result = match tokio::time::timeout(stream_timeout, stream_fut).await {
+            let result = match run_with_stream_timeout(stream_fut, stream_timeout, progress).await {
                 Ok(r) => r,
-                Err(_elapsed) => {
+                Err(expired) => {
                     tracing::error!(
                         seq,
                         timeout_secs = stream_timeout.as_secs(),
+                        kind = expired.kind(),
                         "flush stream exceeded timeout; converting to a data-safe flush \
                          failure (old L0 retained in pending_flush, WAL retained, \
                          recovery via replay/retry)"
                     );
                     metrics::counter!("uni_flush_stream_timeouts_total").increment(1);
                     Err(anyhow::anyhow!(
-                        "flush stream timed out after {:?} (seq {})",
-                        stream_timeout,
-                        seq
+                        "flush stream timed out after {} (seq {seq}); raise \
+                         UniConfig::flush_stream_timeout (UNI_FLUSH_STREAM_TIMEOUT) if the \
+                         store is slow rather than stalled",
+                        expired.describe(stream_timeout),
                     ))
                 }
             };
@@ -702,6 +797,77 @@ impl Ord for FlushSubmit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::storage::read_cut::ReadCut;
+    use std::time::Duration;
+
+    /// A stream that commits nothing is given up after one timeout (#132).
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_stream_times_out_after_one_idle_timeout() {
+        let cut = Arc::new(ReadCut::new());
+        let start = tokio::time::Instant::now();
+        let out = run_with_stream_timeout(
+            std::future::pending::<()>(),
+            Duration::from_secs(60),
+            Some(cut),
+        )
+        .await;
+        assert_eq!(out, Err(StreamExpired::Idle));
+        let waited = start.elapsed();
+        assert!(
+            waited >= Duration::from_secs(60) && waited < Duration::from_secs(80),
+            "{waited:?}"
+        );
+    }
+
+    /// A stream that keeps committing tables runs past the timeout (#355).
+    #[tokio::test(start_paused = true)]
+    async fn a_progressing_stream_runs_past_the_timeout() {
+        let cut = Arc::new(ReadCut::new());
+        let committing = cut.clone();
+        let stream = async move {
+            // Ten tables, 40 s apart: 400 s in all, never 60 s without one.
+            for i in 0..10u64 {
+                tokio::time::sleep(Duration::from_secs(40)).await;
+                committing.record("vertices_T", i + 1);
+            }
+            "done"
+        };
+        let out = run_with_stream_timeout(stream, Duration::from_secs(60), Some(cut)).await;
+        assert_eq!(out, Ok("done"));
+    }
+
+    /// Progress does not extend a stream forever: the cap still ends it.
+    #[tokio::test(start_paused = true)]
+    async fn a_progressing_stream_stops_at_the_cap() {
+        let cut = Arc::new(ReadCut::new());
+        let committing = cut.clone();
+        let stream = async move {
+            let mut v = 0;
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                v += 1;
+                committing.record("vertices_T", v);
+            }
+        };
+        let start = tokio::time::Instant::now();
+        let out = run_with_stream_timeout(stream, Duration::from_secs(60), Some(cut)).await;
+        assert_eq!(out, Err(StreamExpired::Cap));
+        let cap = Duration::from_secs(60) * STREAM_TIMEOUT_CAP_FACTOR;
+        assert!(start.elapsed() >= cap && start.elapsed() < cap + Duration::from_secs(20));
+    }
+
+    /// Without a progress source the timeout bounds the whole stream, as before.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_progress_source_the_timeout_is_total() {
+        let out = run_with_stream_timeout(
+            tokio::time::sleep(Duration::from_secs(61)),
+            Duration::from_secs(60),
+            None,
+        )
+        .await;
+        assert_eq!(out, Err(StreamExpired::Idle));
+    }
 
     /// H2: a panic inside the stream future must be converted into an `Err`
     /// outcome (so the seq can still be submitted and the finalizer advances),

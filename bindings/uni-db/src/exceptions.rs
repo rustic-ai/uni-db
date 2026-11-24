@@ -396,6 +396,20 @@ create_exception!(
 // ============================================================================
 
 /// Convert a [`uni_common::UniError`] into the matching typed Python exception.
+/// Reports a shutdown failure as a `RuntimeWarning`, for a context-manager
+/// exit that is already propagating an exception: raising would replace it.
+pub fn warn_shutdown_failed(py: Python<'_>, e: &PyErr) {
+    let message = format!("shutdown on context exit failed: {e}");
+    let message = std::ffi::CString::new(message.replace('\0', " "))
+        .unwrap_or_else(|_| c"shutdown on context exit failed".to_owned());
+    let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
+    // A warning filter set to "error" turns this into an exception; it is
+    // reported rather than replacing the one already propagating.
+    if let Err(warn_err) = PyErr::warn(py, &category, &message, 1) {
+        warn_err.write_unraisable(py, None);
+    }
+}
+
 pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
     use uni_common::UniError::*;
     let msg = e.to_string();

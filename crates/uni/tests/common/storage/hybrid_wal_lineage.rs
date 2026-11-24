@@ -276,6 +276,37 @@ async fn a_host_returning_with_no_other_writer_replays_its_wal() -> Result<()> {
 /// A clean shutdown flushes, so every commit reaches the object store and
 /// the next host, on any directory, sees it; the first host's directory is
 /// still usable afterwards.
+/// A shutdown whose final flush fails returns the error (#354), still
+/// releases the store, and leaves the commits in the local WAL, which a
+/// reopen from the same directory replays.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_durability_returns_a_failed_final_flush() -> Result<()> {
+    let hosts = Hosts::new()?;
+    let db = hosts.open("one").await?;
+    declare(&db).await?;
+    create(&db, "Alice").await?;
+    db.flush().await?;
+    create(&db, "Kept").await?;
+
+    fail::cfg("flush::rotate-fail", "return").unwrap();
+    let result = db.shutdown().await;
+    fail::remove("flush::rotate-fail");
+    let err = result.expect_err("a failed final flush must fail the shutdown");
+    let text = format!("{err:#}");
+    assert!(text.contains("rotate-fail"), "{text}");
+    assert!(
+        text.contains("only in this host's local WAL"),
+        "a hybrid store's error says where the commits are: {text}"
+    );
+
+    // The lease was released, and the WAL kept the commit.
+    let db = hosts.open("one").await?;
+    assert_eq!(people(&db).await?, ["Alice", "Kept"]);
+    db.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clean_shutdown_hands_every_commit_over() -> Result<()> {
     let hosts = Hosts::new()?;

@@ -252,9 +252,8 @@ async fn run_snapshot_command(db: &uni_db::Uni, command: SnapshotCmd) -> Result<
 /// returns without calling this leaves a store carrying WAL segments and no
 /// manifest, which the next `Uni::open` refuses to reopen.
 ///
-/// The flush is issued explicitly rather than left to shutdown, which logs a
-/// flush failure instead of propagating it. A CLI write that did not reach
-/// disk must not report success.
+/// The flush is issued explicitly, ahead of shutdown's own final flush, so a
+/// CLI write that did not reach disk is reported as the flush's error.
 ///
 /// # Errors
 ///

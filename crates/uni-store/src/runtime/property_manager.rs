@@ -1432,7 +1432,11 @@ impl PropertyManager {
                     .filter(|r| props.contains_key(r.as_str()))
                     .cloned()
                     .collect(),
-                None => props.keys().cloned().collect(),
+                None => props
+                    .keys()
+                    .filter(|k| !uni_common::core::schema::is_derived_property_name(k))
+                    .cloned()
+                    .collect(),
             };
         }
 
@@ -2087,9 +2091,16 @@ impl PropertyManager {
             let label_props = schema.properties.get(label_name);
 
             // Get property names from schema
+            // Derived columns (`__jfts_`, `__key_`) are not properties: a
+            // write that stages these back into L0 would carry them into the
+            // content UID.
             let mut prop_names: Vec<String> = Vec::new();
             if let Some(props) = label_props {
-                prop_names = props.keys().cloned().collect();
+                prop_names = props
+                    .keys()
+                    .filter(|k| !uni_common::core::schema::is_derived_property_name(k))
+                    .cloned()
+                    .collect();
             }
 
             // Build column selection
