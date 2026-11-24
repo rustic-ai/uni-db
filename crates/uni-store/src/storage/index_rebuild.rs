@@ -515,7 +515,18 @@ impl IndexRebuildManager {
         }
         info!("Index rebuild completed for label '{}'", label);
 
-        self.update_index_metadata_for_label(label, IndexStatus::Online, Some(now), row_count);
+        // Only the indexes the rebuild left built are Online. One whose build
+        // failed (`Stale`, retried later) or cannot be built at all (`Failed`)
+        // keeps that status: marking every index on the label Online reported
+        // indexes with no artifact behind them, which the planner then trusted
+        // (#356).
+        self.update_index_metadata_for_label_where(
+            label,
+            IndexStatus::Online,
+            Some(now),
+            row_count,
+            |status| !matches!(status, IndexStatus::Stale | IndexStatus::Failed),
+        );
     }
 
     /// Handle a failed index rebuild: mark task failed; the worker retries it
@@ -577,17 +588,19 @@ impl IndexRebuildManager {
         }
     }
 
-    /// Update index metadata (status, build time, row count) for all indexes on a label.
-    fn update_index_metadata_for_label(
+    /// Update index metadata (status, build time, row count) for the indexes on
+    /// a label whose current status `select` accepts.
+    fn update_index_metadata_for_label_where(
         &self,
         label: &str,
         status: IndexStatus,
         last_built_at: Option<chrono::DateTime<Utc>>,
         row_count: Option<u64>,
+        select: impl Fn(&IndexStatus) -> bool,
     ) {
         let schema = self.schema_manager.schema();
         for idx in &schema.indexes {
-            if idx.label() == label {
+            if idx.label() == label && select(&idx.metadata().status) {
                 let name = idx.name().to_string();
                 if let Err(e) = self.schema_manager.update_index_metadata(&name, |m| {
                     m.status = status.clone();

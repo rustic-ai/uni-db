@@ -818,6 +818,24 @@ impl IndexManager {
         if !schema.labels.contains_key(label) {
             return Err(anyhow!("Label '{}' not found", label));
         }
+        // A column type the index kind cannot index (#356): a new index is
+        // refused before anything is built; one already in the catalog is
+        // recorded `Failed`, which neither the flush nor the rebuild checker
+        // retries, rather than attempted (and logged) at every flush.
+        if let Some(reason) = schema.scalar_index_refusal(&config) {
+            if schema.indexes.iter().all(|i| i.name() != config.name) {
+                return Err(anyhow!("Cannot create index '{}': {reason}", config.name));
+            }
+            warn!(index = %config.name, "{reason}; the index is recorded Failed");
+            config.metadata = uni_common::core::schema::IndexMetadata {
+                status: uni_common::core::schema::IndexStatus::Failed,
+                ..Default::default()
+            };
+            self.schema_manager
+                .add_index(IndexDefinition::Scalar(config))?;
+            self.schema_manager.save().await?;
+            return Ok(());
+        }
 
         let columns: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         // Map the schema scalar type to the backend's; anything other than the
@@ -950,7 +968,12 @@ impl IndexManager {
             // mapping stays in one place; it re-registers the definition with
             // fresh metadata.
             match def {
-                IndexDefinition::Scalar(config) if !covers(&config.properties) => {
+                // `Failed` is permanent: a column type the index cannot index.
+                IndexDefinition::Scalar(config)
+                    if !covers(&config.properties)
+                        && config.metadata.status
+                            != uni_common::core::schema::IndexStatus::Failed =>
+                {
                     info!(
                         "Resolving deferred scalar index '{}' on '{}' at flush",
                         config.name, table

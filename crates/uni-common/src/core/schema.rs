@@ -2661,6 +2661,16 @@ impl SchemaManager {
     pub fn add_index(&self, index_def: IndexDefinition) -> Result<()> {
         let mut guard = acquire_write(&self.schema, "schema")?;
         let schema = Arc::make_mut(&mut *guard);
+        // A new scalar index on a column type it cannot index is refused here,
+        // where every declaration path registers it (#356). One already in the
+        // catalog is still accepted: an existing catalog must open, and the
+        // build records it `Failed`.
+        if let IndexDefinition::Scalar(cfg) = &index_def
+            && !schema.indexes.iter().any(|i| i.name() == index_def.name())
+            && let Some(reason) = schema.scalar_index_refusal(cfg)
+        {
+            return Err(anyhow!("Cannot create index '{}': {reason}", cfg.name));
+        }
         if let Some(existing) = schema
             .indexes
             .iter_mut()

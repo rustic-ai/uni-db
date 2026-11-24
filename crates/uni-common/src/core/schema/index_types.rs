@@ -740,6 +740,47 @@ pub enum ScalarIndexType {
     LabelList,
 }
 
+impl ScalarIndexType {
+    /// Whether this index kind cannot be built over a column of type `dt`.
+    ///
+    /// BTree, Hash (built as a BTree) and Bitmap index flat columns only:
+    /// Lance refuses a nested field (a struct, list, map or fixed-size list),
+    /// so a property stored as one (`DateTime`, `Time`, points, lists, maps,
+    /// vectors) never gets an index (#356). `LabelList` is meant for lists.
+    #[must_use]
+    pub fn cannot_index(&self, dt: &DataType) -> bool {
+        match self {
+            Self::LabelList => false,
+            Self::BTree | Self::Hash | Self::Bitmap => dt.to_arrow().is_nested(),
+        }
+    }
+}
+
+impl Schema {
+    /// Why `config` can never be built, naming the property, when one of its
+    /// properties is declared with a type its index kind cannot index (see
+    /// [`ScalarIndexType::cannot_index`]). An undeclared property is not
+    /// judged: it has no column type yet.
+    #[must_use]
+    pub fn scalar_index_refusal(&self, config: &ScalarIndexConfig) -> Option<String> {
+        let declared = self.properties.get(&config.label)?;
+        config.properties.iter().find_map(|prop| {
+            let meta = declared.get(prop)?;
+            config.index_type.cannot_index(&meta.r#type).then(|| {
+                format!(
+                    "a {kind:?} index cannot index {label}.{prop}: the property is {ty}, \
+                     stored as a nested column, which Lance's scalar indexes do not \
+                     support. Declare it TIMESTAMP to index it, or leave it unindexed \
+                     (queries on it scan)",
+                    kind = config.index_type,
+                    label = config.label,
+                    ty = meta.r#type.repr_name(),
+                )
+            })
+        })
+    }
+}
+
 #[cfg(test)]
 mod same_config_tests {
     use super::*;

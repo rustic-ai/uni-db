@@ -15,6 +15,7 @@ pub mod inline_properties_unlabeled_test;
 pub mod l0_equality_prefilter;
 pub mod label_only_mutation_survives_flush;
 pub mod multi_label_crud_test;
+pub mod nested_type_scalar_index;
 pub mod partial_index_planner_test;
 pub mod range_prefix_null_pushdown;
 pub mod schemaless_labels_test;

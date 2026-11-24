@@ -201,3 +201,17 @@ class TestDataTypes:
         db.flush()
         results = session.query("MATCH (n:Test) RETURN n.active")
         assert results[0]["n.active"] is True
+
+
+def test_scalar_index_on_a_nested_type_is_refused():
+    """A BTree on a DATETIME (a nested column) can never build, so it is refused."""
+    db = uni_db.Uni.temporary()
+    with pytest.raises(Exception, match="ts"):
+        (
+            db.schema()
+            .label("Message")
+            .property("ts", "datetime")
+            .index("ts", "btree")
+            .apply()
+        )
+    db.schema().label("Event").property("n", "int").index("n", "btree").apply()
