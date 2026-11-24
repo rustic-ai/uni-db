@@ -777,7 +777,8 @@ Phase A regression tests:
 - restore and rewind under a prefix pin and rewind the indexes;
 - `Debug` of `CloudStorageConfig` and the Python builder contains no secret;
 - Python: `open("s3://…").cloud_config({...})` opens remote-only;
-- GCS (fake-gcs-server), Azure (Azurite), MinIO smoke tests: open, write,
+- GCS (fake-gcs-server; dropped from CI 2026-11-24, since it rejects
+  object_store's XML-API PUT), Azure (Azurite), MinIO smoke tests: open, write,
   flush, reopen, fork, promote.
 
 Phase B adds: a second writable open fails; a stale lease holder's publish is
