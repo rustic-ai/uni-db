@@ -886,10 +886,51 @@ impl StorageBackend for LanceDbBackend {
                 // with nothing".
                 let (mut dataset, ticket) = self.open_for_commit(name).await?;
                 let read = dataset.version().version;
+                // Columns `schema` names that the table lacks: a derived-column
+                // backfill over a table with no rows adds them here, where an
+                // Overwrite would have. Kept, the catalog registered them over a
+                // table without them and every later write of the label failed.
+                let present: std::collections::HashSet<String> = dataset
+                    .schema()
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                let missing: Vec<arrow_schema::Field> = schema
+                    .fields()
+                    .iter()
+                    .filter(|f| !present.contains(f.name()))
+                    .map(|f| f.as_ref().clone().with_nullable(true))
+                    .collect();
                 dataset
                     .delete("true")
                     .await
                     .map_err(|e| anyhow!("Failed to clear table '{}': {}", name, e))?;
+                // On the same handle and ticket: `evolve_table_schema` would
+                // take the per-table write lock, which a caller holding it
+                // across its scan and this replace (every backfill) already has.
+                // The ticket expects one commit after `read`; the delete is this
+                // handle's, so the add is checked from the delete's version.
+                let mut read = read;
+                if !missing.is_empty() {
+                    read = dataset.version().version;
+                    let added = Arc::new(ArrowSchema::new(missing.clone()));
+                    dataset
+                        .add_columns(
+                            lance::dataset::NewColumnTransform::AllNulls(added),
+                            None,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to add column(s) {:?} to '{}': {}",
+                                missing.iter().map(|f| f.name()).collect::<Vec<_>>(),
+                                name,
+                                e
+                            )
+                        })?;
+                }
                 Self::finish_commit(ticket, Some(read), dataset.version().version)?;
             } else {
                 let batch_schema = batches[0].schema();
@@ -902,7 +943,10 @@ impl StorageBackend for LanceDbBackend {
                 .await
                 .map_err(|e| anyhow!("Failed to overwrite table '{}': {}", name, e))?;
             }
-            // Invalidate cache since data changed
+            // The overwrite may carry another schema (a derived-column
+            // backfill adds columns): a cached schema that predates it made
+            // the next write refuse the added columns as foreign.
+            self.schema_cache.remove(name);
         } else if batches.is_empty() {
             self.create_empty_table(name, schema).await?;
         } else {

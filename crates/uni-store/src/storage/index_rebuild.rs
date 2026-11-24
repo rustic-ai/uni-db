@@ -761,6 +761,7 @@ mod tests {
             index_type: ScalarIndexType::BTree,
             where_clause: None,
             metadata: IndexMetadata { status, ..meta },
+            key: None,
         })
     }
 

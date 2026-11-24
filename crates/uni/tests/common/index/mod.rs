@@ -8,6 +8,7 @@ pub mod composite_index_test;
 pub mod edge_type_properties_test;
 pub mod expression_index_test;
 pub mod id_allocation_test;
+pub mod index_keys;
 pub mod index_lifecycle_test;
 pub mod indexing_integration;
 pub mod inline_properties_test;

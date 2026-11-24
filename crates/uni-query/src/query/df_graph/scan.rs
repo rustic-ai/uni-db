@@ -1881,8 +1881,29 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
     let target_vid = filter.as_ref().and_then(extract_vid_from_physical_filter);
     // The runtime filter below stays authoritative; this structured copy only
     // lets the storage layer skip L0 rows that cannot match (W3b).
+    // Only for a flat property: an L0 value of a nested or opaque type
+    // (DATETIME, a point, JSON) does not compare with a literal the way the
+    // runtime filter does, so it could skip a row that matches.
+    let flat_property = |prefilter: &L0PropertyPrefilter| {
+        let schema = graph_ctx.storage().schema_manager().schema();
+        schema
+            .properties
+            .get(label)
+            .and_then(|p| p.get(&prefilter.property))
+            .is_none_or(|meta| {
+                let arrow = meta.r#type.to_arrow();
+                !arrow.is_nested()
+                    && !matches!(
+                        arrow,
+                        arrow_schema::DataType::Binary
+                            | arrow_schema::DataType::LargeBinary
+                            | arrow_schema::DataType::FixedSizeBinary(_)
+                    )
+            })
+    };
     let l0_prefilter = extra_runtime_filter
         .and_then(|f| l0_property_prefilter(f, &format!("{variable}.")))
+        .filter(flat_property)
         .or_else(|| planner_l0_prefilter.cloned());
 
     let mut index_hits = 0usize;

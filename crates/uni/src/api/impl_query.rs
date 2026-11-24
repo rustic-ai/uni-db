@@ -842,7 +842,15 @@ impl crate::api::UniInner {
     }
 
     /// Explain a Cypher query plan without executing it.
-    pub(crate) async fn explain_internal(&self, cypher: &str) -> Result<ExplainOutput> {
+    ///
+    /// `params` are the query's parameters: EXPLAIN reports an index as used
+    /// only when the value it is compared with can be served by it (a keyed
+    /// index needs the parameter's type).
+    pub(crate) async fn explain_internal(
+        &self,
+        cypher: &str,
+        params: HashMap<String, ApiValue>,
+    ) -> Result<ExplainOutput> {
         let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
         let (ast, tt_spec) = split_time_travel(ast);
 
@@ -858,20 +866,29 @@ impl crate::api::UniInner {
             return Box::pin(
                 self.pinned_at(&spec)
                     .await?
-                    .explain_ast_internal(ast, cypher),
+                    .explain_ast_internal(ast, cypher, params),
             )
             .await;
         }
 
-        self.explain_ast_internal(ast, cypher).await
+        self.explain_ast_internal(ast, cypher, params).await
     }
 
     async fn explain_ast_internal(
         &self,
         ast: uni_cypher::ast::Query,
         cypher: &str,
+        params: HashMap<String, ApiValue>,
     ) -> Result<ExplainOutput> {
-        let planner = self.base_planner();
+        // The physical planner bounds no index key on a pinned snapshot or a
+        // fork (`build_indexed_property_pushdown`); EXPLAIN says the same.
+        let planner = self
+            .base_planner()
+            .with_params(params)
+            .with_index_keys_vouched(
+                self.storage.version_high_water_mark().is_none()
+                    && self.storage.fork_scope().is_none(),
+            );
         // Phase 5a-impl: `plan_and_rewrite` applies the fork-aware fusion
         // rewrite so explain output reflects the operators the executor will
         // actually pick on a forked session.

@@ -659,6 +659,7 @@ mod tests {
                 last_built_at: built.map(|s| chrono::DateTime::from_timestamp(s, 0).unwrap()),
                 ..IndexMetadata::default()
             },
+            key: None,
         })
     }
 

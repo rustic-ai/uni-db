@@ -17,6 +17,7 @@ pub mod edge;
 #[cfg(feature = "lance-backend")]
 pub mod index;
 pub mod index_datasets;
+pub mod index_keys;
 pub mod index_manager;
 pub mod index_rebuild;
 #[cfg(feature = "lance-backend")]

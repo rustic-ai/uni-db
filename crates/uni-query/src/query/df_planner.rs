@@ -169,6 +169,13 @@ pub struct HybridPhysicalPlanner {
     /// [`Self::plan_internal`]). A variable-length traversal with no bound
     /// variable reads it to choose reachability over per-path enumeration.
     multiplicity_insensitive: AtomicBool,
+
+    /// The statement clock: the instant every no-argument temporal
+    /// constructor (`datetime()`, `date()`, ...) in the statement folds to.
+    /// One value for the planner, so that the filters it translates and the
+    /// index-key bounds it folds (see `KeyedPredicate::lance_bound`) read the
+    /// same clock.
+    statement_time: chrono::DateTime<chrono::Utc>,
 }
 
 /// Whether the constant operand of an indexed point lookup can be handed to
@@ -211,6 +218,11 @@ fn index_operand_fits_column(
             (Some(T::Float32 | T::Float64), _) => false,
             (Some(T::String), lit) => matches!(lit, CypherLiteral::String(_)),
             (Some(T::Bool), lit) => matches!(lit, CypherLiteral::Bool(_)),
+            // A nested column (DATETIME, a point, a list) or an opaque binary
+            // one (JSON, DURATION, BTIC) has no literal Lance can coerce a
+            // Cypher value to with the same meaning; such a property is
+            // served, when at all, through an index key.
+            (Some(t), _) if t.to_arrow().is_nested() || is_binary_arrow(&t.to_arrow()) => false,
             _ => true,
         }
     };
@@ -222,6 +234,18 @@ fn index_operand_fits_column(
         },
         _ => false,
     }
+}
+
+/// Whether `dt` is a binary Arrow type: how JSON, DURATION and BTIC
+/// properties are stored.
+fn is_binary_arrow(dt: &arrow_schema::DataType) -> bool {
+    matches!(
+        dt,
+        arrow_schema::DataType::Binary
+            | arrow_schema::DataType::LargeBinary
+            | arrow_schema::DataType::BinaryView
+            | arrow_schema::DataType::FixedSizeBinary(_)
+    )
 }
 
 /// The string `variable.ext_id` is required to equal, if some conjunct of
@@ -429,6 +453,7 @@ impl HybridPhysicalPlanner {
             outer_row: None,
             plugin_registry: super::df_graph::locy_fold::default_locy_plugin_registry(),
             multiplicity_insensitive: AtomicBool::new(false),
+            statement_time: chrono::Utc::now(),
         }
     }
 
@@ -588,6 +613,7 @@ impl HybridPhysicalPlanner {
             outer_row: None,
             plugin_registry: super::df_graph::locy_fold::default_locy_plugin_registry(),
             multiplicity_insensitive: AtomicBool::new(false),
+            statement_time: chrono::Utc::now(),
         }
     }
 
@@ -802,6 +828,7 @@ impl HybridPhysicalPlanner {
         collect_mutation_edge_hints(plan, &mut mutation_edge_hints);
         self.collect_variable_labels(plan, &mut variable_labels);
         TranslationContext {
+            statement_time: self.statement_time,
             parameters: self.params.clone(),
             outer_values: self.outer_values.clone(),
             variable_labels,
@@ -2253,14 +2280,38 @@ impl HybridPhysicalPlanner {
     fn build_indexed_property_pushdown(
         &self,
         filter: Option<&Expr>,
+        above: Option<&Expr>,
         variable: &str,
         label_id: u16,
         scan_schema: &SchemaRef,
     ) -> Option<(String, Arc<dyn datafusion::physical_expr::PhysicalExpr>)> {
-        let filter = filter?;
         let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
-        let strategy = analyzer.analyze(filter, variable, label_id);
-        if strategy.indexed_equality_columns.is_empty() && strategy.indexed_range_columns.is_empty()
+        let mut strategy = filter
+            .map(|f| analyzer.analyze(f, variable, label_id))
+            .unwrap_or_default();
+        // A conjunct the logical planner left above the scan (a comparison
+        // with `datetime(...)` is not a pushable operand) still bounds the
+        // key; it is applied in full by that `Filter` too.
+        if let Some(above) = above {
+            strategy
+                .keyed_predicates
+                .extend(analyzer.analyze(above, variable, label_id).keyed_predicates);
+        }
+        // No key bound where the index cannot vouch for the view: a pinned
+        // snapshot (a transaction's included) may predate the key columns,
+        // and a fork's branch holds them all NULL (widened, never
+        // backfilled). The same rule as `candidate_prefilter`.
+        let keyed: &[crate::query::pushdown::KeyedPredicate] = {
+            let storage = self.graph_ctx.storage();
+            if storage.version_high_water_mark().is_some() || storage.fork_scope().is_some() {
+                &[]
+            } else {
+                &strategy.keyed_predicates
+            }
+        };
+        if strategy.indexed_equality_columns.is_empty()
+            && strategy.indexed_range_columns.is_empty()
+            && keyed.is_empty()
         {
             return None;
         }
@@ -2314,7 +2365,10 @@ impl HybridPhysicalPlanner {
         // `FilterExec` alone.
         if !strategy.indexed_range_columns.is_empty() {
             let mut range_parts = Vec::new();
-            for conj in crate::query::pushdown::conjuncts(filter) {
+            for conj in filter
+                .map(crate::query::pushdown::conjuncts)
+                .unwrap_or_default()
+            {
                 let Some(col) = crate::query::pushdown::predicate_target_column(conj, variable)
                 else {
                     continue;
@@ -2343,6 +2397,39 @@ impl HybridPhysicalPlanner {
                 std::iter::once(lance_expr).chain(range_parts),
             );
         }
+        // Keyed properties (DATETIME, ...). The bound on the key goes to Lance
+        // only; the Arrow filter keeps the conjunct as written, because
+        // unflushed rows have no key columns, and the outer `FilterExec`
+        // re-applies it too. A key bound is a superset, never the answer.
+        // A keyed conjunct whose Arrow translation fails is skipped on its
+        // own, leaving the other conjuncts' pushdown in place.
+        let mut variable_kinds = HashMap::new();
+        variable_kinds.insert(variable.to_string(), VariableKind::Node);
+        let mut variable_labels = HashMap::new();
+        variable_labels.insert(variable.to_string(), label_name.to_string());
+        let ctx = TranslationContext {
+            statement_time: self.statement_time,
+            parameters: self.params.clone(),
+            variable_labels,
+            variable_kinds,
+            ..Default::default()
+        };
+        if !keyed.is_empty() {
+            let mut key_parts = Vec::new();
+            for predicate in keyed {
+                let Some(bound) = predicate.lance_bound(&self.params, self.statement_time) else {
+                    continue;
+                };
+                if !self.translates_to_physical(&predicate.conjunct, &ctx, scan_schema) {
+                    continue;
+                }
+                key_parts.push(bound);
+                indexed_preds.push(predicate.conjunct.clone());
+            }
+            lance_expr = uni_store::backend::types::FilterExpr::all(
+                std::iter::once(lance_expr).chain(key_parts),
+            );
+        }
         if indexed_preds.is_empty() {
             return None;
         }
@@ -2360,22 +2447,27 @@ impl HybridPhysicalPlanner {
         // GraphScanExec applies it to the merged (Lance+L0) batch so the
         // scan output is index-bounded regardless of where the data lives.
         let combined = Self::and_join_predicates(indexed_preds.clone());
-        let mut variable_kinds = HashMap::new();
-        variable_kinds.insert(variable.to_string(), VariableKind::Node);
-        let mut variable_labels = HashMap::new();
-        variable_labels.insert(variable.to_string(), label_name.to_string());
-        let ctx = TranslationContext {
-            parameters: self.params.clone(),
-            variable_labels,
-            variable_kinds,
-            ..Default::default()
-        };
         let df_filter = cypher_expr_to_df(&combined, Some(&ctx)).ok()?;
         let session = self.session_ctx.read();
         let physical = self
             .create_physical_filter_expr(&df_filter, scan_schema, &session)
             .ok()?;
         Some((lance_str, physical))
+    }
+
+    /// Whether `expr` translates to a physical filter over `scan_schema`.
+    fn translates_to_physical(
+        &self,
+        expr: &Expr,
+        ctx: &TranslationContext,
+        scan_schema: &SchemaRef,
+    ) -> bool {
+        let Ok(df_filter) = cypher_expr_to_df(expr, Some(ctx)) else {
+            return false;
+        };
+        let session = self.session_ctx.read();
+        self.create_physical_filter_expr(&df_filter, scan_schema, &session)
+            .is_ok()
     }
 
     /// Wraps a leaf scan plan so surviving row identities feed the SSI read-set.
@@ -2425,6 +2517,7 @@ impl HybridPhysicalPlanner {
             variable_labels.insert(variable.to_string(), label.to_string());
         }
         let ctx = TranslationContext {
+            statement_time: self.statement_time,
             parameters: self.params.clone(),
             variable_labels,
             variable_kinds,
@@ -2473,6 +2566,7 @@ impl HybridPhysicalPlanner {
             variable_kinds.insert(pv.to_string(), VariableKind::Path);
         }
         let ctx = TranslationContext {
+            statement_time: self.statement_time,
             parameters: self.params.clone(),
             variable_kinds,
             ..Default::default()
@@ -2944,12 +3038,22 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.plan_scan_hinted(label_id, variable, filter, optional, all_properties, None)
+        self.plan_scan_hinted(
+            label_id,
+            variable,
+            filter,
+            optional,
+            all_properties,
+            None,
+            None,
+        )
     }
 
     /// [`Self::plan_scan`], with the index candidate prefilter a `Filter`
     /// directly above found in its predicate (`candidates`), which the scan's
-    /// own filter does not carry.
+    /// own filter does not carry, and that predicate itself (`above`), whose
+    /// conjuncts on a keyed property bound the scan's index-key filter.
+    #[expect(clippy::too_many_arguments)]
     fn plan_scan_hinted(
         &self,
         label_id: u16,
@@ -2958,6 +3062,7 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
         candidates: Option<crate::query::df_graph::scan::CandidatePrefilter>,
+        above: Option<&Expr>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         // Virtual label: dispatch to a `CatalogVertexScanExec` that wraps
         // the plugin-registered `CatalogTable` (M5 follow-up #6). The
@@ -2980,6 +3085,7 @@ impl HybridPhysicalPlanner {
             let pushdown_filters: Vec<datafusion::logical_expr::Expr> = filter
                 .map(|f| -> Result<Vec<_>> {
                     let ctx = crate::query::df_expr::TranslationContext {
+                        statement_time: self.statement_time,
                         parameters: self.params.clone(),
                         outer_values: self.outer_values.clone(),
                         ..Default::default()
@@ -3111,8 +3217,13 @@ impl HybridPhysicalPlanner {
         // `apply_scan_filter` below) is harmless and keeps residual conjuncts
         // (e.g. non-indexed multi-property AND) correct.
         let scan_schema_for_idx = scan_exec.schema();
-        let indexed =
-            self.build_indexed_property_pushdown(filter, variable, label_id, &scan_schema_for_idx);
+        let indexed = self.build_indexed_property_pushdown(
+            filter,
+            above,
+            variable,
+            label_id,
+            &scan_schema_for_idx,
+        );
         // `(n:L {ext_id: 'x'})` / `WHERE n.ext_id = 'x'`: `ext_id` is never a
         // declared property, so the analyzer above cannot see it, but every
         // per-label table carries it as a BTree-indexed column (A10). Pushed
@@ -3611,6 +3722,7 @@ impl HybridPhysicalPlanner {
         let pushdown_filters: Vec<DfExpr> = filter
             .map(|f| -> Result<Vec<_>> {
                 let ctx = crate::query::df_expr::TranslationContext {
+                    statement_time: self.statement_time,
                     parameters: self.params.clone(),
                     outer_values: self.outer_values.clone(),
                     ..Default::default()
@@ -3984,6 +4096,7 @@ impl HybridPhysicalPlanner {
                 variable_kinds.insert(sv.to_string(), VariableKind::edge_for(false));
             }
             let ctx = TranslationContext {
+                statement_time: self.statement_time,
                 parameters: self.params.clone(),
                 variable_kinds,
                 ..Default::default()
@@ -4764,6 +4877,7 @@ impl HybridPhysicalPlanner {
                 );
             }
             let ctx = TranslationContext {
+                statement_time: self.statement_time,
                 parameters: self.params.clone(),
                 variable_labels,
                 variable_kinds,
@@ -5192,9 +5306,16 @@ impl HybridPhysicalPlanner {
                 variable,
                 filter,
                 optional: false,
-            } if labels.len() <= 1 => self
-                .candidate_prefilter(Some(predicate), variable, *label_id)
-                .map(|hint| (*label_id, variable, filter, hint)),
+            } if labels.len() <= 1 => {
+                let hint = self.candidate_prefilter(Some(predicate), variable, *label_id);
+                // A conjunct on a keyed property (`m.ts > datetime(...)`)
+                // also bounds the scan's index-key filter.
+                let keyed = !crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema)
+                    .analyze(predicate, variable, *label_id)
+                    .keyed_predicates
+                    .is_empty();
+                (hint.is_some() || keyed).then_some((*label_id, variable, filter, hint))
+            }
             _ => None,
         };
         let input_plan = match inverted_scan {
@@ -5204,7 +5325,8 @@ impl HybridPhysicalPlanner {
                 filter.as_ref(),
                 false,
                 all_properties,
-                Some(hint),
+                hint,
+                Some(predicate),
             )?,
             None => self.plan_internal(input, all_properties)?,
         };

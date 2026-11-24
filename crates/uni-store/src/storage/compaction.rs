@@ -217,7 +217,7 @@ impl Compactor {
         // `merge_insert_batch_with_lance_conflict_retry`; without it, an unguarded
         // `AddDataMode::Overwrite` below would silently discard rows a flush
         // appended in the window between this scan and the overwrite commit.
-        let _write_guard = backend.lock_table_for_write(&table_name).await;
+        let write_guard = backend.lock_table_for_write(&table_name).await;
 
         use crate::backend::types::ScanRequest;
         let scanned: Vec<RecordBatch> = backend.scan(ScanRequest::all(&table_name)).await?;
@@ -326,6 +326,11 @@ impl Compactor {
                 let mut row_props = Properties::new();
                 let mut null_props = Vec::new(); // Track explicitly NULL properties
                 for (name, meta) in label_props {
+                    // A derived column is re-derived by the batch build below;
+                    // carried here it would be hashed into the content UID.
+                    if uni_common::core::schema::is_derived_property_name(name) {
+                        continue;
+                    }
                     if let Some(col) = batch.column_by_name(name) {
                         if col.is_null(i) {
                             // Property was explicitly removed (set to NULL)
@@ -428,6 +433,11 @@ impl Compactor {
             dataset
                 .replace(self.storage.head_backend(), batch, &schema)
                 .await?;
+            // The rows are replaced; what follows only builds indexes over
+            // them. Released here because the rebuild of a JSON full-text or
+            // MUVERA index re-derives its column under this same lock, which
+            // deadlocked the pass on any label carrying one.
+            drop(write_guard);
 
             // `replace` goes through `replace_table_atomic`, which is
             // `WriteMode::Overwrite`, and Lance drops every index on the dataset
@@ -445,12 +455,16 @@ impl Compactor {
             // background compaction tick, and all fourteen queries reporting
             // `index_scans=0` against indexes that are present on disk but
             // absent from Lance's manifest (#247).
-            // Both kinds, because the overwrite took both. `ensure_default_indexes`
-            // restores the ones uni creates for its own read paths (`_vid` and
-            // friends); `rebuild_indexes_for_label` restores the ones the user
-            // declared. The first is invisible to `schema.indexes`, so rebuilding
-            // only the declared set leaves the table partially indexed — measured:
+            // Both kinds, because the overwrite took both: the ones uni creates
+            // for its own read paths (`_vid` and friends), invisible to
+            // `schema.indexes`, and the ones the user declared. Rebuilding only
+            // the declared set leaves the table partially indexed — measured:
             // 4 indexes before the overwrite, 1 after a declared-only rebuild.
+            // The batch above already filled every registered key column and
+            // JSON full-text text, so the restore rewrites the table only for a
+            // MUVERA FDE: a rewrite in the middle of it would drop the indexes
+            // restored before it.
+            #[cfg(not(feature = "lance-backend"))]
             dataset
                 .ensure_default_indexes(self.storage.head_backend())
                 .await?;
@@ -459,7 +473,7 @@ impl Compactor {
             if let Err(e) = self
                 .storage
                 .index_manager()
-                .rebuild_indexes_for_label(label)
+                .restore_indexes_after_compaction(label)
                 .await
             {
                 // Fail the compaction rather than leave the table silently
@@ -467,7 +481,8 @@ impl Compactor {
                 // data is fine, but reporting success here is what made this
                 // invisible for as long as it was.
                 return Err(anyhow::anyhow!(
-                    "vertex compaction replaced '{label}' but could not rebuild its indexes,                      which the overwrite dropped: {e}"
+                    "vertex compaction replaced '{label}' but could not rebuild its indexes, \
+                     which the overwrite dropped: {e}"
                 ));
             }
         }

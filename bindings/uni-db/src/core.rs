@@ -826,6 +826,7 @@ pub fn create_index_definition(
             index_type,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         })
     };
 

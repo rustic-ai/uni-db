@@ -1039,6 +1039,30 @@ where
     let mut on_branch = open_branch(uri, branch)
         .await
         .with_context(|| format!("open branch {branch} on {uri} for replace"))?;
+    // The delete-all below commits before the append, so an append the branch
+    // would refuse must be caught first: rows carrying a column the branch's
+    // schema lacks (a column added to primary's table after the branch was
+    // cut) failed the append and left the branch empty.
+    let branch_fields: std::collections::HashSet<String> = on_branch
+        .schema()
+        .fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    let missing: Vec<String> = batches
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .filter(|name| !branch_fields.contains(name))
+        .collect();
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "replace on branch {branch} on {uri}: the rows carry columns the branch lacks \
+             ({}); nothing was changed",
+            missing.join(", ")
+        ));
+    }
     on_branch
         .delete("true")
         .await
@@ -1560,6 +1584,41 @@ mod tests {
             arrow_array::RecordBatchIterator::new(vec![Ok(batch)].into_iter(), test_schema());
         Dataset::write(reader, &uri, None).await.unwrap();
         (dir, uri)
+    }
+
+    /// A replace whose rows carry a column the branch lacks is refused before
+    /// the delete-all, so the branch keeps its rows.
+    #[tokio::test]
+    async fn replace_branch_tip_refuses_a_wider_schema_and_keeps_the_rows() {
+        let (_dir, uri) = seed_dataset().await;
+        let v = current_version(&uri).await.unwrap();
+        create_branch(&uri, "fork_b", v).await.unwrap();
+        let wider = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::UInt64, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new("__key_x", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            wider.clone(),
+            vec![
+                Arc::new(UInt64Array::from(vec![1u64])),
+                Arc::new(Int64Array::from(vec![100i64])),
+                Arc::new(Int64Array::from(vec![Some(1i64)])),
+            ],
+        )
+        .unwrap();
+        let reader = arrow_array::RecordBatchIterator::new(vec![Ok(batch)].into_iter(), wider);
+        let err = replace_branch_tip(&uri, "fork_b", reader)
+            .await
+            .expect_err("rows with a column the branch lacks are refused");
+        assert!(format!("{err:#}").contains("__key_x"), "{err:#}");
+        let rows = open_branch(&uri, "fork_b")
+            .await
+            .unwrap()
+            .count_rows(None)
+            .await
+            .unwrap();
+        assert_eq!(rows, 3, "the refused replace left the branch's rows alone");
     }
 
     #[tokio::test]

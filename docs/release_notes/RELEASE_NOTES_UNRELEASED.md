@@ -4,7 +4,19 @@ Changes since [5.3.0](RELEASE_NOTES_5.3.0.md).
 
 Add new changes here.
 
+## Features
+
+- **Indexes:** a BTree, Hash or Bitmap index on a `DATETIME` property builds and is used. It is built on a hidden key column holding each value's instant; `=`, `<`, `<=`, `>`, `>=`, `IN` and pattern-map equality against a constant DATETIME (a literal, a `datetime(...)` call, `datetime()`, or a parameter) read only matching rows from storage, with the predicate still applied, so answers are those of an unindexed scan. `<>`, comparisons with other types and `datetime.realtime()` are answered without it. An index on a `DATETIME` property recorded `Failed` by an earlier release (or declared before its property was typed `DATETIME`) is built at the next writable open, never inside a flush or on a fork. A store with such an index opened by an older release sees it as a BTree it cannot build, as before.
+- **Indexes:** a BTree, Hash or Bitmap index on a `BTIC` property is now used. It is built on two hidden key columns holding each interval's bounds; `btic_overlaps`, `btic_contains`, `btic_during`, `btic_before`, `btic_after`, `btic_meets`, `btic_starts`, `btic_finishes`, `btic_equals`, `btic_disjoint` and `btic_adjacent` with the property as either argument and a constant interval (`btic('…')` or a parameter) as the other, `btic_contains_point` with a constant point, `=` / `IN` against constant intervals, and `btic_lo` / `btic_hi` compared with a constant datetime read only candidate rows from storage, with the predicate still applied. Before, such an index was built on the packed column and no predicate used it; one already in a catalog is rebuilt as a keyed index at the next writable open.
+
 ## Fixes
+
+- **Indexes:** a row of a label with a JSON full-text index keeps its content UID through compaction and through a `SET` of another property after a flush; the index's text was hashed into it. Existing rows get the UID a fresh write computes at their next rewrite.
+- **Compaction:** compacting a label with a JSON full-text or MUVERA index no longer hangs.
+- **Indexes:** creating a JSON full-text, MUVERA or `DATETIME` index over flushed rows, rebuilding a label's indexes, and compacting a label no longer drop the label's other indexes (its `_vid` / `_uid` / `ext_id` indexes and the declared ones) until the next flush; filling the index's column rewrites the table, which dropped them.
+- **Indexes:** creating a `DATETIME` (or `BTIC`) index right after a flush that wrote only a delete no longer makes the next flush of the label fail with "has no system column '__key_…'": the table rewrite that fills the key columns left a stale cached schema.
+- **Schema:** `get_label_info` no longer lists the engine's internal columns (`__jfts_`, `__fde_`, `_gen_`, `__key_`).
+- **Cypher:** every `datetime()` / `date()` / `time()` in a statement reads one clock; filters translated separately could read slightly different instants.
 
 - **Cypher:** `a - b` on two dates or two datetimes gives the duration from `b` to `a`; it was negated.
 - **Cypher:** window functions work in `WITH`, including its `WHERE` and `ORDER BY`. In an aggregating `WITH` or `RETURN`, a window runs over the grouped rows (`rank() OVER (ORDER BY count(*))`, `sum(count(*)) OVER ()`).
@@ -51,7 +63,7 @@ Add new changes here.
 - **Durability:** `shutdown()` returns a failed final flush's error instead of logging it, after still stopping the background tasks and releasing the writer lease; on a hybrid store the error says the commits are only in this host's local WAL (#354). Python's `shutdown()` raises it; a `with` block raises it when the block succeeded and issues a `RuntimeWarning` when the block is already raising.
 - **Storage:** a flush's first write to a table on an object store checks that table alone, where it listed and checked every table in the store, a round trip each (#355).
 - **Storage:** `flush_stream_timeout` bounds an async flush's time without a table commit, not its whole run, so a flush to a slow object store that keeps committing is not abandoned; a stream still ends after 15 times the timeout in all (#355).
-- **Indexes:** a BTree, Hash or Bitmap index on a `DATETIME`, `TIME`, point, list, map or vector property is refused when declared: Lance cannot build one over a nested column, so it stayed `Stale` and was retried at every flush. One already in a catalog is recorded `Failed` and no longer retried, and a background rebuild no longer reports it `Online` (#356).
+- **Indexes:** a BTree, Hash or Bitmap index on a `TIME`, point, list, map or vector property is refused when declared (a `DATETIME` one is now indexed through a key, see Features): Lance cannot build one over a nested column, so it stayed `Stale` and was retried at every flush. One already in a catalog is recorded `Failed` and no longer retried, and a background rebuild no longer reports it `Online` (#356).
 - **Search:** the planner serves `ANY(x IN n.p WHERE x IN <list|$param>)` from an Online inverted index as a candidate prefilter, unflushed rows included, with the predicate re-applied. New `CREATE INVERTED INDEX ... OPTIONS {normalize, max_terms_per_doc}` DDL.
 - **Search:** unknown OPTIONS keys on FULLTEXT, INVERTED and JSON FULLTEXT indexes are refused, and `IF NOT EXISTS` no longer replaces an inverted, JSON full-text or sparse index.
 - **Search:** `uni.fts.query` interprets `AND`, `OR`, `NOT`/`-term`, quoted phrases and parentheses, on flushed, unflushed and schemaless rows. A blank query matches nothing; an all-negated or malformed query is an error, as is a phrase on an index without positions. FULLTEXT accepts `with_positions`.

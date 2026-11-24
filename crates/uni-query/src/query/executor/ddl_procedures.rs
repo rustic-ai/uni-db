@@ -439,6 +439,7 @@ async fn create_index_internal(
             index_type: ScalarIndexType::BTree,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         }),
         "BITMAP" => IndexDefinition::Scalar(ScalarIndexConfig {
             name: index_name,
@@ -447,6 +448,7 @@ async fn create_index_internal(
             index_type: ScalarIndexType::Bitmap,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         }),
         "LABEL_LIST" | "LABELLIST" => IndexDefinition::Scalar(ScalarIndexConfig {
             name: index_name,
@@ -455,6 +457,7 @@ async fn create_index_internal(
             index_type: ScalarIndexType::LabelList,
             where_clause: None,
             metadata: Default::default(),
+            key: None,
         }),
         "INVERTED" => IndexDefinition::Inverted(uni_common::core::schema::InvertedIndexConfig {
             name: index_name,

@@ -3088,6 +3088,22 @@ impl UniBuilder {
             }
             recovered
         };
+        // A scalar index recorded before its property's type had a key (a
+        // #356-era catalog, or a property typed after the index was declared)
+        // is upgraded to a keyed one here, before the store serves: the key
+        // is filled by a table rewrite, which a flush never runs and a fork
+        // cannot. A read-only handle writes nothing.
+        #[cfg(feature = "lance-backend")]
+        if !self.read_only {
+            let upgraded = storage
+                .index_manager()
+                .upgrade_keyed_indexes()
+                .await
+                .map_err(UniError::Internal)?;
+            if !upgraded.is_empty() {
+                storage.publish_cut().await.map_err(UniError::Internal)?;
+            }
+        }
 
         // Wire up IndexRebuildManager for post-flush automatic rebuild scheduling
         let mut auto_rebuild_manager = None;

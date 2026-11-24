@@ -21,7 +21,8 @@ Code references were checked against the tree on 2026-11-23.
 - The same declaration on LIST, VECTOR, DURATION or a whole JSON column is
   refused with an error that names the index kind that does fit.
 - Existing catalogs keep opening. A scalar index already recorded on one of
-  these types is upgraded to a keyed index on its next build.
+  these types is upgraded to a keyed index at the next writable open (never
+  inside a flush or on a fork; see §4.4).
 
 **Non-goals** (listed in the design's out-of-scope section): serving ORDER BY
 from a key; JSON path keys; the engine bugs found during research (point
@@ -108,7 +109,7 @@ Helpers, all in `index_types.rs`:
 the refusal for the `Refuse` cases. `SchemaManager::add_index`
 (`schema.rs` ~2661) and `IndexManager::create_scalar_index`
 (`index_manager.rs:809`) call it for new definitions; an existing definition
-without `key` on a keyable type gets one at its next build (upgrade, §7).
+without `key` on a keyable type gets one at the next writable open (upgrade, §7).
 
 ### 3.2 Reserved names (`crates/uni-common/src/core/schema.rs:2977`)
 
@@ -197,7 +198,14 @@ today; a refusal records nothing.
 - `drop_index` (`index_manager.rs:1286`): drop every physical index of the
   config; unregister key columns no remaining index uses (as `__jfts_` does).
 - `rebuild_indexes_for_label` (`index_manager.rs:1334`): re-derives (step 2)
-  before building, as JSON full-text does.
+  before building, as JSON full-text does. A rewrite drops every Lance index
+  on the table, so the rebuild runs every rewrite first (each followed by its
+  column's registration), then the default indexes, then every declared
+  index with no rewrite; a single create that rewrites restores the label's
+  other indexes the same way. No rewrite runs inside a flush or on a fork: an
+  upgrade is skipped by `ensure_declared_indexes` and runs at the next
+  writable primary open (`IndexManager::upgrade_keyed_indexes`) or an
+  explicit rebuild, and always re-derives the key.
 - `LanceDbBackend::list_indexes` (`lance.rs:2064`) is unchanged: key columns
   are top-level.
 

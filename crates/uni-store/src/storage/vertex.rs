@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::Properties;
 use uni_common::core::id::{UniId, Vid};
-use uni_common::core::schema::Schema;
+use uni_common::core::schema::{Schema, is_derived_property_name};
 
 /// A per-label vertex dataset handle.
 ///
@@ -43,7 +43,12 @@ impl VertexDataset {
     }
 
     /// Compute UniId from vertex content.
-    /// Canonical form: sorted JSON of (label, ext_id, properties)
+    /// Canonical form: sorted JSON of (label, ext_id, properties).
+    ///
+    /// A derived column (a JSON full-text index's text, a keyed index's key;
+    /// see [`is_derived_property_name`]) is not part of the content: it is
+    /// skipped, so a row rebuilt from its stored columns hashes as the write
+    /// that produced it did.
     pub fn compute_vertex_uid(label: &str, ext_id: Option<&str>, properties: &Properties) -> UniId {
         let mut hasher = Sha3_256::new();
 
@@ -58,7 +63,10 @@ impl VertexDataset {
         hasher.update(b"\x00");
 
         // Include sorted properties for determinism
-        let mut sorted_props: Vec<_> = properties.iter().collect();
+        let mut sorted_props: Vec<_> = properties
+            .iter()
+            .filter(|(k, _)| !is_derived_property_name(k))
+            .collect();
         sorted_props.sort_by_key(|(k, _)| *k);
         for (key, value) in sorted_props {
             hasher.update(key.as_bytes());
@@ -149,10 +157,11 @@ impl VertexDataset {
         ));
         columns.push(build_timestamp_column_from_vid_map(vids, updated_at));
 
-        // A JSON full-text index's derived text column is computed here from
-        // its source value, never carried in the row's properties: the
-        // content UID above hashes the properties as written.
-        let derived = json_fts_derived_rows(schema, &self.label, vertices);
+        // Derived columns (a JSON full-text index's text, a keyed index's
+        // key) are computed here from their source values, never carried in
+        // the row's properties: the content UID above hashes the properties
+        // as written.
+        let derived = derived_rows(schema, &self.label, vertices);
 
         // Build property columns using shared builder
         let prop_columns = PropertyColumnBuilder::new(schema, &self.label, vertices.len())
@@ -322,30 +331,46 @@ impl VertexDataset {
     }
 }
 
-/// Each row's properties with the derived text of every JSON full-text index
-/// on `label` set from its source column (`None` when there is no such index).
-fn json_fts_derived_rows(
+/// Each row's properties with every derived column of `label` filled from
+/// its source property: the text of each JSON full-text index and the key
+/// columns of each keyed scalar index whose columns the catalog registers.
+/// `None` when the label has no such column.
+///
+/// Derived values are computed here, at batch build, and never carried in a
+/// row's properties: the content UID hashes the properties as written, and an
+/// unflushed row has no derived column.
+pub(crate) fn derived_rows(
     schema: &Schema,
     label: &str,
     vertices: &[(Vid, Vec<String>, Properties)],
 ) -> Option<Vec<Properties>> {
-    let configs: Vec<&uni_common::core::schema::JsonFtsIndexConfig> = schema
-        .indexes
-        .iter()
-        .filter_map(|idx| match idx {
-            uni_common::core::schema::IndexDefinition::JsonFullText(cfg)
-                if cfg.label == label
-                    && schema
-                        .properties
-                        .get(label)
-                        .is_some_and(|p| p.contains_key(&cfg.derived_column())) =>
+    use uni_common::core::schema::IndexDefinition;
+    let registered = |column: &str| {
+        schema
+            .properties
+            .get(label)
+            .is_some_and(|p| p.contains_key(column))
+    };
+    let mut json_fts = Vec::new();
+    let mut keys = Vec::new();
+    for idx in &schema.indexes {
+        match idx {
+            IndexDefinition::JsonFullText(cfg)
+                if cfg.label == label && registered(&cfg.derived_column()) =>
             {
-                Some(cfg)
+                json_fts.push(cfg);
             }
-            _ => None,
-        })
-        .collect();
-    if configs.is_empty() {
+            IndexDefinition::Scalar(cfg) if cfg.label == label && cfg.properties.len() == 1 => {
+                if let Some(key) = &cfg.key
+                    && key.columns.iter().all(|c| registered(c))
+                {
+                    keys.push((key, cfg.properties[0].as_str()));
+                }
+            }
+            _ => {}
+        }
+    }
+    if json_fts.is_empty() && keys.is_empty() {
         return None;
     }
     Some(
@@ -353,7 +378,7 @@ fn json_fts_derived_rows(
             .iter()
             .map(|(_, _, props)| {
                 let mut row = props.clone();
-                for cfg in &configs {
+                for cfg in &json_fts {
                     let text = props
                         .get(&cfg.column)
                         .and_then(|v| uni_common::core::schema::json_fts_text(v, &cfg.paths));
@@ -361,6 +386,9 @@ fn json_fts_derived_rows(
                         cfg.derived_column(),
                         text.map_or(uni_common::Value::Null, uni_common::Value::String),
                     );
+                }
+                for (key, property) in &keys {
+                    crate::storage::index_keys::fill_key_columns(key, property, props, &mut row);
                 }
                 row
             })
