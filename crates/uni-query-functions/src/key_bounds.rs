@@ -430,6 +430,225 @@ pub fn btic_accessor_bound(side: BticSide, op: CmpOp, constant: &Value) -> Optio
     })
 }
 
+/// The position of a POINT key's x / longitude column.
+pub const POINT_X: usize = 0;
+/// The position of a POINT key's y / latitude column.
+pub const POINT_Y: usize = 1;
+
+/// The Earth radius `distance` uses for WGS-84 points, in meters
+/// (`EARTH_RADIUS_KM · 1000` in `spatial::eval_distance`).
+pub const EARTH_RADIUS_M: f64 = 6_371_000.0;
+
+/// The relative widening of a distance bound. The engine computes a
+/// distance, and this module a bound, each with a relative rounding error of
+/// a few ulps (≈ 1e-15) on well-conditioned operations; widening by 1e-9
+/// covers both a millionfold, for a cost of 1 mm per 1 000 km of radius.
+const DISTANCE_REL_EPS: f64 = 1e-9;
+
+/// The absolute widening of a geographic distance bound, in degrees
+/// (≈ 0.1 mm). It covers rounding where relative error does not apply:
+/// `to_radians` mapping two distinct latitudes to one radian value (`dlat`
+/// computed as 0), and squares of tiny angle differences underflowing to 0.
+const GEO_ABS_EPS_DEG: f64 = 1e-9;
+
+/// The absolute widening of a Cartesian distance bound: `dx²` underflows to
+/// zero below `|dx|` ≈ 1.5e-154, so the engine reports distance 0 for points
+/// that far apart.
+const CARTESIAN_ABS_EPS: f64 = 1e-150;
+
+/// The largest `s` the longitude bound is computed from (`|dlon| ≤
+/// 2·asin(s)`). `asin` is ill-conditioned near 1: an error of an ulp in `s`
+/// there moves the result by ≈ 1e-8 rad, more than the widening covers; at
+/// or above this `s` the longitude is left unbounded.
+const LON_ASIN_MAX: f64 = 1.0 - 1e-6;
+
+/// `column op v` on a Float64 key column, with `v` normalized (`-0.0` as
+/// `+0.0`, as keys are) and an infinite `v` folded (keys are finite).
+fn float_cmp(column: usize, op: CmpOp, v: f64) -> KeyBound {
+    if v.is_infinite() {
+        let holds = match op {
+            CmpOp::GtEq | CmpOp::Gt => v < 0.0,
+            CmpOp::LtEq | CmpOp::Lt => v > 0.0,
+            CmpOp::Eq => false,
+            CmpOp::NotEq => true,
+        };
+        return if holds {
+            KeyBound::True
+        } else {
+            KeyBound::False
+        };
+    }
+    KeyBound::cmp(column, op, KeyValue::Float(v + 0.0))
+}
+
+/// `lo ≤ column ≤ hi`, or [`KeyBound::False`] when `lo > hi`.
+fn float_range(column: usize, lo: f64, hi: f64) -> KeyBound {
+    if lo > hi {
+        return KeyBound::False;
+    }
+    KeyBound::and([
+        float_cmp(column, CmpOp::GtEq, lo),
+        float_cmp(column, CmpOp::LtEq, hi),
+    ])
+}
+
+/// A corner of `point.withinBBox` as the predicate reads it
+/// (`get_geo_coords` / `get_cartesian_coords` in `spatial`): `(longitude,
+/// latitude)` of a map with numeric `latitude` and `longitude`, or `(x, y)`
+/// of one with numeric `x` and `y`, whatever its CRS (the predicate ignores
+/// it). `None` when the predicate would raise for it, or for a non-finite
+/// coordinate (no bound is rendered for one).
+#[must_use]
+pub fn point_corner(value: &Value, geographic: bool) -> Option<(f64, f64)> {
+    let map = value.as_object()?;
+    let coord = |name: &str| map.get(name).and_then(Value::as_f64);
+    let (x, y) = if geographic {
+        (coord("longitude")?, coord("latitude")?)
+    } else {
+        (coord("x")?, coord("y")?)
+    };
+    (x.is_finite() && y.is_finite()).then_some((x, y))
+}
+
+/// The center of `distance(p, c)` as the predicate reads it, `(x, y)` or
+/// `(longitude, latitude)`, when `c` is a point of the column's CRS `crs`:
+/// `distance` raises for two CRS names that differ, so a constant of
+/// another CRS is never bounded and the residual raises as without the
+/// index. A geographic center must be in range, finite, as a stored point
+/// is keyed.
+#[must_use]
+pub fn point_center(value: &Value, geographic: bool, crs: &str) -> Option<(f64, f64)> {
+    let map = value.as_object()?;
+    if map.get("crs").and_then(Value::as_str) != Some(crs) {
+        return None;
+    }
+    let (x, y) = point_corner(value, geographic)?;
+    if geographic && (!(-90.0..=90.0).contains(&y) || !(-180.0..=180.0).contains(&x)) {
+        return None;
+    }
+    Some((x, y))
+}
+
+/// The bound of `point.withinBBox(p, ll, ur)`, with the corners as
+/// [`point_corner`] reads them.
+///
+/// The predicate (`spatial::eval_within_bbox`) tests inclusive ranges on the
+/// stored coordinates, so the bound is exact on the key: `ll.x ≤ x ≤ ur.x ∧
+/// ll.y ≤ y ≤ ur.y`, an empty range matching nothing. A geographic box whose
+/// lower-left longitude exceeds its upper-right one crosses the antimeridian:
+/// the predicate takes `lon ≥ ll.lon ∨ lon ≤ ur.lon`, and so does the bound.
+/// The CRS names of the corners are not compared, as the predicate does not.
+#[must_use]
+pub fn point_bbox_bound(geographic: bool, ll: (f64, f64), ur: (f64, f64)) -> KeyBound {
+    let x = if geographic && ll.0 > ur.0 {
+        KeyBound::or([
+            float_cmp(POINT_X, CmpOp::GtEq, ll.0),
+            float_cmp(POINT_X, CmpOp::LtEq, ur.0),
+        ])
+    } else {
+        float_range(POINT_X, ll.0, ur.0)
+    };
+    KeyBound::and([x, float_range(POINT_Y, ll.1, ur.1)])
+}
+
+/// A bound on the key admitting every stored point `p` with `distance(p, c)
+/// < r` (`inclusive`: `≤ r`), for a center `c` of the column's CRS (see
+/// [`point_center`]). A box, so a superset; the residual computes the
+/// distance.
+///
+/// **Cartesian** (`spatial::eval_distance`: `√(dx² + dy² + dz²)`):
+/// `|dx| ≤ d` and `|dy| ≤ d`, so `x ∈ [c.x − r', c.x + r']` and likewise
+/// `y`, with `r' = r·(1 + 1e-9) + 1e-9·(|c.x| + |c.y|) + 1e-150`: the
+/// relative term covers the rounding of `x − c.x` (relative to the
+/// coordinates' magnitude) and of the sum, the absolute term the underflow of
+/// tiny squares.
+///
+/// **Geographic** (haversine, `R` = [`EARTH_RADIUS_M`]): with `θ = r / R`,
+/// `a = sin²(Δφ/2) + cos φ₁ cos φ₂ sin²(Δλ/2)` and `d = 2R·asin(√a)`:
+/// - `a ≥ sin²(Δφ/2)` gives `|Δφ| ≤ θ`: latitude within `c.lat ± θ°`;
+/// - `a ≥ cos φ₁ cos φ₂ sin²(Δλ/2)` and `|φ₂| ≤ |φ₁| + θ = m` give
+///   `sin(|Δλ|/2) ≤ sin(θ/2) / √(cos φ₁ · cos m)`: longitude within
+///   `c.lon ± 2·asin(…)`, taken modulo 360° (split in two ranges across the
+///   antimeridian). Unbounded when `m` reaches a pole or the `asin`
+///   argument reaches 1.
+///
+/// Both widened by `1e-9` relative and `1e-9°` absolute (see the constants).
+/// `None` for a NaN radius (no bound is needed: the residual rejects every
+/// row, and there is no literal for it); [`KeyBound::False`] for a radius no
+/// distance meets (`< 0`, or `< 0` exclusive of 0).
+#[must_use]
+pub fn point_distance_bound(
+    geographic: bool,
+    center: (f64, f64),
+    radius: f64,
+    inclusive: bool,
+) -> Option<KeyBound> {
+    if radius.is_nan() {
+        return None;
+    }
+    // A distance is never negative (or is NaN, which no comparison admits).
+    if radius < 0.0 || (radius == 0.0 && !inclusive) {
+        return Some(KeyBound::False);
+    }
+    let (cx, cy) = center;
+    if !geographic {
+        let r = radius * (1.0 + DISTANCE_REL_EPS)
+            + DISTANCE_REL_EPS * (cx.abs() + cy.abs())
+            + CARTESIAN_ABS_EPS;
+        return Some(KeyBound::and([
+            float_range(POINT_X, cx - r, cx + r),
+            float_range(POINT_Y, cy - r, cy + r),
+        ]));
+    }
+    let widen = |deg: f64| deg * (1.0 + DISTANCE_REL_EPS) + GEO_ABS_EPS_DEG;
+    let theta = radius / EARTH_RADIUS_M;
+    let dlat = widen(theta.to_degrees());
+    // A keyed latitude is in [-90, 90]: a side past a pole bounds nothing.
+    let lat = KeyBound::and([
+        if cy - dlat > -90.0 {
+            float_cmp(POINT_Y, CmpOp::GtEq, cy - dlat)
+        } else {
+            KeyBound::True
+        },
+        if cy + dlat < 90.0 {
+            float_cmp(POINT_Y, CmpOp::LtEq, cy + dlat)
+        } else {
+            KeyBound::True
+        },
+    ]);
+    let reach = cy.abs() + dlat;
+    if reach >= 90.0 {
+        return Some(lat);
+    }
+    let theta = widen(theta.to_degrees()).to_radians();
+    let s = (theta / 2.0).sin() / (cy.to_radians().cos() * reach.to_radians().cos()).sqrt();
+    // `s` may be NaN (a zero-width product): leave the longitude unbounded.
+    if s.is_nan() || s >= LON_ASIN_MAX {
+        return Some(lat);
+    }
+    let dlon = widen((2.0 * s.asin()).to_degrees());
+    if dlon >= 180.0 {
+        return Some(lat);
+    }
+    let (lo, hi) = (cx - dlon, cx + dlon);
+    // A stored longitude is in [-180, 180] (other values are not keyed), and
+    // the predicate's `sin²(Δλ/2)` is periodic in 360°.
+    let lon = if lo <= -180.0 {
+        KeyBound::or([
+            float_cmp(POINT_X, CmpOp::GtEq, lo + 360.0),
+            float_cmp(POINT_X, CmpOp::LtEq, hi),
+        ])
+    } else if hi >= 180.0 {
+        KeyBound::or([
+            float_cmp(POINT_X, CmpOp::GtEq, lo),
+            float_cmp(POINT_X, CmpOp::LtEq, hi - 360.0),
+        ])
+    } else {
+        float_range(POINT_X, lo, hi)
+    };
+    Some(KeyBound::and([lon, lat]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +858,362 @@ mod tests {
         let b = btic_bound(BticPredicate::Before, true, i64::MIN, 0);
         assert!(b.to_filter(&cols).unwrap().to_sql().is_ok());
         assert_eq!(KeyBound::int(0, CmpOp::Lt, 1).to_filter(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod point_tests {
+    use super::*;
+    use crate::spatial::eval_spatial_function;
+    use std::collections::HashMap;
+    use uni_common::core::schema::KeyKind;
+    use uni_store::storage::index_keys::derive;
+
+    /// A small deterministic generator: no extra dependency, reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// Uniform in `[0, 1)`.
+        fn unit(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        fn range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (hi - lo) * self.unit()
+        }
+
+        /// Log-uniform in `[10^lo, 10^hi)`.
+        fn log(&mut self, lo: f64, hi: f64) -> f64 {
+            10f64.powf(self.range(lo, hi))
+        }
+
+        fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+            items[(self.next() % items.len() as u64) as usize]
+        }
+    }
+
+    fn geo(lat: f64, lon: f64) -> Value {
+        Value::Map(HashMap::from([
+            ("type".to_string(), Value::String("Point".into())),
+            ("crs".to_string(), Value::String("WGS84".into())),
+            ("latitude".to_string(), Value::Float(lat)),
+            ("longitude".to_string(), Value::Float(lon)),
+        ]))
+    }
+
+    fn cartesian(x: f64, y: f64, z: Option<f64>) -> Value {
+        let crs = if z.is_some() {
+            "Cartesian-3D"
+        } else {
+            "Cartesian"
+        };
+        Value::Map(HashMap::from([
+            ("type".to_string(), Value::String("Point".into())),
+            ("crs".to_string(), Value::String(crs.into())),
+            ("x".to_string(), Value::Float(x)),
+            ("y".to_string(), Value::Float(y)),
+            ("z".to_string(), z.map_or(Value::Null, Value::Float)),
+        ]))
+    }
+
+    const GEO: KeyKind = KeyKind::PointCoords {
+        geographic: true,
+        three_d: false,
+    };
+
+    fn distance(a: &Value, b: &Value) -> f64 {
+        match eval_spatial_function("DISTANCE", &[a.clone(), b.clone()]).unwrap() {
+            Value::Float(d) => d,
+            other => panic!("distance returned {other:?}"),
+        }
+    }
+
+    fn within(p: &Value, ll: &Value, ur: &Value) -> bool {
+        matches!(
+            eval_spatial_function("POINT.WITHINBBOX", &[p.clone(), ll.clone(), ur.clone()]),
+            Ok(Value::Bool(true))
+        )
+    }
+
+    /// Assert that the distance bound of `(center, r)` admits `p` whenever
+    /// the engine's distance, in either argument order, says it is within
+    /// `r` (`<` and `<=`); returns whether `p` matched.
+    fn check_distance(kind: &KeyKind, geographic: bool, center: &Value, p: &Value, r: f64) -> bool {
+        // A NaN distance (near-antipodal rounding past `asin`'s domain)
+        // meets no radius.
+        if r.is_nan() {
+            return false;
+        }
+        let crs = kind.point_crs().unwrap();
+        let c = point_center(center, geographic, crs).expect("a center of the column's CRS");
+        let keys = derive(kind, Some(p));
+        assert!(keys.iter().all(Option::is_some), "{p:?} is keyed");
+        let mut matched = false;
+        for inclusive in [false, true] {
+            let bound = point_distance_bound(geographic, c, r, inclusive).unwrap();
+            for d in [distance(p, center), distance(center, p)] {
+                let holds = if inclusive { d <= r } else { d < r };
+                if holds {
+                    matched = true;
+                    assert!(
+                        bound.admits(&keys),
+                        "distance {d} {} {r} but the bound drops it: center {center:?} \
+                         point {p:?} bound {bound:?}",
+                        if inclusive { "<=" } else { "<" }
+                    );
+                }
+            }
+        }
+        matched
+    }
+
+    /// A random geographic center, weighted toward the poles and the
+    /// antimeridian, and the exact extremes.
+    fn geo_center(rng: &mut Rng) -> (f64, f64) {
+        let lat = match rng.next() % 6 {
+            0 => rng.pick(&[90.0, -90.0, 0.0, -0.0]),
+            1 => rng.range(89.0, 90.0) * rng.pick(&[1.0, -1.0]),
+            _ => rng.range(-90.0, 90.0),
+        };
+        let lon = match rng.next() % 6 {
+            0 => rng.pick(&[180.0, -180.0, 0.0, -0.0]),
+            1 => rng.range(179.0, 180.0) * rng.pick(&[1.0, -1.0]),
+            _ => rng.range(-180.0, 180.0),
+        };
+        (lat, lon)
+    }
+
+    /// Random centers, radii and points around them (most near the radius,
+    /// where a bound that is too tight would show): every point within the
+    /// engine's distance is admitted. Also each point at *exactly* the
+    /// engine's distance from the center, `<=` that distance.
+    #[test]
+    fn geographic_distance_bound_admits_every_point_within_the_radius() {
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        let mut matched = 0usize;
+        let mut admitted_far = 0usize;
+        for _ in 0..4_000 {
+            let (lat, lon) = geo_center(&mut rng);
+            let center = geo(lat, lon);
+            let r = match rng.next() % 8 {
+                0 => 0.0,
+                1 => rng.log(7.0, 7.4), // up to 25 000 km: past the antipode
+                _ => rng.log(-3.0, 6.7),
+            };
+            let reach = (r / EARTH_RADIUS_M).to_degrees();
+            for _ in 0..25 {
+                // Within about twice the radius, wrapped into range.
+                let s = rng.range(0.0, 2.2);
+                let mut plat = lat + reach * s * rng.range(-1.0, 1.0);
+                let mut plon =
+                    lon + reach * s * rng.range(-1.0, 1.0) / lat.to_radians().cos().max(1e-6);
+                if rng.next().is_multiple_of(10) {
+                    plon = rng.range(-180.0, 180.0);
+                }
+                plat = plat.clamp(-90.0, 90.0);
+                plon = ((plon + 180.0).rem_euclid(360.0)) - 180.0;
+                let p = geo(plat, plon);
+                matched += usize::from(check_distance(&GEO, true, &center, &p, r));
+                // The point at exactly its distance.
+                let d = distance(&p, &center);
+                check_distance(&GEO, true, &center, &p, d);
+                if r < 1e5 && d > 1e7 {
+                    let c = point_center(&center, true, "WGS84").unwrap();
+                    let bound = point_distance_bound(true, c, r, true).unwrap();
+                    admitted_far += usize::from(bound.admits(&derive(&GEO, Some(&p))));
+                }
+            }
+        }
+        assert!(matched > 10_000, "too few matches to be a test: {matched}");
+        // Away from the poles a small radius bounds tightly.
+        assert!(
+            admitted_far < 200,
+            "a small radius admits far points: {admitted_far}"
+        );
+    }
+
+    #[test]
+    fn cartesian_distance_bound_admits_every_point_within_the_radius() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut matched = 0usize;
+        for kind in [
+            KeyKind::PointCoords {
+                geographic: false,
+                three_d: false,
+            },
+            KeyKind::PointCoords {
+                geographic: false,
+                three_d: true,
+            },
+        ] {
+            let three_d = matches!(kind, KeyKind::PointCoords { three_d: true, .. });
+            for _ in 0..4_000 {
+                let scale = rng.pick(&[1e-160, 1e-3, 1.0, 1e3, 1e12]);
+                let (cx, cy) = (scale * rng.range(-1.0, 1.0), scale * rng.range(-1.0, 1.0));
+                let cz = three_d.then(|| scale * rng.range(-1.0, 1.0));
+                let center = cartesian(rng.pick(&[cx, 0.0, -0.0]), cy, cz);
+                let r = match rng.next() % 6 {
+                    0 => 0.0,
+                    _ => scale * rng.log(-12.0, 1.0),
+                };
+                for _ in 0..25 {
+                    let s = rng.range(0.0, 2.2) * r;
+                    let p = cartesian(
+                        cx + s * rng.range(-1.0, 1.0),
+                        cy + s * rng.range(-1.0, 1.0),
+                        cz.map(|z| z + s * rng.range(-1.0, 1.0)),
+                    );
+                    matched += usize::from(check_distance(&kind, false, &center, &p, r));
+                    let d = distance(&p, &center);
+                    check_distance(&kind, false, &center, &p, d);
+                }
+            }
+        }
+        assert!(matched > 20_000, "too few matches to be a test: {matched}");
+    }
+
+    #[test]
+    fn distance_bound_edges() {
+        let c = (1.0, 2.0);
+        assert_eq!(
+            point_distance_bound(false, c, -1.0, true),
+            Some(KeyBound::False)
+        );
+        assert_eq!(
+            point_distance_bound(false, c, 0.0, false),
+            Some(KeyBound::False)
+        );
+        assert_eq!(point_distance_bound(false, c, f64::NAN, true), None);
+        // An infinite radius bounds nothing.
+        assert_eq!(
+            point_distance_bound(false, c, f64::INFINITY, true),
+            Some(KeyBound::True)
+        );
+        // Near a pole the longitude is unbounded; across the antimeridian it
+        // is two ranges.
+        let polar = point_distance_bound(true, (10.0, 89.99), 2_000.0, true).unwrap();
+        // Only `lat >= 89.97…`: the disk reaches the pole.
+        assert!(
+            matches!(
+                polar,
+                KeyBound::Cmp {
+                    column: POINT_Y,
+                    op: CmpOp::GtEq,
+                    ..
+                }
+            ),
+            "{polar:?}"
+        );
+        // Past the antipode nothing is bounded.
+        assert_eq!(
+            point_distance_bound(true, (0.0, 0.0), 2.5e7, true),
+            Some(KeyBound::True)
+        );
+        assert!(polar.admits(&[Some(KeyValue::Float(-170.0)), Some(KeyValue::Float(89.995))]));
+        let wrap = point_distance_bound(true, (179.99, 0.0), 10_000.0, true).unwrap();
+        let admits =
+            |lon: f64| wrap.admits(&[Some(KeyValue::Float(lon)), Some(KeyValue::Float(0.0))]);
+        assert!(admits(179.95) && admits(180.0) && admits(-180.0) && admits(-179.95));
+        assert!(!admits(0.0) && !admits(179.0) && !admits(-179.0));
+        // Renders: the SQL dialect has no literal for an infinite bound.
+        let cols = ["px".to_string(), "py".to_string()];
+        assert!(wrap.to_filter(&cols).unwrap().to_sql().is_ok());
+        assert!(
+            point_distance_bound(false, (1e300, 0.0), 1e308, true)
+                .unwrap()
+                .to_filter(&cols)
+                .unwrap()
+                .to_sql()
+                .is_ok()
+        );
+    }
+
+    /// The constants are read as the predicates read them; a center of
+    /// another CRS is not bounded.
+    #[test]
+    fn centers_and_corners() {
+        let xy = cartesian(1.0, -0.0, None);
+        assert_eq!(point_corner(&xy, false), Some((1.0, -0.0)));
+        assert_eq!(point_center(&xy, false, "Cartesian"), Some((1.0, -0.0)));
+        assert_eq!(point_center(&xy, false, "Cartesian-3D"), None);
+        assert_eq!(point_corner(&xy, true), None);
+        let g = geo(10.0, 20.0);
+        assert_eq!(point_corner(&g, true), Some((20.0, 10.0)));
+        assert_eq!(point_center(&g, true, "WGS84"), Some((20.0, 10.0)));
+        assert_eq!(point_center(&g, false, "Cartesian"), None);
+        // A corner's CRS is not compared (withinBBox does not).
+        let plain = Value::Map(HashMap::from([
+            ("x".to_string(), Value::Int(3)),
+            ("y".to_string(), Value::Float(4.0)),
+        ]));
+        assert_eq!(point_corner(&plain, false), Some((3.0, 4.0)));
+        assert_eq!(point_center(&plain, false, "Cartesian"), None);
+        assert_eq!(point_corner(&cartesian(f64::NAN, 0.0, None), false), None);
+        assert_eq!(point_center(&geo(0.0, 200.0), true, "WGS84"), None);
+        assert_eq!(point_corner(&Value::Null, false), None);
+        // `-0.0` is rendered as the keys are, `+0.0`.
+        let b = point_bbox_bound(false, (-0.0, -0.0), (1.0, 1.0));
+        assert_eq!(
+            b.to_filter(&["px".to_string(), "py".to_string()])
+                .unwrap()
+                .to_sql()
+                .unwrap()
+                .matches("-0")
+                .count(),
+            0
+        );
+    }
+
+    /// `withinBBox` against its bound, exhaustively over a small grid of
+    /// coordinates (`-0.0` and the corners themselves included), geographic
+    /// boxes crossing the antimeridian included: the bound is exact.
+    #[test]
+    fn bbox_bound_is_exact() {
+        let grid = [-180.0, -10.0, -1.0, -0.0, 0.0, 1.0, 10.0, 180.0];
+        let lat_grid = [-90.0, -1.0, -0.0, 0.0, 1.0, 90.0];
+        for geographic in [false, true] {
+            let kind = KeyKind::PointCoords {
+                geographic,
+                three_d: false,
+            };
+            let ys: &[f64] = if geographic { &lat_grid } else { &grid };
+            let make = |x: f64, y: f64| {
+                if geographic {
+                    geo(y, x)
+                } else {
+                    cartesian(x, y, None)
+                }
+            };
+            for &llx in &grid {
+                for &urx in &grid {
+                    for &(lly, ury) in &[(-1.0, 1.0), (0.0, -0.0), (1.0, -1.0), (-90.0, 90.0)] {
+                        let (ll, ur) = (make(llx, lly), make(urx, ury));
+                        let bound = point_bbox_bound(
+                            geographic,
+                            point_corner(&ll, geographic).unwrap(),
+                            point_corner(&ur, geographic).unwrap(),
+                        );
+                        for &x in &grid {
+                            for &y in ys {
+                                let p = make(x, y);
+                                assert_eq!(
+                                    bound.admits(&derive(&kind, Some(&p))),
+                                    within(&p, &ll, &ur),
+                                    "geographic={geographic} p=({x},{y}) \
+                                     ll=({llx},{lly}) ur=({urx},{ury}) {bound:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

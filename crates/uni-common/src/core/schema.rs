@@ -2667,10 +2667,13 @@ impl SchemaManager {
         // catalog is still accepted as it is: an existing catalog must open,
         // and the build records it `Failed`.
         if let IndexDefinition::Scalar(cfg) = &mut index_def {
+            if let Some(clash) = schema.scalar_index_name_clash(cfg) {
+                return Err(anyhow!("Cannot create index '{}': {clash}", cfg.name));
+            }
             let mut resolved = cfg.clone();
             match schema.resolve_scalar_index(&mut resolved) {
                 Ok(()) => *cfg = resolved,
-                Err(reason) if !schema.indexes.iter().any(|i| i.name() == cfg.name) => {
+                Err(reason) if !schema.records_scalar_index(cfg) => {
                     return Err(anyhow!("Cannot create index '{}': {reason}", cfg.name));
                 }
                 Err(_) => {}

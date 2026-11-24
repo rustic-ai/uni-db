@@ -2414,6 +2414,12 @@ impl HybridPhysicalPlanner {
             variable_kinds,
             ..Default::default()
         };
+        // A key path's conjunct (`n.m.k = c`) has no Arrow translation (only
+        // the Cypher filter compiler reads into a map), so its bound goes to
+        // Lance alone, as the `ext_id` equality's does: the filters above the
+        // scan (`apply_scan_filter` and the `Filter` it came from) apply the
+        // conjunct to every row, unflushed ones included.
+        let mut lance_only = false;
         if !keyed.is_empty() {
             let mut key_parts = Vec::new();
             for predicate in keyed {
@@ -2421,6 +2427,13 @@ impl HybridPhysicalPlanner {
                     continue;
                 };
                 if !self.translates_to_physical(&predicate.conjunct, &ctx, scan_schema) {
+                    if matches!(
+                        predicate.key.kind,
+                        uni_common::core::schema::KeyKind::MapPath { .. }
+                    ) {
+                        key_parts.push(bound);
+                        lance_only = true;
+                    }
                     continue;
                 }
                 key_parts.push(bound);
@@ -2430,7 +2443,7 @@ impl HybridPhysicalPlanner {
                 std::iter::once(lance_expr).chain(key_parts),
             );
         }
-        if indexed_preds.is_empty() {
+        if indexed_preds.is_empty() && !lance_only {
             return None;
         }
 
@@ -2446,6 +2459,13 @@ impl HybridPhysicalPlanner {
         // Build the Arrow-side PhysicalExpr from the same predicates. The
         // GraphScanExec applies it to the merged (Lance+L0) batch so the
         // scan output is index-bounded regardless of where the data lives.
+        if indexed_preds.is_empty() {
+            let always: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                Arc::new(datafusion::physical_expr::expressions::Literal::new(
+                    datafusion::scalar::ScalarValue::Boolean(Some(true)),
+                ));
+            return Some((lance_str, always));
+        }
         let combined = Self::and_join_predicates(indexed_preds.clone());
         let df_filter = cypher_expr_to_df(&combined, Some(&ctx)).ok()?;
         let session = self.session_ctx.read();

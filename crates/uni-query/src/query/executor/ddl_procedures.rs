@@ -518,6 +518,11 @@ async fn create_index_internal(
     };
 
     storage.schema_manager().add_index(def.clone())?;
+    // As registered: a scalar index's key is resolved there.
+    let def = storage
+        .schema_manager()
+        .get_index(def.name())
+        .unwrap_or(def);
 
     let idx_mgr = storage.index_manager();
     match def {
@@ -537,6 +542,14 @@ async fn create_index_internal(
         // path); that gate would silently leave the index empty after a flush.
         IndexDefinition::Sparse(cfg) => {
             idx_mgr.create_sparse_vector_index(cfg).await?;
+        }
+        // A keyed scalar index (DATETIME, TIME, BTIC, a MAP key path) also
+        // always builds, as the DDL path does: before data, the create
+        // registers its key columns, so every flush fills them. Recorded
+        // only, its columns stayed unregistered and the flush left it for
+        // the next writable open.
+        IndexDefinition::Scalar(cfg) if cfg.key.is_some() => {
+            idx_mgr.create_scalar_index(cfg).await?;
         }
         // Remaining non-vector indexes keep the build-if-data-exists optimization.
         other => {

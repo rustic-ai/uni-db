@@ -976,8 +976,11 @@ impl IndexManager {
         // anything is built; one already in the catalog is recorded `Failed`,
         // which neither the flush nor the rebuild checker retries, rather than
         // attempted (and logged) at every flush.
+        if let Some(clash) = schema.scalar_index_name_clash(&config) {
+            return Err(anyhow!("Cannot create index '{}': {clash}", config.name));
+        }
         if let Err(reason) = schema.resolve_scalar_index(&mut config) {
-            if schema.indexes.iter().all(|i| i.name() != config.name) {
+            if !schema.records_scalar_index(&config) {
                 return Err(anyhow!("Cannot create index '{}': {reason}", config.name));
             }
             warn!(index = %config.name, "{reason}; the index is recorded Failed");
@@ -1230,6 +1233,8 @@ impl IndexManager {
         let label = &config.label;
         let table = table_names::vertex_table_name(label);
         let types = key.kind.column_types();
+        // The column the key is derived from (`m` for a key path `m.k`).
+        let property = key.kind.source_property(property);
 
         let mut widened = (*self.schema_manager.schema()).clone();
         let version = widened.schema_version;

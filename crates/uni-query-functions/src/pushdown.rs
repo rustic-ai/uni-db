@@ -152,6 +152,24 @@ pub enum KeyedForm {
         /// The constant side.
         operand: Expr,
     },
+    /// `point.withinBBox(p, lowerLeft, upperRight)` with constant corners.
+    PointWithinBBox {
+        /// The lower-left corner.
+        lower_left: Expr,
+        /// The upper-right corner.
+        upper_right: Expr,
+    },
+    /// `distance(p, c) < r` / `<= r`, either argument order, or the same
+    /// comparison written `r > distance(…)` / `r >= distance(…)`; `c` and `r`
+    /// constant.
+    PointDistance {
+        /// The center `c`.
+        center: Expr,
+        /// The radius `r`.
+        radius: Expr,
+        /// `<=` rather than `<`.
+        inclusive: bool,
+    },
 }
 
 impl KeyedPredicate {
@@ -167,8 +185,14 @@ impl KeyedPredicate {
     /// key's instant equality is a superset. BTIC: every interval predicate
     /// compares the raw bounds, which the key is (see
     /// [`crate::key_bounds::btic_bound`]); `=` and `IN` also compare
-    /// granularity and certainty, so equal bounds are a superset. `<>` is
-    /// never served.
+    /// granularity and certainty, so equal bounds are a superset. TIME: `=`
+    /// and the ranges compare UTC nanoseconds, which the key is, so they are
+    /// exact; `IN` compares structurally, a superset. A MAP key path: the key
+    /// is the value at the path, exact for `=` and the ranges with a
+    /// constant of the values' type. POINT: `withinBBox` is exact on the
+    /// coordinates; `distance(p, c) < r` is a box around `c` (see
+    /// [`crate::key_bounds::point_distance_bound`]); point `=` and ordering
+    /// have no bound. `<>` is never served.
     ///
     /// Every bound also admits a row with a NULL key column. Such a row is
     /// written when a flush lands between a key backfill and the key
@@ -224,6 +248,11 @@ impl KeyedPredicate {
                 }
                 match (kind, constant_key(kind, &value)?.as_slice()) {
                     (KeyKind::DateTimeInstant, [k]) => Some(KeyBound::cmp(0, *op, k.clone())),
+                    // A TIME orders by its UTC nanoseconds and a key path by
+                    // its value, which the keys are: exact.
+                    (KeyKind::TimeUtc | KeyKind::MapPath { .. }, [k]) => {
+                        Some(KeyBound::cmp(0, *op, k.clone()))
+                    }
                     _ => None,
                 }
             }
@@ -281,6 +310,43 @@ impl KeyedPredicate {
                 }
                 let value = fold_constant_operand(operand, params, statement_time)?;
                 crate::key_bounds::btic_accessor_bound(*side, *op, &value)
+            }
+            // POINT: the spatial predicates, as boxes on the coordinates (see
+            // `key_bounds::point_bbox_bound` / `point_distance_bound`).
+            KeyedForm::PointWithinBBox {
+                lower_left,
+                upper_right,
+            } => {
+                let KeyKind::PointCoords { geographic, .. } = *kind else {
+                    return None;
+                };
+                let corner = |e: &Expr| {
+                    let value = fold_constant_operand(e, params, statement_time)?;
+                    crate::key_bounds::point_corner(&value, geographic)
+                };
+                Some(crate::key_bounds::point_bbox_bound(
+                    geographic,
+                    corner(lower_left)?,
+                    corner(upper_right)?,
+                ))
+            }
+            KeyedForm::PointDistance {
+                center,
+                radius,
+                inclusive,
+            } => {
+                let KeyKind::PointCoords { geographic, .. } = *kind else {
+                    return None;
+                };
+                let center = fold_constant_operand(center, params, statement_time)?;
+                let center =
+                    crate::key_bounds::point_center(&center, geographic, kind.point_crs()?)?;
+                let radius = match fold_constant_operand(radius, params, statement_time)? {
+                    Value::Float(r) => r,
+                    Value::Int(r) => r as f64,
+                    _ => return None,
+                };
+                crate::key_bounds::point_distance_bound(geographic, center, radius, *inclusive)
             }
         }
     }
@@ -498,7 +564,9 @@ impl<'a> IndexAwareAnalyzer<'a> {
     /// The keyed-index shape of `expr`, when `(label, prop)` has an Online
     /// keyed scalar index and `expr` is, with a constant operand `c`:
     /// `variable.prop op c` (`=`, `<`, `<=`, `>`, `>=`) or
-    /// `variable.prop IN list`; for a BTIC key also a BTIC predicate call
+    /// `variable.prop IN list` (`variable.m.k` for a key path into a MAP
+    /// property `m`, whose index's property is `m.k`); for a BTIC key also a
+    /// BTIC predicate call
     /// with the property as either argument and `c` as the other (the point
     /// of `btic_contains_point` is always the second), or
     /// `btic_lo(variable.prop) op c` / `btic_hi(…) op c` in either order.
@@ -551,7 +619,9 @@ impl<'a> IndexAwareAnalyzer<'a> {
             }
             _ => None,
         };
+        let spatial = spatial_keyed_form(expr, &is_property);
         let (prop_side, form) = match expr {
+            _ if spatial.is_some() => spatial?,
             Expr::BinaryOp { .. } if oriented_accessor.is_some() => {
                 let (side, prop, op, operand) = oriented_accessor?;
                 let op = cmp_op(&op)?;
@@ -562,6 +632,15 @@ impl<'a> IndexAwareAnalyzer<'a> {
                 KeyedForm::Compare {
                     op: cmp_op(op)?,
                     operand: right.as_ref().clone(),
+                },
+            ),
+            // `c op n.m.k`: `orient_property_comparisons` orients only a
+            // property of the variable itself, not a key path.
+            Expr::BinaryOp { left, op, right } if is_row_independent(left) => (
+                right.as_ref().clone(),
+                KeyedForm::Compare {
+                    op: cmp_op(&mirrored_comparison(*op)?)?,
+                    operand: left.as_ref().clone(),
                 },
             ),
             Expr::In { expr: left, list }
@@ -607,11 +686,18 @@ impl<'a> IndexAwareAnalyzer<'a> {
         let Expr::Property(base, prop) = &prop_side else {
             return None;
         };
-        if !matches!(base.as_ref(), Expr::Variable(v) if v == variable) {
-            return None;
-        }
+        // `variable.prop`, or `variable.m.k`: a key path into a MAP property,
+        // whose index's property is the dotted path.
+        let prop = match base.as_ref() {
+            Expr::Variable(v) if v == variable => prop.clone(),
+            Expr::Property(inner, head) if matches!(inner.as_ref(), Expr::Variable(v) if v == variable) =>
+            {
+                format!("{head}.{prop}")
+            }
+            _ => return None,
+        };
         let label_name = self.schema.label_name_by_id(label_id)?;
-        let cfg = self.schema.keyed_scalar_index(label_name, prop)?;
+        let cfg = self.schema.keyed_scalar_index(label_name, &prop)?;
         let key = cfg.key.clone()?;
         // The BTIC forms bound a BTIC key only.
         if matches!(
@@ -621,8 +707,16 @@ impl<'a> IndexAwareAnalyzer<'a> {
         {
             return None;
         }
+        // The spatial forms bound a POINT key only.
+        if matches!(
+            form,
+            KeyedForm::PointWithinBBox { .. } | KeyedForm::PointDistance { .. }
+        ) && key.kind.point_crs().is_none()
+        {
+            return None;
+        }
         Some(KeyedPredicate {
-            property: prop.clone(),
+            property: prop,
             index_name: cfg.name.clone(),
             key,
             form,
@@ -1581,6 +1675,75 @@ pub fn orient_property_comparisons(expr: Expr) -> Expr {
     }
 }
 
+/// The POINT shape of `expr`, with the property argument (as
+/// `is_property` recognizes it) and constant other operands:
+/// `point.withinBBox(p, ll, ur)`, or `distance(p, c) < r` / `<= r` with
+/// `distance`'s arguments in either order and the comparison in either
+/// orientation (`r > distance(p, c)`). `>` / `>=` on a distance (the
+/// complement of a disk) and `=` are not shapes.
+fn spatial_keyed_form(
+    expr: &Expr,
+    is_property: &dyn Fn(&Expr) -> bool,
+) -> Option<(Expr, KeyedForm)> {
+    let call = |e: &Expr, fname: &str, arity: usize| -> Option<Vec<Expr>> {
+        match e {
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct: false,
+                window_spec: None,
+            } if args.len() == arity && name.eq_ignore_ascii_case(fname) => Some(args.clone()),
+            _ => None,
+        }
+    };
+    if let Some(args) = call(expr, "point.withinBBox", 3) {
+        return (is_property(&args[0])
+            && is_row_independent(&args[1])
+            && is_row_independent(&args[2]))
+        .then(|| {
+            (
+                args[0].clone(),
+                KeyedForm::PointWithinBBox {
+                    lower_left: args[1].clone(),
+                    upper_right: args[2].clone(),
+                },
+            )
+        });
+    }
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    // Oriented as `distance(…) op r`.
+    let (distance, op, radius) = if is_row_independent(right) {
+        (left.as_ref(), *op, right.as_ref())
+    } else if is_row_independent(left) {
+        (right.as_ref(), mirrored_comparison(*op)?, left.as_ref())
+    } else {
+        return None;
+    };
+    let inclusive = match op {
+        BinaryOp::Lt => false,
+        BinaryOp::LtEq => true,
+        _ => return None,
+    };
+    let args = call(distance, "distance", 2)?;
+    let (prop, center) = if is_property(&args[0]) && is_row_independent(&args[1]) {
+        (&args[0], &args[1])
+    } else if is_property(&args[1]) && is_row_independent(&args[0]) {
+        (&args[1], &args[0])
+    } else {
+        return None;
+    };
+    Some((
+        prop.clone(),
+        KeyedForm::PointDistance {
+            center: center.clone(),
+            radius: radius.clone(),
+            inclusive,
+        },
+    ))
+}
+
 /// The operator `op'` with `a op b` ≡ `b op' a`, for comparisons only.
 fn mirrored_comparison(op: BinaryOp) -> Option<BinaryOp> {
     match op {
@@ -1595,7 +1758,8 @@ fn mirrored_comparison(op: BinaryOp) -> Option<BinaryOp> {
 }
 
 /// Whether `expr` is built only from literals, parameters and temporal
-/// constructors called on such arguments (see [`foldable_temporal_function`]).
+/// constructors called on such arguments (see [`foldable_temporal_function`]),
+/// and `point(m)` with `m` a map literal or parameter.
 ///
 /// Deliberately structural and conservative: any variable, property access,
 /// other function call or subquery makes it row-dependent, so an expression
@@ -1611,9 +1775,22 @@ fn is_row_independent(expr: &Expr) -> bool {
             args,
             distinct: false,
             window_spec: None,
+        } if is_point_constructor(name, args) => is_row_independent(&args[0]),
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct: false,
+            window_spec: None,
         } => foldable_temporal_function(name).is_some() && args.iter().all(is_row_independent),
         _ => false,
     }
+}
+
+/// Whether `name(args)` is `point(m)` with `m` a map literal or a
+/// parameter: the constructor reads no clock and no row, so it folds when
+/// `m` is constant.
+fn is_point_constructor(name: &str, args: &[Expr]) -> bool {
+    name.eq_ignore_ascii_case("point") && matches!(args, [Expr::Map(_) | Expr::Parameter(_)])
 }
 
 /// The canonical (upper-case) name of a temporal constructor whose value is
@@ -1638,7 +1815,8 @@ fn foldable_temporal_function(name: &str) -> Option<String> {
 
 /// The value of `expr` when it is constant for the statement: a literal, a
 /// resolved parameter, a list or map of those, or a temporal constructor
-/// called on constant arguments (see [`foldable_temporal_function`]).
+/// called on constant arguments (see [`foldable_temporal_function`]), or
+/// `point(m)` on a constant map (see `is_point_constructor`).
 ///
 /// A no-argument constructor reads the statement clock, `statement_time`,
 /// which must be the one the statement's other uses of the clock see (the
@@ -1665,6 +1843,17 @@ pub fn fold_constant_operand(
             .map(|(k, v)| Some((k.clone(), fold_constant_operand(v, params, statement_time)?)))
             .collect::<Option<HashMap<_, _>>>()
             .map(Value::Map),
+        // `point({…})`: the constructor's own value, or `None` where it
+        // raises (the residual raises the same).
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct: false,
+            window_spec: None,
+        } if is_point_constructor(name, args) => {
+            let map = fold_constant_operand(&args[0], params, statement_time)?;
+            crate::spatial::eval_spatial_function("POINT", &[map]).ok()
+        }
         Expr::FunctionCall {
             name,
             args,
@@ -2859,5 +3048,342 @@ mod keyed_tests {
             vec![property(), call("btic", vec![string("1985")])],
         );
         assert!(analyzer.analyze(&e, "n", 1).keyed_predicates.is_empty());
+    }
+
+    fn compare(left: Expr, op: BinaryOp, right: Expr) -> Expr {
+        cmp(left, op, right)
+    }
+
+    fn float(f: f64) -> Expr {
+        Expr::Literal(CypherLiteral::Float(f))
+    }
+
+    /// `point({x: …, y: …})`.
+    fn xy(x: f64, y: f64) -> Expr {
+        call(
+            "point",
+            vec![Expr::Map(vec![
+                ("x".into(), float(x)),
+                ("y".into(), float(y)),
+            ])],
+        )
+    }
+
+    fn cmp(left: Expr, op: BinaryOp, right: Expr) -> Expr {
+        Expr::BinaryOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }
+    }
+
+    /// A TIME bound is the constant's UTC nanoseconds with no modulo, for
+    /// `=` and every range; `<>`, `localtime` and other types are refused.
+    #[test]
+    fn time_bounds_are_utc_nanoseconds() {
+        use uni_common::core::schema::DataType;
+        let schema = keyed_schema(KeyKind::TimeUtc, DataType::Time);
+        let analyzer = IndexAwareAnalyzer::new(&schema);
+        let params = HashMap::from([(
+            "t".to_string(),
+            Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: 0,
+                offset_seconds: 14 * 3600,
+            }),
+        )]);
+        let bound = |e: Expr| {
+            analyzer
+                .analyze(&e, "n", 1)
+                .keyed_predicates
+                .first()
+                .and_then(|k| k.lance_bound(&params, noon()))
+        };
+        let key = |op: CmpOp, v: i64| {
+            Some(FilterExpr::Or(vec![
+                FilterExpr::compare("__key_time_p", op, Scalar::Int(v)),
+                FilterExpr::IsNull("__key_time_p".into()),
+            ]))
+        };
+        // 23:00-05:00 is 28 h UTC, past midnight: no modulo.
+        let late = call("time", vec![string("23:00-05:00")]);
+        for (op, cmp) in [
+            (BinaryOp::Eq, CmpOp::Eq),
+            (BinaryOp::Lt, CmpOp::Lt),
+            (BinaryOp::LtEq, CmpOp::LtEq),
+            (BinaryOp::Gt, CmpOp::Gt),
+            (BinaryOp::GtEq, CmpOp::GtEq),
+        ] {
+            assert_eq!(
+                bound(compare(property(), op, late.clone())),
+                key(cmp, 28 * 3_600_000_000_000),
+                "{op:?}"
+            );
+        }
+        // `+14:00` midnight is 14 h before midnight UTC.
+        assert_eq!(
+            bound(compare(
+                property(),
+                BinaryOp::Gt,
+                Expr::Parameter("t".into())
+            )),
+            key(CmpOp::Gt, -14 * 3_600_000_000_000)
+        );
+        for e in [
+            compare(property(), BinaryOp::NotEq, late.clone()),
+            compare(
+                property(),
+                BinaryOp::Lt,
+                call("localtime", vec![string("12:00")]),
+            ),
+            compare(property(), BinaryOp::Eq, string("12:00")),
+            compare(
+                property(),
+                BinaryOp::Eq,
+                call("datetime", vec![string("2026-01-01T12:00:00Z")]),
+            ),
+        ] {
+            assert_eq!(bound(e.clone()), None, "{e:?}");
+        }
+    }
+
+    /// `n.m.k op c` is a keyed predicate on the property `m.k`, bounded by
+    /// `c` when it is of the map's value type.
+    #[test]
+    fn map_path_bounds_need_a_constant_of_the_value_type() {
+        use uni_common::core::schema::DataType;
+        let kind = |value: DataType| KeyKind::MapPath {
+            path: vec!["k".into()],
+            value,
+        };
+        // `n.p.k`.
+        let path = || {
+            Expr::Property(
+                Box::new(Expr::Property(
+                    Box::new(Expr::Variable("n".into())),
+                    "p".into(),
+                )),
+                "k".into(),
+            )
+        };
+        for (value, operand, want) in [
+            (
+                DataType::Int32,
+                Expr::Literal(CypherLiteral::Integer(5)),
+                Some(Scalar::Int(5)),
+            ),
+            (
+                DataType::Int64,
+                Expr::Literal(CypherLiteral::Float(5.5)),
+                None,
+            ),
+            (DataType::Int64, string("5"), None),
+            (
+                DataType::Float32,
+                Expr::Literal(CypherLiteral::Integer(2)),
+                Some(Scalar::Float(2.0)),
+            ),
+            (
+                DataType::Float64,
+                Expr::Literal(CypherLiteral::Float(-0.0)),
+                Some(Scalar::Float(0.0)),
+            ),
+            (
+                DataType::Float64,
+                Expr::Literal(CypherLiteral::Float(f64::NAN)),
+                None,
+            ),
+            (DataType::String, string("x"), Some(Scalar::Str("x".into()))),
+            (
+                DataType::String,
+                Expr::Literal(CypherLiteral::Integer(1)),
+                None,
+            ),
+        ] {
+            let ty = DataType::Map(Box::new(DataType::String), Box::new(value.clone()));
+            let mut schema = keyed_schema(kind(value.clone()), ty);
+            // The index's property is the dotted path.
+            if let Some(IndexDefinition::Scalar(cfg)) = schema.indexes.first_mut() {
+                cfg.properties = vec!["p.k".into()];
+            }
+            let column = IndexKey::new(kind(value.clone()), "p").columns[0].clone();
+            let analyzer = IndexAwareAnalyzer::new(&schema);
+            let keyed = analyzer
+                .analyze(&compare(path(), BinaryOp::LtEq, operand.clone()), "n", 1)
+                .keyed_predicates;
+            assert_eq!(keyed.len(), 1, "{value:?} {operand:?}");
+            assert_eq!(keyed[0].property, "p.k");
+            assert_eq!(
+                keyed[0].lance_bound(&HashMap::new(), noon()),
+                want.map(|s| FilterExpr::Or(vec![
+                    FilterExpr::compare(column.clone(), CmpOp::LtEq, s),
+                    FilterExpr::IsNull(column.clone()),
+                ])),
+                "{value:?} {operand:?}"
+            );
+            // The map itself is not a key path.
+            let whole = Expr::Property(Box::new(Expr::Variable("n".into())), "p".into());
+            assert!(
+                analyzer
+                    .analyze(&compare(whole, BinaryOp::Eq, operand), "n", 1)
+                    .keyed_predicates
+                    .is_empty()
+            );
+        }
+    }
+
+    /// `withinBBox` and `distance` are recognized with constant `point()`
+    /// literals or parameters, `distance` in both argument orders and both
+    /// comparison orientations; `>`, `=`, other-CRS and row-dependent
+    /// operands are not bounded.
+    #[test]
+    fn point_predicates_are_recognized() {
+        use uni_common::core::schema::{DataType, PointType};
+        let schema = keyed_schema(
+            KeyKind::PointCoords {
+                geographic: false,
+                three_d: false,
+            },
+            DataType::Point(PointType::Cartesian2D),
+        );
+        let analyzer = IndexAwareAnalyzer::new(&schema);
+        let bound = |e: Expr, params: &HashMap<String, Value>| {
+            let found = analyzer.analyze(&e, "n", 1).keyed_predicates;
+            assert!(found.len() <= 1);
+            found.first().and_then(|k| k.key_bound(params, noon()))
+        };
+        let none = HashMap::new();
+        let bbox = call(
+            "point.withinBBox",
+            vec![property(), xy(0.0, -0.0), xy(2.0, 3.0)],
+        );
+        let want = KeyBound::and([
+            KeyBound::cmp(0, CmpOp::GtEq, KeyValue::Float(0.0)),
+            KeyBound::cmp(0, CmpOp::LtEq, KeyValue::Float(2.0)),
+            KeyBound::cmp(1, CmpOp::GtEq, KeyValue::Float(0.0)),
+            KeyBound::cmp(1, CmpOp::LtEq, KeyValue::Float(3.0)),
+        ]);
+        assert_eq!(bound(bbox, &none), Some(want.clone()));
+        // Corners as parameters: a map, as `point()` returns it.
+        let mut params = HashMap::new();
+        for (name, x, y) in [("ll", 0.0, 0.0), ("ur", 2.0, 3.0)] {
+            params.insert(
+                name.to_string(),
+                crate::spatial::eval_spatial_function(
+                    "POINT",
+                    &[Value::Map(HashMap::from([
+                        ("x".to_string(), Value::Float(x)),
+                        ("y".to_string(), Value::Float(y)),
+                    ]))],
+                )
+                .unwrap(),
+            );
+        }
+        let by_param = call(
+            "point.withinBBox",
+            vec![
+                property(),
+                Expr::Parameter("ll".into()),
+                Expr::Parameter("ur".into()),
+            ],
+        );
+        assert_eq!(bound(by_param, &params), Some(want));
+
+        let d = |a: Expr, b: Expr| call("distance", vec![a, b]);
+        for e in [
+            cmp(d(property(), xy(1.0, 1.0)), BinaryOp::Lt, float(2.0)),
+            cmp(d(xy(1.0, 1.0), property()), BinaryOp::LtEq, float(2.0)),
+            cmp(float(2.0), BinaryOp::Gt, d(property(), xy(1.0, 1.0))),
+            cmp(
+                Expr::Literal(CypherLiteral::Integer(2)),
+                BinaryOp::GtEq,
+                d(xy(1.0, 1.0), property()),
+            ),
+        ] {
+            let b = bound(e.clone(), &none).unwrap_or_else(|| panic!("{e:?}"));
+            let admits =
+                |x: f64, y: f64| b.admits(&[Some(KeyValue::Float(x)), Some(KeyValue::Float(y))]);
+            assert!(
+                admits(-1.0, 3.0) && admits(3.0, -1.0) && !admits(3.1, 1.0),
+                "{b:?}"
+            );
+        }
+        let center_param = cmp(
+            d(property(), Expr::Parameter("c".into())),
+            BinaryOp::Lt,
+            Expr::Parameter("r".into()),
+        );
+        let mut params = HashMap::new();
+        params.insert("c".to_string(), params_point(1.0, 1.0));
+        params.insert("r".to_string(), Value::Int(2));
+        assert!(bound(center_param.clone(), &params).is_some());
+        params.insert("r".to_string(), Value::String("2".into()));
+        assert_eq!(bound(center_param, &params), None);
+
+        // Not bounded: the complement of a disk, `=`, a point of another
+        // CRS, a row-dependent center, and point equality.
+        let geo = call(
+            "point",
+            vec![Expr::Map(vec![
+                ("latitude".into(), float(1.0)),
+                ("longitude".into(), float(1.0)),
+            ])],
+        );
+        for e in [
+            cmp(d(property(), xy(1.0, 1.0)), BinaryOp::Gt, float(2.0)),
+            cmp(d(property(), xy(1.0, 1.0)), BinaryOp::Eq, float(2.0)),
+            cmp(d(property(), geo.clone()), BinaryOp::Lt, float(2.0)),
+            call("point.withinBBox", vec![property(), geo.clone(), geo]),
+            cmp(d(property(), property()), BinaryOp::Lt, float(2.0)),
+            cmp(property(), BinaryOp::Eq, xy(1.0, 1.0)),
+            cmp(property(), BinaryOp::Lt, xy(1.0, 1.0)),
+        ] {
+            assert_eq!(bound(e.clone(), &none), None, "{e:?}");
+        }
+        // The spatial forms never bound a key of another kind.
+        let dt = keyed_schema(KeyKind::DateTimeInstant, DataType::DateTime);
+        let e = cmp(d(property(), xy(1.0, 1.0)), BinaryOp::Lt, float(2.0));
+        assert!(
+            IndexAwareAnalyzer::new(&dt)
+                .analyze(&e, "n", 1)
+                .keyed_predicates
+                .is_empty()
+        );
+    }
+
+    fn params_point(x: f64, y: f64) -> Value {
+        crate::spatial::eval_spatial_function(
+            "POINT",
+            &[Value::Map(HashMap::from([
+                ("x".to_string(), Value::Float(x)),
+                ("y".to_string(), Value::Float(y)),
+            ]))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn point_constructor_folds_on_constant_maps_only() {
+        let none = HashMap::new();
+        let folded = fold_constant_operand(&xy(1.0, 2.0), &none, noon()).unwrap();
+        assert_eq!(folded, params_point(1.0, 2.0));
+        assert!(is_row_independent(&xy(1.0, 2.0)));
+        // A row-dependent map, a non-map argument, a raising call.
+        let row = call(
+            "point",
+            vec![Expr::Map(vec![
+                ("x".into(), property()),
+                ("y".into(), float(1.0)),
+            ])],
+        );
+        assert!(!is_row_independent(&row));
+        assert_eq!(fold_constant_operand(&row, &none, noon()), None);
+        let bad = call("point", vec![Expr::Map(vec![("q".into(), float(1.0))])]);
+        assert_eq!(fold_constant_operand(&bad, &none, noon()), None);
+        assert!(!is_row_independent(&call("point", vec![float(1.0)])));
+        // Oriented like a temporal constant: `point(…) = n.p` → `n.p = point(…)`.
+        let e = orient_property_comparisons(cmp(xy(1.0, 2.0), BinaryOp::Eq, property()));
+        assert!(
+            matches!(e, Expr::BinaryOp { ref left, .. } if matches!(left.as_ref(), Expr::Property(..)))
+        );
     }
 }

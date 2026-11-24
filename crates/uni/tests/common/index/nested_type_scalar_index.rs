@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! A scalar index on a property stored as a nested Arrow column (TIME,
-//! points, lists, maps, vectors) cannot be built: Lance's BTree and Bitmap
+//! A scalar index on a property stored as a nested Arrow column (lists,
+//! points, whole maps, vectors) cannot be built: Lance's BTree and Bitmap
 //! refuse nested fields (#356). A new one is refused where it is declared; one
 //! already in a catalog is recorded `Failed`, is not retried at every flush,
 //! and a rebuild does not report it `Online`.
 //!
-//! DATETIME is the exception: it is indexed through a derived key column (its
-//! instant), so its index builds `Online` and serves predicates (see
-//! `index_keys`).
+//! DATETIME and TIME are the exception: each is indexed through a derived
+//! key column (its instant, its UTC time), so its index builds `Online` and
+//! serves predicates (see `index_keys`).
 //!
 //! Run with:
 //!   cargo nextest run -p uni-db --test integration -E 'test(nested_type_scalar_index)'
@@ -39,7 +39,7 @@ async fn nested_type_scalar_index_is_refused_in_cypher_ddl() -> Result<()> {
     let db = Uni::in_memory().build().await?;
     run(
         &db,
-        "CREATE LABEL Message (id INT, ts DATETIME, at TIME, tags LIST<INT>)",
+        "CREATE LABEL Message (id INT, ts DATETIME, at LIST<STRING>, tags LIST<INT>)",
     )
     .await?;
     for prop in ["at", "tags"] {
@@ -86,7 +86,11 @@ async fn nested_type_scalar_index_is_refused_in_cypher_ddl() -> Result<()> {
 #[tokio::test]
 async fn nested_type_scalar_index_is_refused_by_the_procedure() -> Result<()> {
     let db = Uni::in_memory().build().await?;
-    run(&db, "CREATE LABEL Message (id INT, at TIME, ts DATETIME)").await?;
+    run(
+        &db,
+        "CREATE LABEL Message (id INT, at LIST<INT>, ts DATETIME)",
+    )
+    .await?;
     let err = run(
         &db,
         "CALL uni.schema.createIndex('Message', 'at', {type: 'BTREE'})",
@@ -108,7 +112,7 @@ async fn nested_type_scalar_index_is_refused_by_the_schema_builder() -> Result<(
     let err = db
         .schema()
         .label("Message")
-        .property("at", DataType::Time)
+        .property("at", DataType::List(Box::new(DataType::Int64)))
         .index("at", IndexType::Scalar(ScalarType::BTree))
         .apply()
         .await
@@ -150,15 +154,15 @@ async fn nested_type_scalar_index_is_refused_by_the_schema_builder() -> Result<(
 }
 
 /// An index already in the catalog (here declared while the property was
-/// untyped, then typed TIME) is recorded `Failed` at its first build, is
+/// untyped, then typed LIST<INT>) is recorded `Failed` at its first build, is
 /// not rebuilt at every later flush, and stays `Failed` through a rebuild.
 #[tokio::test]
 async fn nested_type_scalar_index_in_a_catalog_is_failed_not_retried() -> Result<()> {
     let db = Uni::in_memory().build().await?;
     run(&db, "CREATE LABEL Message (id INT)").await?;
     run(&db, "CREATE INDEX idx_ts FOR (m:Message) ON (m.ts)").await?;
-    run(&db, "ALTER LABEL Message ADD PROPERTY ts TIME").await?;
-    run(&db, "CREATE (:Message {id: 1, ts: time('12:00:00Z')})").await?;
+    run(&db, "ALTER LABEL Message ADD PROPERTY ts LIST<INT>").await?;
+    run(&db, "CREATE (:Message {id: 1, ts: [12]})").await?;
     db.flush().await?;
     assert_eq!(
         status(&db, "Message", "idx_ts").await?,
@@ -167,11 +171,7 @@ async fn nested_type_scalar_index_in_a_catalog_is_failed_not_retried() -> Result
 
     let version = db.storage().schema_manager().schema().schema_version;
     for i in 2..5 {
-        run(
-            &db,
-            &format!("CREATE (:Message {{id: {i}, ts: time('12:00:00Z')}})"),
-        )
-        .await?;
+        run(&db, &format!("CREATE (:Message {{id: {i}, ts: [12]}})")).await?;
         db.flush().await?;
     }
     assert_eq!(
@@ -208,7 +208,7 @@ async fn nested_type_scalar_index_in_a_catalog_is_failed_not_retried() -> Result
     // Queries on the property still answer, by scanning.
     let rows = db
         .session()
-        .query("MATCH (m:Message) WHERE m.ts > time('11:00:00Z') RETURN m.id AS id")
+        .query("MATCH (m:Message) WHERE 12 IN m.ts RETURN m.id AS id")
         .await?;
     assert_eq!(rows.len(), 4);
     Ok(())

@@ -12070,14 +12070,32 @@ impl QueryPlanner {
     /// For simple property: u.email -> "email"
     /// For expressions: lower(u.email) -> "lower(email)"
     fn normalize_expression_for_storage(expr: &Expr) -> String {
-        match expr {
-            Expr::Property(base, prop) if matches!(**base, Expr::Variable(_)) => prop.clone(),
-            _ => {
-                // Serialize expression and strip variable prefix
-                let expr_str = expr.to_string_repr();
-                Self::strip_variable_prefix(&expr_str)
+        // A property chain on the variable, `n.m.k` -> "m.k": the dotted
+        // path in full (stripping each `x.` prefix would turn `n.m.a.b`
+        // into "m.b").
+        fn property_path(expr: &Expr) -> Option<String> {
+            match expr {
+                Expr::Property(base, prop) => match base.as_ref() {
+                    Expr::Variable(_) => Some(prop.clone()),
+                    inner => Some(format!("{}.{prop}", property_path(inner)?)),
+                },
+                _ => None,
             }
         }
+        property_path(expr).unwrap_or_else(|| {
+            // Serialize expression and strip variable prefix
+            let expr_str = Self::strip_variable_prefix(&expr.to_string_repr());
+            // Anything but a property chain is an expression index. One
+            // without a call of its own (`n.m.a + 1` → "m.a + 1") is
+            // parenthesized, which is how the executor tells an expression
+            // from a property name; unwrapped, it read as a key path into the
+            // map entry named `a + 1`.
+            if expr_str.contains('(') && expr_str.contains(')') {
+                expr_str
+            } else {
+                format!("({expr_str})")
+            }
+        })
     }
 
     /// Strip variable references like "u.prop" from expression strings
