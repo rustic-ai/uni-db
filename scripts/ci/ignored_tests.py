@@ -69,8 +69,8 @@ DEDICATED_LANES: list[tuple[str, str, str]] = [
         "binary_id(uni-db::integration)",
     ),
     (
-        ".github/workflows/nightly.yml",  # cloud (MinIO, Azurite, fake-gcs-server)
-        "test(/^emulator_smoke::/)",
+        ".github/workflows/nightly.yml",  # cloud (LocalStack S3, Azurite)
+        "test(/^emulator_smoke::/) and not test(fake_gcs_store_round_trips)",
         "binary_id(uni-db::integration)",
     ),
     (
@@ -103,6 +103,11 @@ ON_DEMAND: dict[str, str] = {
     "similarity_rule_does_not_pair_every_mention_with_every_entity": (
         "repro for #335 (a Locy similarity rule reads every pair), so it "
         "fails until a rule can reach the vector index; kept as the specification"
+    ),
+    "uni-db::integration emulator_smoke::fake_gcs_store_round_trips": (
+        "needs a GCS endpoint that takes object_store's XML-API PUT: "
+        "fake-gcs-server rejects it (\"invalid uploadType\", every release "
+        "through 1.56.1); run it against a real bucket via UNI_FAKE_GCS_ENDPOINT"
     ),
     "uni-db::reranker_integration test_real_onnx_cross_encoder_reranks_by_relevance": (
         "its model is served only through a xet-bridge redirect that hf-hub 0.5 "

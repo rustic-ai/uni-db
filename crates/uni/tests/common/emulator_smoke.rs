@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! Smoke tests against an S3 emulator, Azurite and fake-gcs-server.
+//! Smoke tests against an S3 emulator, Azurite and a GCS endpoint.
 //!
 //! Each opens a store remote-only under a fresh prefix, writes, flushes,
 //! reopens, forks, and backs it up to a second prefix of the same bucket,
@@ -14,7 +14,14 @@
 //! |---|---|
 //! | S3 (LocalStack in CI) | `UNI_S3_ENDPOINT` (`http://127.0.0.1:4566`), `UNI_S3_BUCKET` (`uni-test`), keys `UNI_S3_ACCESS_KEY_ID` / `UNI_S3_SECRET_ACCESS_KEY` (`test`) |
 //! | Azurite | `UNI_AZURITE_ENDPOINT` (`http://127.0.0.1:10000/devstoreaccount1`), `UNI_AZURITE_CONTAINER` (`uni-test`) |
-//! | fake-gcs-server | `UNI_FAKE_GCS_ENDPOINT` (`http://127.0.0.1:4443`), `UNI_FAKE_GCS_BUCKET` (`uni-test`) |
+//! | GCS (on demand) | `UNI_FAKE_GCS_ENDPOINT` (`http://127.0.0.1:4443`), `UNI_FAKE_GCS_BUCKET` (`uni-test`) |
+//!
+//! The GCS test does not run in CI. fake-gcs-server, the usual GCS emulator,
+//! rejects the XML-API object PUT that `object_store` sends for every write
+//! (`400 invalid uploadType`, every release through 1.56.1): it accepts a PUT
+//! only with an `uploadType` or a signed URL. Run it by hand against a bucket
+//! that takes those writes; it is registered in `ON_DEMAND` in
+//! `scripts/ci/ignored_tests.py`.
 
 use std::collections::BTreeMap;
 
@@ -150,7 +157,7 @@ async fn azurite_store_round_trips() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "Requires fake-gcs-server; see the module docs"]
+#[ignore = "Requires a GCS endpoint that takes XML-API PUTs; see the module docs"]
 async fn fake_gcs_store_round_trips() -> Result<()> {
     let endpoint = var("UNI_FAKE_GCS_ENDPOINT", "http://127.0.0.1:4443");
     let bucket = var("UNI_FAKE_GCS_BUCKET", "uni-test");

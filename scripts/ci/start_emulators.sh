@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2024-2026 Dragonscale Team
 #
-# Starts Azurite and fake-gcs-server on their default ports and creates the
-# `uni-test` bucket (or container) in each, and in the S3 emulator, for the
+# Starts Azurite on its default port and creates the `uni-test` container in
+# it, and the `uni-test` bucket in the S3 emulator, for the
 # `emulator_smoke` tests (crates/uni/tests/common/emulator_smoke.rs). Used by
 # the `cloud` jobs in .github/workflows/ci.yml and nightly.yml; runs the same
 # way locally.
@@ -15,19 +15,22 @@
 # binaries are no longer published (Docker Hub, quay.io and dl.min.io all
 # refuse them).
 #
+# No GCS emulator: fake-gcs-server rejects the XML-API object PUT that
+# object_store sends ("invalid uploadType", every release through 1.56.1), so
+# the GCS smoke test runs on demand against a real bucket.
+#
 #   scripts/ci/start_emulators.sh            # start them
 #   scripts/ci/start_emulators.sh stop       # remove the containers
 set -euo pipefail
 
 S3_ENDPOINT="${UNI_S3_ENDPOINT:-http://127.0.0.1:4566}"
 AZURITE_IMAGE="mcr.microsoft.com/azure-storage/azurite:3.34.0"
-FAKE_GCS_IMAGE="fsouza/fake-gcs-server:1.52.2"
 BUCKET="uni-test"
 # Azurite's well-known development account and key.
 AZURITE_CONN="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
 
 stop() {
-  docker rm -f uni-azurite uni-fake-gcs >/dev/null 2>&1 || true
+  docker rm -f uni-azurite >/dev/null 2>&1 || true
 }
 
 if [[ "${1:-}" == "stop" ]]; then
@@ -50,8 +53,6 @@ wait_for() {
 
 docker run -d --name uni-azurite -p 127.0.0.1:10000:10000 "$AZURITE_IMAGE" \
   azurite-blob --blobHost 0.0.0.0 --loose >/dev/null
-docker run -d --name uni-fake-gcs -p 127.0.0.1:4443:4443 "$FAKE_GCS_IMAGE" \
-  -scheme http -port 4443 -public-host 127.0.0.1:4443 >/dev/null
 
 wait_for "the S3 emulator" "$S3_ENDPOINT"
 # A path-style PUT creates the bucket; 409 means it exists. LocalStack takes
@@ -77,14 +78,6 @@ except ResourceExistsError:
     pass
 PY
 
-wait_for fake-gcs-server http://127.0.0.1:4443/storage/v1/b
-# 200 creates the bucket, 409 means it exists; anything else fails.
-status=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4443/storage/v1/b \
-  -H 'Content-Type: application/json' -d "{\"name\":\"$BUCKET\"}")
-if [[ "$status" != "200" && "$status" != "409" ]]; then
-  echo "fake-gcs-server: creating bucket '$BUCKET' returned HTTP $status" >&2
-  exit 1
-fi
 rm -rf "$(dirname "$VENV")"
 
-echo "S3 ($S3_ENDPOINT), Azurite and fake-gcs-server are up with bucket '$BUCKET'."
+echo "S3 ($S3_ENDPOINT) and Azurite are up with bucket '$BUCKET'."

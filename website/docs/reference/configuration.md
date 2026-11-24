@@ -620,7 +620,8 @@ let config = CloudStorageConfig::Gcs {
     service_account_key: None,
 };
 
-// fake-gcs-server or another emulator
+// Another endpoint (fake-gcs-server reads but rejects object_store's
+// writes, so it cannot host a store)
 let db = Uni::open("gs://my-gcs-bucket/data")
     .storage_option("google_base_url", "http://localhost:4443")
     .build()
