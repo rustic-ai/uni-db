@@ -1,5 +1,7 @@
 # Index keys: implementation proposal (2026-11-23)
 
+**Status:** implemented, P1–P5 (commits `b4893c31`, `1eaf4bb8`, `b447ed49`).
+
 Implements the design in [index_keys_2026_11_23.md](index_keys_2026_11_23.md):
 scalar indexes on DATETIME, TIME, BTIC, typed MAP paths and POINT through
 derived **key columns**, and a clear refusal, naming the right index kind, for

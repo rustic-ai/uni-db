@@ -645,6 +645,8 @@ CREATE INDEX paper_doi FOR (p:Paper) ON (p.doi)
 
 DDL selects the vector algorithm only; for metric choice or tuning, use the Rust/Python schema builders.
 
+Scalar indexes also work on `DATETIME`, `TIME`, `BTIC` and point properties, and on a key of a typed map (`ON (p.scores.recall)`); list, vector and JSON properties take their own index kinds. See [Indexing — Property Types](../concepts/indexing.md#property-types).
+
 ### Index Selection Guidelines
 
 | Query Pattern | Index Type | Example |

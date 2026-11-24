@@ -1,5 +1,7 @@
 # Index keys: scalar indexes for nested and opaque property types (2026-11-23)
 
+**Status:** implemented (commits `b4893c31`, `1eaf4bb8`). The Black Book section *Index keys* describes the shipped behaviour.
+
 Follows #356. A BTree, Hash or Bitmap index on a property stored as a nested
 Arrow column (DATETIME, TIME, POINT, MAP, LIST, VECTOR) cannot be built, and one
 on an opaque column (BTIC, DURATION, JSON) builds but no predicate can use it.
