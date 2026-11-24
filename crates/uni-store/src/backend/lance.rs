@@ -579,8 +579,15 @@ impl StorageBackend for LanceDbBackend {
         if let Some(entry) = self.existence_cache.get(name) {
             return Ok(*entry);
         }
-        let tables = self.table_names().await?;
-        let exists = tables.iter().any(|t| t == name);
+        // The one table's committed versions, as `table_names` checks each
+        // table. Listing every table to answer for one cost a round trip per
+        // table in the store on an object store, on the first write to each
+        // table a flush touches (#355).
+        let exists = self
+            .directory
+            .is_committed(name)
+            .await
+            .map_err(|e| anyhow!("Failed to check table '{name}': {e:#}"))?;
         // entry().or_insert preserves a value written by a concurrent
         // create_table/drop_table during our `table_names` await, which
         // is the authoritative state. Plain `insert` would race and
@@ -2186,6 +2193,45 @@ mod tests {
     use arrow_array::{Int64Array, UInt64Array};
     use arrow_schema::{DataType, Field};
     use tempfile::TempDir;
+
+    /// `table_exists` looks at the one table it is asked about. It used to list
+    /// every table in the store and check each one's versions in turn, a round
+    /// trip per table on an object store (#355), and so also failed on a
+    /// sibling it could not read.
+    #[tokio::test]
+    async fn table_exists_reads_only_the_table_asked_about() {
+        let tmp = TempDir::new().unwrap();
+        let uri = tmp.path().to_str().unwrap().to_string();
+        let backend = LanceDbBackend::connect(&uri, None).await.unwrap();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "v",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1i64]))]).unwrap();
+        backend.create_table("present", vec![batch]).await.unwrap();
+        // A sibling whose `_versions` cannot be listed.
+        let broken = tmp.path().join("broken.lance/_versions");
+        std::fs::create_dir_all(&broken).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        // Data with no manifest is not a table (#72).
+        std::fs::create_dir_all(tmp.path().join("uncommitted.lance/data")).unwrap();
+
+        let fresh = LanceDbBackend::connect(&uri, None).await.unwrap();
+        assert!(fresh.table_exists("present").await.unwrap());
+        assert!(!fresh.table_exists("missing").await.unwrap());
+        assert!(!fresh.table_exists("uncommitted").await.unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
 
     /// Pins Lance's cancelled-runtime defect: the scan errors, panics on a
     /// cancelled SpawnedTask, or hangs during cancellation/read-back. Probe

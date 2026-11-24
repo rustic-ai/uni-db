@@ -695,9 +695,12 @@ pub struct UniConfig {
     /// memory growth. Default: 2.
     pub max_pending_flushes: usize,
 
-    /// Maximum wall-clock time an async L0→L1 stream phase may run before the
+    /// Maximum time an async L0→L1 stream phase may go *without a table
+    /// commit* (by it, or by the stream it is waiting behind) before the
     /// flush coordinator converts it into a data-safe flush *failure* (issue
-    /// #132). A stalled sparse/multi-vector Lance read-modify-write would
+    /// #132). Each commit resets it, so a flush to a slow object store that
+    /// keeps committing tables runs on (#355); in all a stream may run
+    /// `STREAM_TIMEOUT_CAP_FACTOR` (15) times this. A stalled sparse/multi-vector Lance read-modify-write would
     /// otherwise never submit its rotate-seq, wedging the finalizer's
     /// consecutive-seq pipeline and — via back-pressure permit saturation —
     /// parking every later commit forever on `flush_lock`. On timeout the old
