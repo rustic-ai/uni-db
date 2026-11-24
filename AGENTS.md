@@ -136,6 +136,24 @@
   never stored in L0** (`VertexDataset::build_record_batch_with_timestamps`),
   so the content UID hashes the row as written. Backfill it in storage before
   the catalog registers the column.
+- **Index key columns (`__key_*`) are derived, like `__jfts_`.** They are
+  computed at every label-table batch build (`index_keys::derive`), never
+  stored in L0, never hashed into the content UID, and never read back as
+  properties. Their storage is filled before the catalog registers them, and
+  a fork's branch is widened with `AllNulls`. Never rewrite a table to fill
+  them inside a flush or on a fork: upgrades run at writable primary open
+  (`upgrade_keyed_indexes`).
+- **A key bound is a superset and goes to the Lance SQL only.** Every bound
+  admits NULL keys (`(bound) OR col IS NULL`), since unflushed or
+  undeterminable rows have none; the original predicate stays as the scan's
+  Arrow filter and in the `Filter` above. No key bound on a pinned view (a
+  transaction's included) or a fork. A key may admit more rows than the
+  predicate, never fewer.
+- **An index name names one index.** `Schema::scalar_index_name_clash` refuses
+  a scalar index whose name another index holds with another label or
+  property list; re-declaring the same index is not a clash. Check "already
+  recorded" with `records_scalar_index` (name, label and properties), never by
+  name alone: a name-only check let a refused type in as "recorded".
 - **An update of a flushed vertex keeps its stored `created_at`**:
   `Writer::write_vertex_row` carries it into the L0 row (batched for SET/REMOVE
   through `carry_stored_created_at`). Do not stamp an update with `now` when no

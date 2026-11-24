@@ -932,7 +932,7 @@ impl IndexManager {
     ///
     /// A property whose type is indexed through a key (see
     /// [`uni_common::core::schema::IndexKey`]) is built by
-    /// [`Self::create_keyed_scalar_index`].
+    /// `create_keyed_scalar_index`.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
     pub async fn create_scalar_index(&self, config: ScalarIndexConfig) -> Result<()> {
@@ -1497,7 +1497,7 @@ impl IndexManager {
     }
 
     /// Upgrade every scalar index whose key needs a table rewrite (see
-    /// [`Self::needs_key_upgrade`]): re-derive the key over the label's
+    /// `needs_key_upgrade`): re-derive the key over the label's
     /// flushed rows, build it, and restore the label's other indexes, which
     /// the rewrite dropped. Returns the names of the indexes upgraded.
     ///
@@ -1938,7 +1938,7 @@ impl IndexManager {
     /// 1. every rewrite the label's indexes need (a MUVERA FDE, a JSON
     ///    full-text index's text, a keyed index's key), each followed at once
     ///    by its column's registration, storage first
-    ///    ([`Self::fill_derived_columns`]);
+    ///    (`fill_derived_columns`);
     /// 2. the label's default indexes (`_vid`, `_uid`, `ext_id`);
     /// 3. every declared index, with no table rewrite.
     ///

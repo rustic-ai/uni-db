@@ -1815,7 +1815,7 @@ fn foldable_temporal_function(name: &str) -> Option<String> {
 
 /// The value of `expr` when it is constant for the statement: a literal, a
 /// resolved parameter, a list or map of those, or a temporal constructor
-/// called on constant arguments (see [`foldable_temporal_function`]), or
+/// called on constant arguments (see `foldable_temporal_function`), or
 /// `point(m)` on a constant map (see `is_point_constructor`).
 ///
 /// A no-argument constructor reads the statement clock, `statement_time`,

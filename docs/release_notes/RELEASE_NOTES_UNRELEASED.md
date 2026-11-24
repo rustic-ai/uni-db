@@ -16,6 +16,8 @@ Add new changes here.
 ## Fixes
 
 - **Indexes:** an index on a `DATETIME`, `BTIC` or `TIME` property declared through `uni.schema.createIndex` before the label has rows is built at the first flush; it was left unbuilt until the next writable open.
+- **Indexes:** `CREATE INDEX i …` whose name `i` is already an index on another label or property is refused; it replaced that index in the catalog, and a refused type (`DURATION`, `JSON`) slipped through as "already recorded".
+- **Indexes:** `CREATE INDEX … ON (n.m.a + 1)` is an expression index; it was taken as a key path into the map entry named `a + 1`. A quoted key such as `` n.m.`content-type` `` is a key path.
 - **Indexes:** `CREATE INDEX … ON (n.m.a.b)` is recorded on `m.a.b` (and refused for a typed map); it was recorded on `m.b`.
 
 - **Indexes:** a row of a label with a JSON full-text index keeps its content UID through compaction and through a `SET` of another property after a flush; the index's text was hashed into it. Existing rows get the UID a fresh write computes at their next rewrite.

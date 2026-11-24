@@ -7,13 +7,13 @@
 //! take a Lance scalar index (a nested or opaque Arrow column) through flat
 //! *key columns* derived from it. The columns are filled at batch build
 //! (`VertexDataset::build_record_batch_with_timestamps`, through
-//! [`crate::storage::vertex::derived_rows`]) and by the backfill an index
+//! `vertex::derived_rows`) and by the backfill an index
 //! creation runs; they are never stored in L0 and never hashed into the
 //! content UID.
 //!
 //! The key of a stored value must agree with how `WHERE` compares the stored
 //! value, so that a bound on the key admits every row the predicate admits.
-//! [`derive`] gives the key of a stored value; [`constant_key`] the key of a
+//! [`derive`](fn@derive) gives the key of a stored value; [`constant_key`] the key of a
 //! query constant, which is stricter: a constant of another type is never
 //! turned into a bound.
 
@@ -226,7 +226,7 @@ pub fn point_coords(kind: &KeyKind, value: &Value) -> Option<(f64, f64)> {
 ///
 /// A `localdatetime` constant against a DATETIME property is incomparable in
 /// `WHERE`, so it has no key, unlike a stored `localdatetime` (see
-/// [`derive`]). Likewise a BTIC literal *string* is stored as an interval but
+/// [`derive`](fn@derive)). Likewise a BTIC literal *string* is stored as an interval but
 /// is not one as a constant. A point has no constant key: point `=` and
 /// ordering are never served; its spatial predicates are bounded in
 /// `uni_query_functions::key_bounds`.

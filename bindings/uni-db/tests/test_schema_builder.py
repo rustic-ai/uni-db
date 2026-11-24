@@ -204,14 +204,33 @@ class TestDataTypes:
 
 
 def test_scalar_index_on_a_nested_type_is_refused():
-    """A BTree on a DATETIME (a nested column) can never build, so it is refused."""
+    """A BTree no predicate could use is refused: DURATION is not ordered."""
     db = uni_db.Uni.temporary()
-    with pytest.raises(Exception, match="ts"):
+    with pytest.raises(Exception, match="took"):
         (
             db.schema()
             .label("Message")
-            .property("ts", "datetime")
-            .index("ts", "btree")
+            .property("took", "duration")
+            .index("took", "btree")
             .apply()
         )
     db.schema().label("Event").property("n", "int").index("n", "btree").apply()
+
+
+def test_scalar_index_on_a_datetime_builds():
+    """A DATETIME BTree is built on a hidden key column and serves ranges."""
+    db = uni_db.Uni.temporary()
+    db.schema().label("Message").property("ts", "datetime").index("ts", "btree").apply()
+    session = db.session()
+    tx = session.tx()
+    tx.execute(
+        "CREATE (:Message {ts: datetime('2026-01-01T00:00:00Z')}), "
+        "(:Message {ts: datetime('2026-06-01T00:00:00Z')})"
+    )
+    tx.commit()
+    db.flush()
+    rows = session.query(
+        "MATCH (m:Message) WHERE m.ts > datetime('2026-03-01T00:00:00Z') "
+        "RETURN count(m) AS n"
+    )
+    assert rows[0]["n"] == 1
